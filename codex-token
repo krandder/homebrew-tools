@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# Extract Codex CLI OAuth credentials - outputs tokens JSON
+
+AUTH_FILE="${CODEX_CONFIG_DIR:-$HOME/.codex}/auth.json"
+
+# 1. Check environment variable
+if [[ -n "$OPENAI_API_KEY" ]]; then
+    echo '{"access_token":"'$OPENAI_API_KEY'"}'
+    exit 0
+fi
+
+# 2. Try credentials file
+if [[ -f "$AUTH_FILE" ]]; then
+    # Extract tokens object - handle nested JSON
+    # First try to get just the tokens block
+    TOKENS_BLOCK=$(sed -n '/"tokens":/,/^[[:space:]]*}/p' "$AUTH_FILE" | sed '1s/.*"tokens"://' | sed '$s/,$//')
+    if [[ -n "$TOKENS_BLOCK" ]] && [[ "$TOKENS_BLOCK" != "null" ]]; then
+        echo "$TOKENS_BLOCK"
+        exit 0
+    fi
+    
+    # Fallback: extract individual fields
+    ACCESS=$(sed -n 's/.*"access_token":[[:space:]]*"\([^"]*\)".*/\1/p' "$AUTH_FILE")
+    REFRESH=$(sed -n 's/.*"refresh_token":[[:space:]]*"\([^"]*\)".*/\1/p' "$AUTH_FILE")
+    ACCOUNT=$(sed -n 's/.*"account_id":[[:space:]]*"\([^"]*\)".*/\1/p' "$AUTH_FILE")
+    
+    if [[ -n "$ACCESS" ]]; then
+        JSON="{\"access_token\":\"$ACCESS\""
+        [[ -n "$REFRESH" ]] && JSON="$JSON,\"refresh_token\":\"$REFRESH\""
+        [[ -n "$ACCOUNT" ]] && JSON="$JSON,\"account_id\":\"$ACCOUNT\""
+        echo "$JSON}"
+        exit 0
+    fi
+    
+    # Last resort: full file
+    cat "$AUTH_FILE"
+    exit 0
+fi
+
+echo '{"error":"No Codex auth found - run '\''codex login'\'' first"}' >&2
+exit 1

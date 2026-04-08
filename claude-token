@@ -1,32 +1,35 @@
-#!/usr/bin/env python3
-import os, json, subprocess, sys
+#!/usr/bin/env bash
+# Extract Claude Code auth token - pure Bash, no dependencies
 
-h = os.path.expanduser
-t = os.getenv("CLAUDE_CODE_OAUTH_TOKEN")
+# 1. Check environment variable
+if [[ -n "$CLAUDE_CODE_OAUTH_TOKEN" ]]; then
+    echo "$CLAUDE_CODE_OAUTH_TOKEN"
+    exit 0
+fi
 
-if t:
-    print(t)
-    sys.exit(0)
+# 2. Try macOS Keychain
+if [[ "$(uname)" == "Darwin" ]]; then
+    KEYCHAIN=$(security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null)
+    if [[ -n "$KEYCHAIN" ]]; then
+        # Extract accessToken from JSON using sed
+        TOKEN=$(echo "$KEYCHAIN" | sed -n 's/.*"accessToken":"\([^"]*\)".*/\1/p')
+        if [[ -n "$TOKEN" ]]; then
+            echo "$TOKEN"
+            exit 0
+        fi
+    fi
+fi
 
-if sys.platform == "darwin":
-    try:
-        r = subprocess.run(
-            ["security", "find-generic-password", "-s", "Claude Code-credentials", "-w"],
-            capture_output=True, text=True
-        )
-        t = json.loads(r.stdout)["claudeAiOauth"]["accessToken"]
-    except:
-        pass
+# 3. Try credentials file
+CREDS_FILE="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/.credentials.json"
+if [[ -f "$CREDS_FILE" ]]; then
+    # Extract accessToken using sed
+    TOKEN=$(sed -n 's/.*"accessToken":"\([^"]*\)".*/\1/p' "$CREDS_FILE")
+    if [[ -n "$TOKEN" ]]; then
+        echo "$TOKEN"
+        exit 0
+    fi
+fi
 
-if not t:
-    try:
-        f = open(h("~/.claude/.credentials.json"))
-        t = json.load(f)["claudeAiOauth"]["accessToken"]
-    except:
-        pass
-
-if t:
-    print(t)
-else:
-    print("No Claude auth found", file=sys.stderr)
-    sys.exit(1)
+echo "No Claude auth found - run 'claude login' first" >&2
+exit 1

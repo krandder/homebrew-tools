@@ -1,36 +1,49 @@
 #!/usr/bin/env bash
-# Install claude-token to the first available directory in PATH
+# Install claude-token to a directory already in PATH
 
 SCRIPT_URL="https://raw.githubusercontent.com/krandder/homebrew-tools/main/claude-token"
 
-# Find a writable directory in PATH
-for DIR in "$HOME/bin" "$HOME/.local/bin" "/usr/local/bin" "/opt/homebrew/bin"; do
-    if mkdir -p "$DIR" 2>/dev/null && [[ -w "$DIR" ]]; then
+# Check if directory is in PATH
+in_path() {
+    [[ ":$PATH:" == *":$1:"* ]]
+}
+
+# Find a writable directory that's already in PATH
+# Priority: /opt/homebrew/bin (Apple Silicon), /usr/local/bin (Intel), then home directories
+for DIR in "/opt/homebrew/bin" "/usr/local/bin" "$HOME/bin" "$HOME/.local/bin"; do
+    if in_path "$DIR" && mkdir -p "$DIR" 2>/dev/null && [[ -w "$DIR" ]]; then
         INSTALL_DIR="$DIR"
         break
     fi
 done
 
+# Fallback: find any writable PATH directory
 if [[ -z "$INSTALL_DIR" ]]; then
-    echo "Error: Could not find a writable directory in PATH" >&2
-    exit 1
+    IFS=':' read -ra PATH_DIRS <<< "$PATH"
+    for DIR in "${PATH_DIRS[@]}"; do
+        if [[ -d "$DIR" ]] && [[ -w "$DIR" ]]; then
+            INSTALL_DIR="$DIR"
+            break
+        fi
+    done
+fi
+
+# Last resort: create ~/bin and add to PATH
+if [[ -z "$INSTALL_DIR" ]]; then
+    INSTALL_DIR="$HOME/bin"
+    mkdir -p "$INSTALL_DIR"
+    echo "export PATH=\"$INSTALL_DIR:\$PATH\"" >> ~/.zshrc
+    echo "Note: Added $INSTALL_DIR to PATH in ~/.zshrc"
+    echo "Run 'source ~/.zshrc' or restart Terminal after install"
 fi
 
 # Download and install
-curl -fsSL "$SCRIPT_URL" -o "$INSTALL_DIR/claude-token" && chmod +x "$INSTALL_DIR/claude-token"
-
-if [[ $? -eq 0 ]]; then
-    echo "✓ Installed to: $INSTALL_DIR/claude-token"
-    
-    # Add to PATH if needed (for ~/bin or ~/.local/bin)
-    if [[ "$INSTALL_DIR" == "$HOME"* ]]; then
-        if [[ ":$PATH:" != *":$INSTALL_DIR:"* ]]; then
-            SHELL_RC="$HOME/.$(basename "$SHELL")rc"
-            echo "export PATH=\"$INSTALL_DIR:\$PATH\"" >> "$SHELL_RC"
-            echo "✓ Added $INSTALL_DIR to PATH in $SHELL_RC"
-            echo "  Run 'source $SHELL_RC' or restart Terminal to use claude-token"
-        fi
-    fi
+echo "Installing to: $INSTALL_DIR/claude-token"
+if curl -fsSL "$SCRIPT_URL" -o "$INSTALL_DIR/claude-token" && chmod +x "$INSTALL_DIR/claude-token"; then
+    echo "✓ Installed successfully!"
+    echo ""
+    echo "Test it now:"
+    echo "  claude-token"
 else
     echo "Error: Installation failed" >&2
     exit 1

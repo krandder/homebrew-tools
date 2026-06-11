@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Install krandder/tools to a directory already in PATH
 
-REPO_URL="https://raw.githubusercontent.com/krandder/homebrew-tools/main"
+REPO_URL="${REPO_URL:-https://raw.githubusercontent.com/krandder/homebrew-tools/main}"
 
 # Check if directory is in PATH
 in_path() {

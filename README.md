@@ -29,6 +29,8 @@ Works on macOS and Linux. Automatically detects:
 
 `CLAUDE_CODE_OAUTH_TOKEN` is usually only an `sk-ant-oat...` access token and does not contain the `sk-ant-ort...` refresh token. `claude-token` therefore prefers Keychain / credentials files when available.
 
+If no refresh token is found, `claude-token` prints diagnostics to stderr showing which credential sources were checked, whether JSON parsed, and whether `accessToken` / `refreshToken` fields were present. Token values are not printed in diagnostics.
+
 ---
 
 ### `codex-token`

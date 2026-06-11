@@ -20,7 +20,7 @@ import json, sys
 
 data = json.loads(sys.stdin.read())
 oauth = data.get("claudeAiOauth", data) if isinstance(data, dict) else None
-if not isinstance(oauth, dict) or not (oauth.get("accessToken") or oauth.get("refreshToken")):
+if not isinstance(oauth, dict) or not oauth.get("refreshToken"):
     sys.exit(1)
 print(json.dumps(oauth, separators=(",", ":")))
 ' <<<"$input"
@@ -31,7 +31,7 @@ print(json.dumps(oauth, separators=(",", ":")))
         ruby -rjson -e '
 data = JSON.parse(STDIN.read)
 oauth = data.is_a?(Hash) ? (data["claudeAiOauth"] || data) : nil
-exit 1 unless oauth.is_a?(Hash) && (oauth["accessToken"] || oauth["refreshToken"])
+exit 1 unless oauth.is_a?(Hash) && oauth["refreshToken"]
 puts JSON.generate(oauth)
 ' <<<"$input"
         return $?
@@ -44,6 +44,115 @@ try_credentials_file() {
     local file="$1"
     [[ -f "$file" ]] || return 1
     emit_oauth_json "$(cat "$file")"
+}
+
+describe_json_source() {
+    local label="$1"
+    local input="$2"
+
+    if command -v python3 >/dev/null 2>&1; then
+        CLAUDE_TOKEN_LABEL="$label" python3 -c '
+import json
+import os
+import sys
+
+label = os.environ.get("CLAUDE_TOKEN_LABEL", "source")
+raw = sys.stdin.read()
+print(f"  - {label}: bytes={len(raw)}", file=sys.stderr)
+try:
+    data = json.loads(raw)
+except Exception as exc:
+    print(f"    json: no ({type(exc).__name__}: {exc})", file=sys.stderr)
+    raise SystemExit(0)
+
+if isinstance(data, dict):
+    oauth = data.get("claudeAiOauth", data)
+    top_keys = ", ".join(sorted(map(str, data.keys()))[:12])
+    contains_oauth = "yes" if "claudeAiOauth" in data else "no"
+    print(f"    json: yes; top-level keys: {top_keys}", file=sys.stderr)
+    print(f"    contains claudeAiOauth: {contains_oauth}", file=sys.stderr)
+else:
+    oauth = None
+    print(f"    json: yes; top-level type: {type(data).__name__}", file=sys.stderr)
+
+def token_state(value, expected_prefix):
+    if not isinstance(value, str) or not value:
+        return "missing"
+    if value.startswith(expected_prefix):
+        return f"present ({expected_prefix}...)"
+    return f"present (unexpected prefix, len={len(value)})"
+
+if isinstance(oauth, dict):
+    access_state = token_state(oauth.get("accessToken"), "sk-ant-oat")
+    refresh_state = token_state(oauth.get("refreshToken"), "sk-ant-ort")
+    print(f"    accessToken: {access_state}", file=sys.stderr)
+    print(f"    refreshToken: {refresh_state}", file=sys.stderr)
+    if "expiresAt" in oauth:
+        print(f"    expiresAt: present", file=sys.stderr)
+else:
+    print("    oauth object: missing", file=sys.stderr)
+' <<<"$input"
+    else
+        echo "  - $label: python3 unavailable; cannot inspect JSON safely" >&2
+    fi
+}
+
+file_meta() {
+    local file="$1"
+    if [[ ! -e "$file" ]]; then
+        echo "missing"
+        return 0
+    fi
+    local meta
+    if meta=$(stat -f '%Sp %z bytes' "$file" 2>/dev/null); then
+        echo "$meta"
+    elif meta=$(stat -c '%A %s bytes' "$file" 2>/dev/null); then
+        echo "$meta"
+    else
+        echo "exists"
+    fi
+}
+
+print_diagnostics() {
+    echo "claude-token diagnostics:" >&2
+    echo "  uname: $(uname -a 2>/dev/null || uname)" >&2
+    echo "  HOME: ${HOME:-<unset>}" >&2
+    echo "  CLAUDE_CONFIG_DIR: ${CLAUDE_CONFIG_DIR:-<unset>}" >&2
+    if [[ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]]; then
+        echo "  CLAUDE_CODE_OAUTH_TOKEN: set (access-token-only source; value redacted)" >&2
+    else
+        echo "  CLAUDE_CODE_OAUTH_TOKEN: unset" >&2
+    fi
+    echo "  python3: $(command -v python3 2>/dev/null || echo '<missing>')" >&2
+    echo "  ruby: $(command -v ruby 2>/dev/null || echo '<missing>')" >&2
+    echo "  claude: $(command -v claude 2>/dev/null || echo '<missing>')" >&2
+
+    if [[ "$(uname)" == "Darwin" ]]; then
+        echo "  macOS Keychain service: Claude Code-credentials" >&2
+        if ! command -v security >/dev/null 2>&1; then
+            echo "    security command: missing" >&2
+        else
+            local keychain_value
+            keychain_value=$(security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null || true)
+            if [[ -n "$keychain_value" ]]; then
+                describe_json_source "Keychain Claude Code-credentials" "$keychain_value"
+            else
+                echo "    keychain item: missing or unreadable" >&2
+            fi
+        fi
+    fi
+
+    echo "  credential files checked:" >&2
+    local seen_diag=":"
+    local file
+    for file in "${CANDIDATES[@]}"; do
+        [[ "$seen_diag" == *":$file:"* ]] && continue
+        seen_diag="$seen_diag$file:"
+        echo "  - $file: $(file_meta "$file")" >&2
+        if [[ -f "$file" && -r "$file" ]]; then
+            describe_json_source "$file" "$(cat "$file")"
+        fi
+    done
 }
 
 # 1. Try macOS Keychain first; it is the canonical Claude Code store on macOS.
@@ -75,9 +184,11 @@ done
 # 3. Last resort: access-token-only environment variable.
 if [[ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]]; then
     echo "warning: CLAUDE_CODE_OAUTH_TOKEN is access-token-only; no refreshToken is available from it" >&2
+    print_diagnostics
     echo '{"accessToken":"'"$CLAUDE_CODE_OAUTH_TOKEN"'"}'
     exit 0
 fi
 
+print_diagnostics
 echo '{"error":"No Claude auth found - run '\''claude auth login'\'' first"}' >&2
 exit 1

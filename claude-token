@@ -1,41 +1,83 @@
 #!/usr/bin/env bash
-# Extract Claude Code OAuth credentials - outputs full JSON object
+# Extract Claude Code OAuth credentials.
+#
+# Output is the native Claude OAuth object:
+#   {"accessToken":"...","refreshToken":"...","expiresAt":...}
+#
+# Prefer refreshable credentials from Keychain / credentials files over
+# CLAUDE_CODE_OAUTH_TOKEN. Claude Code exports CLAUDE_CODE_OAUTH_TOKEN inside
+# sessions, but that value is only an access token (`sk-ant-oat...`) and does
+# not contain the refresh token (`sk-ant-ort...`).
 
-# 1. Check environment variable
-if [[ -n "$CLAUDE_CODE_OAUTH_TOKEN" ]]; then
-    echo '{"accessToken":"'$CLAUDE_CODE_OAUTH_TOKEN'"}'
-    exit 0
-fi
+set -euo pipefail
 
-# 2. Try macOS Keychain
+emit_oauth_json() {
+    local input="$1"
+
+    if command -v python3 >/dev/null 2>&1; then
+        python3 -c '
+import json, sys
+
+data = json.loads(sys.stdin.read())
+oauth = data.get("claudeAiOauth", data) if isinstance(data, dict) else None
+if not isinstance(oauth, dict) or not (oauth.get("accessToken") or oauth.get("refreshToken")):
+    sys.exit(1)
+print(json.dumps(oauth, separators=(",", ":")))
+' <<<"$input"
+        return $?
+    fi
+
+    if command -v ruby >/dev/null 2>&1; then
+        ruby -rjson -e '
+data = JSON.parse(STDIN.read)
+oauth = data.is_a?(Hash) ? (data["claudeAiOauth"] || data) : nil
+exit 1 unless oauth.is_a?(Hash) && (oauth["accessToken"] || oauth["refreshToken"])
+puts JSON.generate(oauth)
+' <<<"$input"
+        return $?
+    fi
+
+    return 1
+}
+
+try_credentials_file() {
+    local file="$1"
+    [[ -f "$file" ]] || return 1
+    emit_oauth_json "$(cat "$file")"
+}
+
+# 1. Try macOS Keychain first; it is the canonical Claude Code store on macOS.
 if [[ "$(uname)" == "Darwin" ]]; then
-    KEYCHAIN=$(security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null)
-    if [[ -n "$KEYCHAIN" ]]; then
-        # Extract full claudeAiOauth object
-        OAUTH=$(echo "$KEYCHAIN" | sed -n 's/.*"claudeAiOauth":{\([^}]*\)}.*/\1/p')
-        if [[ -n "$OAUTH" ]]; then
-            echo "{$OAUTH}"
-            exit 0
-        fi
-        # Fallback: return full JSON if we can't extract just oauth
-        echo "$KEYCHAIN"
+    KEYCHAIN=$(security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null || true)
+    if [[ -n "$KEYCHAIN" ]] && emit_oauth_json "$KEYCHAIN"; then
         exit 0
     fi
 fi
 
-# 3. Try credentials file
-CREDS_FILE="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/.credentials.json"
-if [[ -f "$CREDS_FILE" ]]; then
-    # Extract claudeAiOauth object
-    OAUTH=$(sed -n 's/.*"claudeAiOauth":{\([^}]*\)}.*/\1/p' "$CREDS_FILE")
-    if [[ -n "$OAUTH" ]]; then
-        echo "{$OAUTH}"
+# 2. Try credentials files. Check both current and older filenames.
+declare -a CANDIDATES=()
+if [[ -n "${CLAUDE_CONFIG_DIR:-}" ]]; then
+    CANDIDATES+=("$CLAUDE_CONFIG_DIR/.credentials.json")
+    CANDIDATES+=("$CLAUDE_CONFIG_DIR/credentials.json")
+fi
+CANDIDATES+=("$HOME/.claude/.credentials.json")
+CANDIDATES+=("$HOME/.claude/credentials.json")
+
+SEEN=":"
+for CREDS_FILE in "${CANDIDATES[@]}"; do
+    [[ "$SEEN" == *":$CREDS_FILE:"* ]] && continue
+    SEEN="$SEEN$CREDS_FILE:"
+    if try_credentials_file "$CREDS_FILE"; then
         exit 0
     fi
-    # Fallback: full file
-    cat "$CREDS_FILE"
+done
+
+# 3. Last resort: access-token-only environment variable.
+if [[ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]]; then
+    echo "warning: CLAUDE_CODE_OAUTH_TOKEN is access-token-only; no refreshToken is available from it" >&2
+    echo '{"accessToken":"'"$CLAUDE_CODE_OAUTH_TOKEN"'"}'
     exit 0
 fi
 
-echo '{"error":"No Claude auth found - run '\''claude login'\'' first"}' >&2
+echo '{"error":"No Claude auth found - run '\''claude auth login'\'' first"}' >&2
 exit 1

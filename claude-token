@@ -11,6 +11,27 @@
 
 set -euo pipefail
 
+VERSION="1.1.3"
+MODE="run"
+case "${1:-}" in
+    --version|-v)
+        echo "claude-token $VERSION"
+        exit 0
+        ;;
+    --diagnose|--diagnostics|--debug)
+        MODE="diagnose"
+        ;;
+    --help|-h)
+        cat <<'HELP'
+Usage: claude-token [--diagnose|--version]
+
+Extract Claude Code OAuth credentials as JSON on stdout.
+Diagnostics are printed to stderr and never include token values.
+HELP
+        exit 0
+        ;;
+esac
+
 emit_oauth_json() {
     local input="$1"
 
@@ -171,6 +192,11 @@ if [[ -n "${CLAUDE_CONFIG_DIR:-}" ]]; then
 fi
 CANDIDATES+=("$HOME/.claude/.credentials.json")
 CANDIDATES+=("$HOME/.claude/credentials.json")
+
+if [[ "$MODE" == "diagnose" ]]; then
+    print_diagnostics
+    exit 0
+fi
 
 SEEN=":"
 for CREDS_FILE in "${CANDIDATES[@]}"; do

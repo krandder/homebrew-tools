@@ -31,6 +31,13 @@ Works on macOS and Linux. Automatically detects:
 
 If no refresh token is found, `claude-token` prints diagnostics to stderr showing which credential sources were checked, whether JSON parsed, and whether `accessToken` / `refreshToken` fields were present. Token values are not printed in diagnostics.
 
+For explicit diagnostics or version checks:
+
+```bash
+claude-token --diagnose
+claude-token --version
+```
+
 ---
 
 ### `codex-token`

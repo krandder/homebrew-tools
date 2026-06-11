@@ -2,8 +2,8 @@ class ClaudeToken < Formula
   desc "Extract Claude Code authentication credentials"
   homepage "https://github.com/krandder/homebrew-tools"
   url "https://raw.githubusercontent.com/krandder/homebrew-tools/main/claude-token"
-  version "1.1.2"
-  sha256 "bc28c1495041dc41bd24a9a0ac738fea59f21d8440c7499dc9a6c3e0cd11fd64"
+  version "1.1.3"
+  sha256 "0a61ff13ee0dc676c148c99ae79e3b5235b11a68c38e754b6161ff1f7d5e9203"
 
   def install
     bin.install "claude-token"

@@ -76,6 +76,36 @@ resolve_codex_bin() {
     command -v codex
 }
 
+# ---- HTTPS vault transport (optional; used when a vault URL + token are set) ----
+have_http_vault() { [ -n "${CODEX_VAULT_URL:-}" ] || grep -q '^url=' "$CONFIG_FILE" 2>/dev/null; }
+vault_url()   { echo "${CODEX_VAULT_URL:-$(awk -F= '/^url=/{print $2;exit}' "$CONFIG_FILE" 2>/dev/null)}"; }
+vault_token() { echo "${CODEX_VAULT_TOKEN:-$(sed -n 's/^token=//p' "$CONFIG_FILE" 2>/dev/null)}"; }
+vault_http() { # method path [data_file]
+    local method="$1" path="$2" data="${3:-}" url tok
+    url="$(vault_url)"; tok="$(vault_token)"
+    [ -n "$url" ] || die "no vault URL (run 'codex-token set-url <url>')"
+    [ -n "$tok" ] || die "no vault token (ask the operator, then 'codex-token set-token <token>')"
+    if [ -n "$data" ]; then
+        curl -fsS -X "$method" "$url$path" -H "Authorization: Bearer $tok" --data-binary @"$data"
+    else
+        curl -fsS -X "$method" "$url$path" -H "Authorization: Bearer $tok"
+    fi
+}
+set_config() { # key value
+    mkdir -p "$VAULT_DIR_CLIENT"
+    python3 - "$CONFIG_FILE" "$1" "$2" <<'PY'
+import sys,os
+f,k,v=sys.argv[1],sys.argv[2],sys.argv[3]
+lines=[]; found=False
+if os.path.exists(f):
+    for line in open(f):
+        if line.rstrip("\n").startswith(k+"="): lines.append(f"{k}={v}"); found=True
+        else: lines.append(line.rstrip("\n"))
+if not found: lines.append(f"{k}={v}")
+open(f,"w").write("\n".join(lines)+"\n"); os.chmod(f,0o600)
+PY
+}
+
 # ----------------------------------------------------------------------------
 # helpers
 # ----------------------------------------------------------------------------
@@ -250,12 +280,17 @@ json.dump(clean,open(af,"w"),indent=2); os.chmod(af,0o600)
 PY
         echo "pulled"
     else
-        # ACL-gated path: ask the leader (identity bound server-side).
-        need_cmd ssh
-        say "pulling '$p' from leader $LEADER_HOST (vault, ACL-gated)..."
+        # ACL-gated path: ask the leader (HTTPS if configured, else SSH).
         local tmp="$af.tmp"
-        ssh_vault "codex-vault serve '$p'" > "$tmp" \
-            || { rm -f "$tmp"; die "pull: leader denied/unavailable for '$p'"; }
+        if have_http_vault; then
+            say "pulling '$p' from $(vault_url) (HTTPS, ACL-gated)..."
+            vault_http GET "/pull/$p" > "$tmp" || { rm -f "$tmp"; die "pull: leader denied/unavailable for '$p'"; }
+        else
+            need_cmd ssh
+            say "pulling '$p' from leader $LEADER_HOST (vault, ACL-gated)..."
+            ssh_vault "codex-vault serve '$p'" > "$tmp" \
+                || { rm -f "$tmp"; die "pull: leader denied/unavailable for '$p'"; }
+        fi
         python3 - "$tmp" "$af" <<'PY'
 import json,sys,os
 src,dst=sys.argv[1],sys.argv[2]
@@ -275,12 +310,14 @@ push_profile() { # profile -> vault receive (owner-gated), then revert local to 
     [ -n "$rt" ] || die "push: '$p' has no refresh_token to push"
     is_sentinel "$rt" && die "push: '$p' only has a sentinel token (already a follower). Log in first: codex-$p login"
     need_cmd ssh
-    say "pushing '$p' to leader $LEADER_HOST (vault)..."
-    # Identity is bound server-side (operator for direct SSH; key-bound via the
-    # SSH forced command for other users). The leader enforces ownership (ACL)
-    # and refresh+publish.
-    ssh_vault "codex-vault receive '$p'" < "$af" \
-        || die "push: leader rejected '$p' (not owner, unreachable, or token invalid)"
+    if have_http_vault; then
+        say "pushing '$p' to $(vault_url) (HTTPS)..."
+        vault_http POST "/push/$p" "$af" >/dev/null || die "push: leader rejected '$p' (not owner, or token invalid)"
+    else
+        say "pushing '$p' to leader $LEADER_HOST (vault/SSH)..."
+        ssh_vault "codex-vault receive '$p'" < "$af" \
+            || die "push: leader rejected '$p' (not owner, unreachable, or token invalid)"
+    fi
     # Leader stored + refreshed + published -> safe to revert local to follower.
     python3 - "$af" "$SENTINEL_RT" <<'PY'
 import json,sys,os
@@ -433,18 +470,27 @@ cmd_pair() {
         say "generated vault key: $VAULT_KEY"
     fi
     printf 'user=%s\nleader=%s\n' "$user" "$LEADER_HOST" > "$CONFIG_FILE"
-    local pub; pub="$(cat "$VAULT_KEY.pub")"
+    chmod 600 "$CONFIG_FILE"
+    local pub=""; [ -f "$VAULT_KEY" ] && pub="$(cat "$VAULT_KEY.pub")"
     cat <<EOF
 
-Pairing as '$user'. Leader: $LEADER_HOST
+Pairing as '$user'.
 
-Send this ONE line to the operator to approve:
+OPTION A — HTTPS vault (recommended; no SSH/Tailscale needed):
+  Ask the operator to approve you. They will run, on the leader:
+    codex-vault enroll $user $user && codex-vault token $user
+  and send you the printed API token. Then on this machine:
+    codex-token set-url https://vault.ekelvin.com
+    codex-token set-token <the-token>
+  (SSH key not required for this path.)
+
+OPTION B — SSH (Tailscale + approved SSH key). Send this one line to the operator:
 --------------------------------------------------------------------------------
 command="codex-vault shell $user",no-pty,no-port-forwarding,no-X11-forwarding,no-agent-forwarding $pub
 --------------------------------------------------------------------------------
-They will run:  codex-vault approve $user '<that line>'
+  They run: codex-vault approve $user '<that line>'
 
-Once approved, run:  codex-token login
+Then run:  codex-token login
 EOF
 }
 
@@ -460,9 +506,14 @@ cmd_login() {
     # only push if the login produced a real refresh_token
     local rt; rt="$(tokens_get "$LEGACY_AUTH" refresh_token)"
     if [ -n "$rt" ] && ! is_sentinel "$rt"; then
-        say "pushing your token to the leader as '$user'..."
-        ssh_vault "codex-vault receive '$user'" < "$LEGACY_AUTH" \
-            || die "login: leader rejected push for '$user' (not approved yet? wrong user?)"
+        if have_http_vault; then
+            say "pushing your token to $(vault_url) as '$user'..."
+            vault_http POST "/push/$user" "$LEGACY_AUTH" >/dev/null || die "login: leader rejected push for '$user' (not approved?)"
+        else
+            say "pushing your token to the leader as '$user'..."
+            ssh_vault "codex-vault receive '$user'" < "$LEGACY_AUTH" \
+                || die "login: leader rejected push for '$user' (not approved yet? wrong user?)"
+        fi
         # convert ~/.codex to follower (sentinel RT)
         python3 - "$LEGACY_AUTH" "$SENTINEL_RT" <<'PY'
 import json,sys,os
@@ -482,6 +533,10 @@ cmd_run() { # [args...]  -- follower launcher: freshen ~/.codex then exec codex 
     local sf="$SHARED_DIR/$user.json"
     if [ -f "$sf" ]; then
         _copy_token "$sf" "$LEGACY_AUTH"
+    elif have_http_vault; then
+        vault_http GET "/pull/$user" > "$LEGACY_AUTH.tmp" \
+            || { rm -f "$LEGACY_AUTH.tmp"; die "run: cannot reach/authorized for '$user'"; }
+        _copy_token "$LEGACY_AUTH.tmp" "$LEGACY_AUTH"; rm -f "$LEGACY_AUTH.tmp"
     else
         need_cmd ssh
         ssh_vault "codex-vault serve '$user'" > "$LEGACY_AUTH.tmp" \
@@ -493,6 +548,18 @@ cmd_run() { # [args...]  -- follower launcher: freshen ~/.codex then exec codex 
     [ -n "$bin" ] || die "run: codex binary not found."
     export CODEX_REFRESH_TOKEN_URL_OVERRIDE="$BLACKHOLE_URL"
     exec "$bin" "$@"
+}
+
+cmd_set_url() {
+    [ -n "${1:-}" ] || die "set-url: specify the vault URL (e.g. https://vault.ekelvin.com)"
+    set_config url "$1"
+    say "vault URL = $1"
+}
+
+cmd_set_token() {
+    [ -n "${1:-}" ] || die "set-token: specify the API token the operator gave you"
+    set_config token "$1"
+    say "vault token stored in $CONFIG_FILE"
 }
 
 cmd_install_wrapper() {
@@ -557,6 +624,8 @@ HELP
 case "${1:-}" in
     run)   shift; cmd_run "$@"; exit $? ;;
     login) shift; cmd_login "$@"; exit $? ;;
+    set-url)   shift; cmd_set_url "${1:-}"; exit $? ;;
+    set-token) shift; cmd_set_token "${1:-}"; exit $? ;;
 esac
 
 CMD="print"

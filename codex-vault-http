@@ -1,0 +1,141 @@
+#!/usr/bin/env python3
+"""codex-vault-http — HTTPS front-end for the codex-vault.
+
+Authenticates each request with a per-user bearer API token (sha256-hashed at
+rest in tokens.json -> user), then dispatches to `codex-vault` with that
+identity, reusing all the existing ACL / audit / refresh+publish logic.
+
+Run it behind Cloudflare Tunnel (+ Caddy) at e.g. https://vault.ekelvin.com.
+Bind to localhost only; the tunnel terminates TLS and Caddy routes by Host.
+
+Routes:
+  GET  /healthz                 (no auth) liveness
+  POST /push/<profile>          (owner)   body = token JSON -> receive+refresh+publish
+  GET  /pull/<profile>          (puller)  -> follower token JSON
+  GET  /status                  (admin)   -> ACL listing
+
+Env:
+  CODEX_VAULT_DIR     default ~/.codex-vault      (tokens.json lives here)
+  CODEX_VAULT_LISTEN  default 127.0.0.1:8231
+"""
+import hashlib
+import http.server
+import json
+import os
+import socketserver
+import subprocess
+import sys
+from pathlib import Path
+
+VAULT_DIR = Path(os.environ.get("CODEX_VAULT_DIR", str(Path.home() / ".codex-vault")))
+TOKENS_FILE = VAULT_DIR / "tokens.json"
+LISTEN = os.environ.get("CODEX_VAULT_LISTEN", "127.0.0.1:8231")
+ALLOWED_PROFILE = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.")
+
+
+def load_tokens():
+    if TOKENS_FILE.exists():
+        try:
+            return json.loads(TOKENS_FILE.read_text())
+        except Exception:
+            return {}
+    return {}
+
+
+def identity_for(auth_header):
+    if not auth_header or not auth_header.startswith("Bearer "):
+        return None
+    h = hashlib.sha256(auth_header[7:].strip().encode()).hexdigest()
+    return load_tokens().get(h)
+
+
+def run_vault(user, args, body=None):
+    env = dict(os.environ)
+    env["CODEX_VAULT_USER"] = user
+    return subprocess.run(
+        ["codex-vault", *args],
+        input=body, capture_output=True, text=True, env=env,
+    )
+
+
+def valid_profile(p):
+    return bool(p) and all(c in ALLOWED_PROFILE for c in p)
+
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def _send(self, code, body="", ctype="application/json"):
+        if isinstance(body, str):
+            body = body.encode()
+        self.send_response(code)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        if self.command != "HEAD" and body:
+            self.wfile.write(body)
+
+    def log_message(self, fmt, *a):
+        sys.stderr.write("%s - %s\n" % (self.address_string(), fmt % a))
+
+    def _identity(self):
+        user = identity_for(self.headers.get("Authorization", ""))
+        if not user:
+            self._send(401, '{"error":"unauthorized"}')
+        return user
+
+    def do_GET(self):
+        if self.path == "/healthz":
+            return self._send(200, '{"ok":true}')
+        user = self._identity()
+        if not user:
+            return
+        if self.path == "/status":
+            p = run_vault(user, ["list"])
+            return self._send(200 if p.returncode == 0 else 500, p.stdout or p.stderr)
+        if self.path.startswith("/pull/"):
+            profile = self.path[len("/pull/"):]
+            if not valid_profile(profile):
+                return self._send(400, '{"error":"bad profile"}')
+            p = run_vault(user, ["serve", profile])
+            if p.returncode == 0:
+                return self._send(200, p.stdout)
+            return self._send(403 if "authorized" in p.stderr else 404,
+                              '{"error":"' + (p.stderr.strip().splitlines()[-1] or 'failed') + '"}')
+        return self._send(404, '{"error":"not found"}')
+
+    def do_POST(self):
+        user = self._identity()
+        if not user:
+            return
+        if self.path.startswith("/push/"):
+            profile = self.path[len("/push/"):]
+            if not valid_profile(profile):
+                return self._send(400, '{"error":"bad profile"}')
+            length = int(self.headers.get("Content-Length", 0) or 0)
+            body = self.rfile.read(length).decode() if length else ""
+            p = run_vault(user, ["receive", profile], body=body)
+            if p.returncode == 0:
+                return self._send(200, '{"ok":true,"detail":"' + (p.stderr.strip().splitlines()[-1] or "ok") + '"}')
+            return self._send(403 if "owner" in p.stderr or "may not" in p.stderr else 400,
+                              '{"error":"' + (p.stderr.strip().splitlines()[-1] or 'failed') + '"}')
+        return self._send(404, '{"error":"not found"}')
+
+
+class ThreadingHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
+    daemon_threads = True
+
+
+def main():
+    host, port = LISTEN.rsplit(":", 1)
+    httpd = ThreadingHTTPServer((host, int(port)), Handler)
+    sys.stderr.write(f"codex-vault-http listening on {LISTEN} (tokens: {TOKENS_FILE})\n")
+    sys.stderr.flush()
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        pass
+
+
+if __name__ == "__main__":
+    main()

@@ -130,6 +130,25 @@ PY
     audit "$p" enroll ok "owner=$owner"
 }
 
+# Issue a per-user API token for the HTTPS front-end (codex-vault-http).
+# Stores sha256(token) -> user in tokens.json; prints the plaintext token once.
+cmd_token() { # user
+    require_admin token
+    local user="$1" plain
+    [ -n "$user" ] || die "token: specify a user"
+    plain="$(python3 -c 'import secrets;print(secrets.token_urlsafe(32))')"
+    python3 - "$VAULT_DIR" "$user" "$plain" <<'PY'
+import json,sys,hashlib,os
+vd,user,plain=sys.argv[1],sys.argv[2],sys.argv[3]
+f=os.path.join(vd,"tokens.json")
+d=json.load(open(f)) if os.path.exists(f) else {}
+d[hashlib.sha256(plain.encode()).hexdigest()]=user
+json.dump(d,open(f,"w"),indent=2); os.chmod(f,0o600)
+PY
+    audit "$user" token ok "issued by $(current_user)"
+    printf '%s\n' "$plain"
+}
+
 # approve <user> <pubkey-line>: enroll the user and install their SSH key with a
 # forced command that binds their identity (no shell). Idempotent.
 cmd_approve() {
@@ -228,6 +247,7 @@ case "$cmd" in
     serve)      cmd_serve "$@" ;;
     enroll)     cmd_enroll "$@" ;;
     approve)    cmd_approve "$@" ;;
+    token)      cmd_token "$1" ;;
     grant)      cmd_grant "$@" ;;
     revoke)     cmd_revoke "$@" ;;
     list)       cmd_list ;;

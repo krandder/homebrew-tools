@@ -42,7 +42,7 @@ claude-token --version
 
 ### `codex-token`
 
-Extracts OpenAI Codex CLI authentication credentials.
+Print and **sync OpenAI Codex CLI credentials across machines** using a leader/follower model, so several people/machines can share Codex accounts without their refresh tokens invalidating one another.
 
 **Install:**
 ```bash
@@ -50,16 +50,67 @@ brew tap krandder/tools
 brew install codex-token
 ```
 
-**Usage:**
-```bash
-codex-token
+#### How it works
+- Exactly **one leader** machine owns each account's real refresh token and refreshes it (access tokens live ~10 days).
+- **Followers** run with a *sentinel* refresh token and the refresh endpoint overridden to a blackhole (`CODEX_REFRESH_TOKEN_URL_OVERRIDE`), so they use the leader's fresh access token but can **never rotate** it.
+- The leader publishes fresh access tokens to a Syncthing-shared folder (`~/shared/codex-tokens/`); followers pull from there (fast path) or from the vault (ACL-gated).
+
+#### Commands
+```
+codex-token                                 print active account tokens (default; backward compatible)
+codex-token status [--profile P|--all]      roles, token age, sync health (no secrets)
+codex-token pair --user NAME                generate a vault key + print the line to send the operator
+codex-token login                           browser OAuth → push to leader → become a follower
+codex-token run [codex args...]             follower launcher: freshen ~/.codex, then exec codex (refresh blackholed)
+codex-token install-wrapper                 make plain `codex` run via `codex-token run`
+codex-token publish [--profile P|--all]     LEADER: refresh + publish a token to the shared folder
+codex-token pull [--profile P|--all]        FOLLOWER: pull a published token into a local profile
+codex-token push [--profile P]              push a local real token to the leader (owner-gated)
+codex-token sync [--profile P|--all]        role-aware one-shot (publish/push/pull)
+codex-token --diagnose | --version | --help
 ```
 
-Outputs tokens JSON with `access_token`, `refresh_token`, `account_id`, etc.
+#### New user onboarding (e.g. "fred", fresh machine, homebrew only)
+```bash
+brew tap krandder/tools && brew install codex-token
+codex-token pair --user fred        # prints one command=... line — send it to the operator
+# …operator runs, on the leader:  codex-vault approve fred '<that line>'
+codex-token login                   # browser sign-in as fred's account → pushes to leader
+codex-token install-wrapper         # plain `codex` now runs as fred's follower account
+codex                               # works
+```
 
-Automatically detects:
-- `OPENAI_API_KEY` environment variable
-- `~/.codex/auth.json` file
+#### Operator (multi-account on one machine)
+Install `codex-token` plus the `ai-as` launcher (not in this tap) for `codex-<profile>` switching. Each profile dir is `~/.codex-profiles/<name>/.codex/`; role is stored in `~/.codex-profiles/<name>/.role`.
+
+Environment: `CODEX_USER`, `CODEX_PROFILE`, `CODEX_LEADER` (default `farol-ts`), `CODEX_PROFILES_DIR`, `CODEX_SHARED_DIR`, `CODEX_VAULT_KEY`.
+
+---
+
+### `codex-vault`
+
+Leader-side **token vault with per-user ACL and audit**. Runs on the leader (e.g. `farol`). Holds the canonical refresh tokens, enforces who may **push** (the profile owner) and **pull** (granted pullers/admins), refreshes + publishes follower tokens, and keeps an append-only audit log. Identity is bound to each user's SSH key via an SSH forced command (`codex-vault shell <user>`).
+
+**Install (on the leader):**
+```bash
+brew tap krandder/tools && brew install codex-vault   # depends on codex-token
+```
+
+#### Commands
+```
+codex-vault approve USER '<pubkey-line>'    enroll USER + install their key with a forced command (admin)
+codex-vault enroll USER OWNER               register a profile (admin)
+codex-vault grant  PROFILE USER             allow USER to pull PROFILE (admin/owner)
+codex-vault revoke PROFILE USER             remove USER's pull right (admin/owner)
+codex-vault receive PROFILE                 read a token on stdin, store + refresh + publish (owner)
+codex-vault serve  PROFILE                  write the follower token to stdout (puller)
+codex-vault list                            show the ACL (admin)
+codex-vault show-audit [N]                  last N audit entries (admin)
+codex-vault whoami                          print identity + admin flag
+codex-vault shell USER -- <cmd>             SSH forced-command wrapper (binds identity to USER)
+```
+
+The ACL lives at `~/.codex-vault/acl.json` (`{admins, operator, profiles:{NAME:{owner,pullers}}}`); audit at `~/.codex-vault/audit.jsonl`.
 
 ---
 

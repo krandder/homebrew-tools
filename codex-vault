@@ -198,6 +198,19 @@ cmd_approve() { # user pubkey-line   (enrolls codex:<user> + claude:<user>, inst
     say "approved '$user' (codex+claude enrolled + forced-command key installed in $authkeys)"
 }
 
+# onboard <user>: HTTPS onboarding in one command — enroll codex+claude and
+# print a one-time API token (the user runs: codex-token install --token ... --user <user>).
+cmd_onboard() {
+    require_admin onboard
+    local user="$1"
+    [ -n "$user" ] || die "onboard: specify a user handle (e.g. fred)"
+    cmd_enroll codex "$user" "$user" >/dev/null 2>&1 || true
+    cmd_enroll claude "$user" "$user" >/dev/null 2>&1 || true
+    audit "$user" onboard ok "by $(current_user)"
+    say "onboarded '$user' (codex:$user + claude:$user). One-time API token — send it securely; it is shown once:" >&2
+    cmd_token "$user"
+}
+
 cmd_grant() { # profile user
     local p="$1" u="$2"
     { is_admin || [ "$(profile_owner "$p")" = "$(current_user)" ]; } || die "grant: only admin/owner may grant '$p'"
@@ -276,6 +289,7 @@ case "$cmd" in
     receive)    cmd_receive "$@" ;;
     serve)      cmd_serve "$@" ;;
     enroll)     cmd_enroll "$@" ;;
+    onboard)    cmd_onboard "$1" ;;
     approve)    cmd_approve "$@" ;;
     token)      cmd_token "$1" ;;
     grant)      cmd_grant "$@" ;;

@@ -1,0 +1,128 @@
+#!/usr/bin/env bash
+# claude-broker — install/run the transparent OAuth refresh broker on a follower.
+#
+# Claude Code runs completely normally (OAuth mode, real refresh-on-expiry).
+# A local proxy (claude-broker-proxy) intercepts the OAuth refresh and routes it
+# to the leader's broker; an SSH tunnel carries it to farol. This script wires
+# it all up as install-and-forget: a `claude` wrapper + launchd services.
+#
+#   claude-broker install [--user kas]   install wrapper + proxy/tunnel services
+#   claude-broker seed    [--user kas]   seed the store with a dummy refresh + fresh access
+#   claude-broker status                 show service + keychain state
+#   claude-broker uninstall              remove wrapper + services (restores real claude)
+
+set -euo pipefail
+DIR="${CLAUDE_BROKER_DIR:-$HOME/.claude-broker}"
+PROXY_PORT="${CLAUDE_BROKER_PROXY_PORT:-8443}"
+TUNNEL_PORT="${CLAUDE_BROKER_TUNNEL_PORT:-8231}"
+LEADER="${CLAUDE_BROKER_LEADER:-farol-ts}"
+PROXY="$(command -v claude-broker-proxy || echo "$HOME/.local/bin/claude-broker-proxy")"
+REAL_CLAUDE="$(for d in /opt/homebrew/bin /usr/local/bin; do [ -x "$d/claude" ] && echo "$d/claude" && break; done)"
+[ -n "$REAL_CLAUDE" ] || { echo "claude-broker: real claude binary not found" >&2; exit 1; }
+LABEL_PROXY="com.claudebroker.proxy"
+LABEL_TUNNEL="com.claudebroker.tunnel"
+LDIR="$HOME/Library/LaunchAgents"
+
+say(){ echo "claude-broker: $*"; }
+vault_token(){ awk -F= '/^token=/{print $2}' "$HOME/.codex-token/config" 2>/dev/null || true; }
+
+write_proxy_plist(){
+  mkdir -p "$LDIR"
+  TOK="$(vault_token)"
+  cat > "$LDIR/$LABEL_PROXY.plist" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>$LABEL_PROXY</string>
+  <key>ProgramArguments</key><array>
+    <string>$PROXY</string>
+  </array>
+  <key>EnvironmentVariables</key><dict>
+    <key>CLAUDE_BROKER_URL</key><string>http://127.0.0.1:$TUNNEL_PORT</string>
+    <key>CLAUDE_BROKER_TOKEN</key><string>$TOK</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>$DIR/proxy.log</string>
+  <key>StandardErrorPath</key><string>$DIR/proxy.log</string>
+</dict></plist>
+EOF
+}
+
+write_tunnel_plist(){
+  mkdir -p "$LDIR"
+  cat > "$LDIR/$LABEL_TUNNEL.plist" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>$LABEL_TUNNEL</string>
+  <key>ProgramArguments</key><array>
+    <string>/usr/bin/ssh</string><string>-N</string><string>-L</string>
+    <string>$TUNNEL_PORT:127.0.0.1:8231</string><string>-o</string><string>ExitOnForwardFailure=yes</string>
+    <string>-o</string><string>ServerAliveInterval=20</string><string>-o</string><string>ServerAliveCountMax=3</string>
+    <string>$LEADER</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+</dict></plist>
+EOF
+}
+
+cmd_install(){
+  local user="${1:-}"; [ -n "$user" ] || user="$(awk -F= '/^user=/{print $2}' "$HOME/.codex-token/config" 2>/dev/null)"
+  mkdir -p "$DIR"
+  [ -x "$PROXY" ] || { say "claude-broker-proxy not found at $PROXY; brew install it first"; exit 1; }
+  [ -n "$(vault_token)" ] || { say "no vault token in ~/.codex-token/config; run 'codex-token set-token' first"; exit 1; }
+  write_proxy_plist; write_tunnel_plist
+  launchctl unload "$LDIR/$LABEL_PROXY.plist" >/dev/null 2>&1 || true
+  launchctl unload "$LDIR/$LABEL_TUNNEL.plist" >/dev/null 2>&1 || true
+  launchctl load -w "$LDIR/$LABEL_TUNNEL.plist"
+  launchctl load -w "$LDIR/$LABEL_PROXY.plist"
+  # wrapper (HTTPS_PROXY + CA -> real claude). Generic proxy env, not a Claude-specific auth env.
+  if [ ! -e "$HOME/bin/claude.pre-broker" ] && [ -e "$HOME/bin/claude" ]; then mv "$HOME/bin/claude" "$HOME/bin/claude.pre-broker"; fi
+  mkdir -p "$HOME/bin"
+  cat > "$HOME/bin/claude" <<EOF
+#!/usr/bin/env bash
+exec env HTTPS_PROXY=http://127.0.0.1:$PROXY_PORT NODE_EXTRA_CA_CERTS=$DIR/ca.pem "$REAL_CLAUDE" "\$@"
+EOF
+  chmod +x "$HOME/bin/claude"
+  say "installed: wrapper (~/bin/claude) + proxy + tunnel services (leader $LEADER)."
+  say "Next: 'claude-broker seed --user ${user:-<name>}' to seed the follower store, then use 'claude' normally."
+}
+
+cmd_seed(){ # account — write a dummy refresh + the broker's current access token into the keychain
+  local user="$1"
+  [ -n "$user" ] || { say "seed: specify --user <name>"; exit 1; }
+  need curl python3
+  # wait briefly for tunnel/proxy
+  local access=""
+  for i in 1 2 3 4 5; do access="$(curl -fsS -H "Authorization: Bearer $(vault_token)" "http://127.0.0.1:$TUNNEL_PORT/access/claude/$user" 2>/dev/null || true)"; [ -n "$access" ] && break; sleep 1; done
+  [ -n "$access" ] || { say "seed: no access token from broker (is the leader publishing / the tunnel up?)"; exit 1; }
+  local kc="Claude Code-credentials"
+  local acct; acct="$(security find-generic-password -s "$kc" 2>/dev/null | sed -n 's/.*"acct"<blob>="\([^"]*\)".*/\1/p' | head -1)"; [ -n "$acct" ] || acct="$(whoami)"
+  local seed; seed="$(python3 -c 'import json,sys,time;print(json.dumps({"claudeAiOauth":{"accessToken":sys.argv[1],"refreshToken":"vlt:"+"'"$user"'"+":seed","expiresAt":int(time.time()*1000)+3600000,"scopes":[],"subscriptionType":"max"}}))' "$access")"
+  security add-generic-password -U -s "$kc" -a "$acct" -w "$seed" >/dev/null
+  say "seeded keychain for '$user' (dummy refresh 'vlt:$user:seed'); Claude Code will refresh through the broker on expiry."
+}
+
+cmd_status(){
+  say "proxy:  $(launchctl list 2>/dev/null | awk -v l=$LABEL_PROXY '$3==l{print "running pid "$2}')"
+  say "tunnel: $(launchctl list 2>/dev/null | awk -v l=$LABEL_TUNNEL '$3==l{print "running pid "$2}')"
+  say "wrapper: $([ -x "$HOME/bin/claude" ] && echo present || echo missing) (real claude: $REAL_CLAUDE)"
+}
+
+cmd_uninstall(){
+  launchctl unload "$LDIR/$LABEL_PROXY.plist" >/dev/null 2>&1 || true
+  launchctl unload "$LDIR/$LABEL_TUNNEL.plist" >/dev/null 2>&1 || true
+  rm -f "$LDIR/$LABEL_PROXY.plist" "$LDIR/$LABEL_TUNNEL.plist"
+  [ -e "$HOME/bin/claude.pre-broker" ] && mv "$HOME/bin/claude.pre-broker" "$HOME/bin/claude" || rm -f "$HOME/bin/claude"
+  say "uninstalled (wrapper + services removed; real claude restored)."
+}
+
+case "${1:-}" in
+  install)   shift; cmd_install "${1:-}";;
+  seed)      shift; cmd_seed "${1:-}";;
+  status)    cmd_status;;
+  uninstall) cmd_uninstall;;
+  *) echo "usage: claude-broker {install|seed|status|uninstall}" >&2; exit 1;;
+esac

@@ -76,9 +76,10 @@ resolve_codex_bin() {
     command -v codex
 }
 
-# ---- HTTPS vault transport (optional; used when a vault URL + token are set) ----
-have_http_vault() { [ -n "${CODEX_VAULT_URL:-}" ] || grep -q '^url=' "$CONFIG_FILE" 2>/dev/null; }
-vault_url()   { echo "${CODEX_VAULT_URL:-$(awk -F= '/^url=/{print $2;exit}' "$CONFIG_FILE" 2>/dev/null)}"; }
+# ---- HTTPS vault transport (active once a token is configured; URL defaults) ----
+VAULT_URL_DEFAULT="https://vault.ekelvin.com"
+have_http_vault() { [ -n "$(vault_token)" ]; }   # HTTPS path is used once a token is set
+vault_url()   { local u="${CODEX_VAULT_URL:-$(awk -F= '/^url=/{print $2;exit}' "$CONFIG_FILE" 2>/dev/null)}"; echo "${u:-$VAULT_URL_DEFAULT}"; }
 vault_token() { echo "${CODEX_VAULT_TOKEN:-$(sed -n 's/^token=//p' "$CONFIG_FILE" 2>/dev/null)}"; }
 vault_http() { # method path [data_file]
     local method="$1" path="$2" data="${3:-}" url tok
@@ -477,12 +478,10 @@ cmd_pair() {
 Pairing as '$user'.
 
 OPTION A — HTTPS vault (recommended; no SSH/Tailscale needed):
-  Ask the operator to approve you. They will run, on the leader:
-    codex-vault enroll $user $user && codex-vault token $user
-  and send you the printed API token. Then on this machine:
-    codex-token set-url https://vault.ekelvin.com
-    codex-token set-token <the-token>
-  (SSH key not required for this path.)
+  Ask the operator to approve you. They run, on the leader:
+    codex-vault token $user          # prints a one-time API token -> send it to you
+  Then on this machine, ONE command (codex + claude, URL defaults to the vault):
+    codex-token install --token <the-token> --user $user
 
 OPTION B — SSH (Tailscale + approved SSH key). Send this one line to the operator:
 --------------------------------------------------------------------------------
@@ -575,6 +574,122 @@ EOF
     case ":$PATH:" in *":$HOME/bin:"*) ;; *) say "NOTE: add \$HOME/bin to your PATH for 'codex' to resolve to the wrapper." ;; esac
 }
 
+# ---- unified install (codex + claude) ----
+CLAUDE_SHARED_DIR="${CODEX_CLAUDE_SHARED_DIR:-$HOME/shared/claude-tokens}"
+
+codex_rt_is_real() { local rt; rt="$(tokens_get "$1" refresh_token)"; [ -n "$rt" ] && ! is_sentinel "$rt"; }
+revert_sentinel() { python3 - "$1" "$SENTINEL_RT" <<'PY'
+import json,sys,os
+af,s=sys.argv[1],sys.argv[2]; d=json.load(open(af)); d.setdefault("tokens",{})["refresh_token"]=s
+json.dump(d,open(af,"w"),indent=2); os.chmod(af,0o600)
+PY
+}
+resolve_claude_bin() {
+    local cands="$HOME/bin/claude.real:$(command -v claude 2>/dev/null):/opt/homebrew/bin/claude:/usr/local/bin/claude"
+    local IFS=':' d
+    for d in $cands; do [ -n "$d" ] && [ -x "$d" ] || continue; case "$d" in *"$HOME/bin"*) continue ;; esac; echo "$d"; return; done
+    command -v claude
+}
+claude_access_token() { python3 - "$1" <<'PY'
+import json,sys
+try:
+    d=json.load(open(sys.argv[1])); o=d.get("claudeAiOauth",d); print(o.get("accessToken",""))
+except Exception: print("")
+PY
+}
+# local claude creds (for pushing): macOS Keychain, else credentials file
+claude_local_creds() {
+    if command -v security >/dev/null 2>&1; then
+        security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null
+    else
+        for f in "$HOME/.claude/.credentials.json" "$HOME/.claude/credentials.json"; do [ -f "$f" ] && { cat "$f"; return; }; done
+    fi
+}
+
+install_codex_for() {
+    local user="$1"
+    if [ -f "$LEGACY_AUTH" ] && codex_rt_is_real "$LEGACY_AUTH"; then
+        say "  codex: pushing local token to leader..."
+        vault_http POST "/push/codex/$user" "$LEGACY_AUTH" >/dev/null || die "  codex: push rejected (not owner?)"
+        revert_sentinel "$LEGACY_AUTH"; say "  codex: ✓ pushed (local reverted to follower)"
+    else
+        say "  codex: pulling follower token..."
+        mkdir -p "$(dirname "$LEGACY_AUTH")"
+        vault_http GET "/pull/codex/$user" > "$LEGACY_AUTH.tmp" || { rm -f "$LEGACY_AUTH.tmp"; die "  codex: pull failed (not approved for codex:$user?)"; }
+        _copy_token "$LEGACY_AUTH.tmp" "$LEGACY_AUTH"; rm -f "$LEGACY_AUTH.tmp"; say "  codex: ✓ follower token installed"
+    fi
+    cmd_install_wrapper >/dev/null 2>&1 || true
+    say "  codex: ✓ wrapper installed (plain 'codex' = follower)"
+}
+
+cmd_install_claude_wrapper() {
+    mkdir -p "$HOME/bin"
+    local w="$HOME/bin/claude"
+    if [ -e "$w" ] && [ ! -e "$w.pre-codex-token" ]; then mv "$w" "$w.pre-codex-token"; fi
+    cat > "$w" <<'EOF'
+#!/usr/bin/env bash
+exec codex-token claude-run "$@"
+EOF
+    chmod +x "$w"
+}
+
+install_claude_for() {
+    local user="$1" creds="" tmp
+    creds="$(claude_local_creds)" || true
+    if [ -n "$creds" ] && printf '%s' "$creds" | grep -q refreshToken; then
+        say "  claude: pushing local credentials to leader..."
+        tmp="$(mktemp)"; printf '%s' "$creds" > "$tmp"
+        vault_http POST "/push/claude/$user" "$tmp" >/dev/null || { rm -f "$tmp"; die "  claude: push rejected"; }
+        rm -f "$tmp"; say "  claude: ✓ pushed"
+    else
+        say "  claude: (no local refresh token — follower will pull access token at runtime)"
+    fi
+    cmd_install_claude_wrapper
+    say "  claude: ✓ wrapper installed (plain 'claude' = follower via ANTHROPIC_AUTH_TOKEN)"
+}
+
+cmd_claude_run() { # [args] -- follower launcher: pull claude access token, inject, exec
+    local user; user="$(config_user)"
+    [ -n "$user" ] || die "claude-run: no user configured. Run 'codex-token install'."
+    local sf="$CLAUDE_SHARED_DIR/$user.json" tok=""
+    if [ -f "$sf" ]; then tok="$(claude_access_token "$sf")"; fi
+    if [ -z "$tok" ] && have_http_vault; then
+        local tmp; tmp="$(mktemp)"
+        vault_http GET "/pull/claude/$user" > "$tmp" 2>/dev/null && tok="$(claude_access_token "$tmp")"
+        rm -f "$tmp"
+    fi
+    [ -n "$tok" ] || die "claude-run: no access token for claude:$user (not pushed/approved?)"
+    local bin; bin="$(resolve_claude_bin)"
+    [ -n "$bin" ] || die "claude-run: claude binary not found."
+    export ANTHROPIC_AUTH_TOKEN="$tok"
+    exec "$bin" "$@"
+}
+
+# codex-token install --token <API_TOKEN> [--user NAME]  -- one command for codex + claude
+cmd_install() {
+    local user="${CODEX_USER:-}" token=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --token) token="${2:-}"; shift 2;;
+            --user)  user="${2:-}";  shift 2;;
+            -h|--help) echo "usage: codex-token install --token <API_TOKEN> [--user NAME]"; return 0;;
+            *) die "install: unknown arg: $1";;
+        esac
+    done
+    [ -n "$token" ] || { read -rp "API token (the operator gives you this): " token; }
+    [ -n "$token" ] || die "install: --token required"
+    while [ -z "$user" ]; do read -rp "Your vault username: " user; done
+    mkdir -p "$VAULT_DIR_CLIENT"
+    set_config user "$user"
+    set_config token "$token"
+    say "vault: user=$user  url=$(vault_url)"
+    vault_http GET /status >/dev/null 2>&1 || die "install: vault rejected the token (wrong token / not approved?). url=$(vault_url)"
+    say "  ✓ authenticated"
+    if command -v codex >/dev/null 2>&1 || [ -f "$LEGACY_AUTH" ]; then install_codex_for "$user"; else say "  – codex CLI not found; skipping codex"; fi
+    if command -v claude >/dev/null 2>&1; then install_claude_for "$user"; else say "  – claude CLI not found; skipping claude"; fi
+    say "install complete. Verify with: codex-token status --all"
+}
+
 cmd_diagnose() {
     say "codex-token $VERSION"
     say "PROFILES_DIR=$PROFILES_DIR"
@@ -588,32 +703,45 @@ cmd_diagnose() {
 
 show_help() {
     cat <<'HELP'
-codex-token — print and sync Codex CLI credentials across machines.
+codex-token — print and sync Codex/Claude CLI credentials via the leader vault.
+
+NEW MACHINE (one command, codex + claude):
+  codex-token install --token <API_TOKEN> [--user NAME]
+      Configures the vault (URL defaults to https://vault.ekelvin.com), then for
+      each CLI present (codex, claude): pushes any local real token to the leader
+      (else pulls a follower token) and installs a follower wrapper. Get the token
+      from the operator (on the leader: `codex-vault token <user>`).
 
 Usage:
-  codex-token [print] [--profile P]          Print active/given profile tokens (default).
+  codex-token install --token T [--user U]   ONE-command onboarding (codex + claude).
+  codex-token login [--user U]               Browser OAuth for codex → push → follower.
+  codex-token run [codex args]               Follower launcher for codex (refresh blackholed).
+  codex-token claude-run [claude args]       Follower launcher for claude (ANTHROPIC_AUTH_TOKEN).
+  codex-token install-wrapper                (re)install the plain `codex` follower wrapper.
+  codex-token pair [--user U]                Generate an SSH key + show the approve line.
+  codex-token set-url URL                    Override the vault URL (default: https://vault.ekelvin.com).
+  codex-token set-token T                    Store an API token (done by `install`).
   codex-token status [--profile P|--all]     Roles, token age, sync health (no secrets).
-  codex-token publish [--profile P|--all]    LEADER: refresh + publish token to shared dir.
-  codex-token pull [--profile P|--all]       FOLLOWER: pull published token into local profile.
-  codex-token push [--profile P|--all]       FOLLOWER: push a freshly-logged-in token to leader.
+  codex-token push [--profile P|--all]       Push a local real token to the leader (owner-gated).
+  codex-token pull [--profile P|--all]       Pull a published follower token into a local profile.
+  codex-token publish [--profile P|--all]    LEADER: refresh + publish token to the shared dir.
   codex-token sync [--profile P|--all]       Role-aware: publish / push / pull as appropriate.
+  codex-token [print] [--profile P]          Print active/given profile tokens (default).
 
 Options:
   --profile P        Act on profile P (default: auto-detect active profile).
   --all              Act on every profile.
-  --leader HOST      Override leader host (default: farol; env CODEX_LEADER).
+  --leader HOST      Override leader SSH host (default: farol-ts; env CODEX_LEADER).
   --version, -v      Print version.
   --diagnose         Print config (no secrets).
   --help, -h         This message.
 
-Environment:
-  CODEX_PROFILE, CODEX_PROFILES_DIR, CODEX_SHARED_DIR, CODEX_LEADER, CODEX_CONFIG_DIR, OPENAI_API_KEY.
-
-Model: one leader per profile owns the real refresh_token and publishes a fresh
-(~10d) access_token to a Syncthing-shared folder. Followers run with a sentinel
-refresh_token + a blackholed refresh endpoint (set by ai-as) so they never rotate
-the leader's token. After logging in on a follower, run `codex-token sync`.
+Model: one leader owns each account's real refresh_token and publishes a fresh
+(~10d) access token. Followers use a sentinel refresh token (codex: refresh
+blackholed) or an injected access token (claude: ANTHROPIC_AUTH_TOKEN), so they
+never rotate the leader's token.
 HELP
+
 }
 
 # ----------------------------------------------------------------------------
@@ -624,6 +752,8 @@ HELP
 case "${1:-}" in
     run)   shift; cmd_run "$@"; exit $? ;;
     login) shift; cmd_login "$@"; exit $? ;;
+    claude-run) shift; cmd_claude_run "$@"; exit $? ;;
+    install)    shift; cmd_install "$@"; exit $? ;;
     set-url)   shift; cmd_set_url "${1:-}"; exit $? ;;
     set-token) shift; cmd_set_token "${1:-}"; exit $? ;;
 esac

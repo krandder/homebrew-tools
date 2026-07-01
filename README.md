@@ -6,7 +6,48 @@ Personal Homebrew tap for useful CLI tools.
 
 ### `claude-token`
 
-Extracts Claude Code authentication credentials from macOS Keychain or credentials file.
+Print and **sync Claude Code OAuth credentials across machines** using the same
+leader/follower vault as `codex-token`. Works for Claude Code's OAuth on
+`platform.claude.com` (access tokens `sk-ant-oat…`, refresh tokens `sk-ant-ort…`).
+
+**Install:**
+```bash
+brew tap krandder/tools
+brew install claude-token
+```
+
+#### How it works (same model as codex)
+- The **leader** owns the real Claude refresh token and refreshes it
+  (`platform.claude.com/v1/oauth/token`); access tokens last ~hours, so the
+  leader publishes frequently (cron ~every 2h).
+- **Followers** run with a *sentinel* refresh token. Claude Code uses the fresh
+  access bearer directly (verified: `claude -p` succeeds with a sentinel RT) and
+  **cannot rotate** the leader's token. Claude exposes no refresh-endpoint
+  override, so followers re-pull on each launch (`claude-token run`) to stay
+  fresh rather than refreshing locally.
+- Creds are stored in the macOS **Keychain** (`Claude Code-credentials`) on
+  Darwin and `~/.claude/.credentials.json` on Linux.
+
+#### Commands (mirror `codex-token`)
+```
+claude-token                              print active account tokens (default)
+claude-token status / pair --user / set-url / set-token / install-wrapper
+claude-token login                        browser OAuth -> push to leader -> follower
+claude-token run [claude args...]         follower launcher (freshen store, exec claude)
+claude-token publish [--profile P|--all]  LEADER: refresh + publish follower token
+claude-token pull [--profile P]           FOLLOWER: pull a published token into the store
+claude-token push [--profile P]           push local real token to leader (owner-gated)
+claude-token --diagnose | --version
+```
+
+Pairing/onboarding is identical to `codex-token` (pair → operator `codex-vault
+approve`/`enroll … claude` + `token` → `set-url`/`set-token` → `login`). Profile
+ids in the vault are composite `<kind>:<name>` (e.g. `claude:kas`, `codex:kas`),
+so the same name can exist for both tools.
+
+---
+
+### `claude-token` (legacy extract-only)
 
 **Install:**
 ```bash

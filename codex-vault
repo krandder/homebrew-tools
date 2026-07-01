@@ -143,6 +143,20 @@ cmd_serve() { # profile -> stdout follower token JSON
     cat "$sf"
 }
 
+# access: print ONLY the current access token (no refresh token) for a profile.
+# Used by transparent followers (ANTHROPIC_AUTH_TOKEN) so they never hold/refresh.
+cmd_access() { # id -> stdout: access token (plain text)
+    local p="$1" sf
+    can_pull "$p" || { audit "$p" access denied "not authorized"; die "access: '$(current_user)' is not authorized for '$p'"; }
+    sf="$(shared_file_for "$p")"
+    [ -f "$sf" ] || die "access: no published token for '$p'"
+    python3 - "$sf" <<'PY'
+import json,sys
+d=json.load(open(sys.argv[1])); o=d.get("claudeAiOauth",d)
+sys.stdout.write(o.get("accessToken") or (d.get("tokens") or {}).get("access_token") or "")
+PY
+}
+
 cmd_enroll() { # kind name [owner]
     require_admin enroll
     local kind="$1" p="$2" owner="${3:-$2}"
@@ -351,6 +365,7 @@ cmd="$1"; shift || true
 case "$cmd" in
     receive)    cmd_receive "$@" ;;
     serve)      cmd_serve "$@" ;;
+    access)     cmd_access "$1" ;;
     enroll)      cmd_enroll "$@" ;;
     onboard)     cmd_onboard "$1" ;;
     pair-create) cmd_pair_create "$@" ;;

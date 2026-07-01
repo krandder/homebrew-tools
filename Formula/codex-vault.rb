@@ -2,8 +2,8 @@ class CodexVault < Formula
   desc "Leader-side Codex token vault: owner-gated push, ACL-gated pull, audit"
   homepage "https://github.com/krandder/homebrew-tools"
   url "https://raw.githubusercontent.com/krandder/homebrew-tools/main/codex-vault"
-  version "1.3.0"
-  sha256 "fbc1430618bd49a497d2e3c271d5081bca741e511143c80b9907a5abb694bc3d"
+  version "1.2.0"
+  sha256 "a708d92da30ef33ad6756dfd0530d93b5db12895b97f986464008adf843a4c2f"
 
   depends_on "codex-token"
 

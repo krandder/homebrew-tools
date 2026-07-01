@@ -293,11 +293,23 @@ cmd_login() {
     say "paired. Use 'claude' (or 'claude-token run') to work as $user."
 }
 
-cmd_run() { # [claude args...]
+cmd_run() { # [claude args...]  — transparent follower: broker access token via ANTHROPIC_AUTH_TOKEN
     local user; user="$(config_user)"; [ -n "$user" ] || die "run: run 'claude-token pair' first"
-    local fresh; fresh="$(pull_profile "$user" 2>/dev/null || true)"
-    [ -n "$fresh" ] && write_oauth_json "$fresh"
+    local access="" sf
+    sf="$SHARED_DIR/$user.json"
+    # 1. broker: syncthing shared file (fast) or HTTPS /access/
+    if [ -f "$sf" ]; then
+        access="$(python3 -c 'import json,sys;d=json.load(open(sys.argv[1]));o=d.get("claudeAiOauth",d);print(o.get("accessToken") or "")' "$sf" 2>/dev/null)"
+    elif have_http_vault; then
+        access="$(vault_http GET "/access/claude/$user" 2>/dev/null || true)"
+    fi
+    # 2. fallback: local keychain/file access token (standalone)
+    if [ -z "$access" ]; then
+        access="$(read_oauth_json 2>/dev/null | python3 -c 'import json,sys;print(json.load(sys.stdin).get("accessToken",""))' 2>/dev/null || true)"
+    fi
+    [ -n "$access" ] || die "run: no access token (broker unreachable and no local creds)"
     local bin; bin="$(resolve_claude_bin)"; [ -n "$bin" ] || die "run: claude binary not found"
+    export ANTHROPIC_AUTH_TOKEN="$access"
     exec "$bin" "$@"
 }
 

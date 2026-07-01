@@ -104,6 +104,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if self.path == "/status":
             p = run_vault(user, ["list"])
             return self._send(200 if p.returncode == 0 else 500, p.stdout or p.stderr)
+        if self.path.startswith("/access/"):
+            pid = parse_id(self.path[len("/access/"):])
+            if not pid:
+                return self._send(400, '{"error":"bad profile; use /access/<kind>/<name>"}')
+            p = run_vault(user, ["access", pid[0] + ":" + pid[1]])
+            if p.returncode == 0 and p.stdout:
+                return self._send(200, p.stdout, ctype="text/plain")
+            return self._send(403 if "authorized" in p.stderr else 404,
+                              '{"error":"' + (p.stderr.strip().splitlines()[-1] or 'failed') + '"}')
         if self.path.startswith("/pull/"):
             pid = parse_id(self.path[len("/pull/"):])
             if not pid:

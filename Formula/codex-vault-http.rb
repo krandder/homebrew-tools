@@ -2,8 +2,8 @@ class CodexVaultHttp < Formula
   desc "HTTPS front-end for codex-vault (bearer-token auth, ACL-gated push/pull)"
   homepage "https://github.com/krandder/homebrew-tools"
   url "https://raw.githubusercontent.com/krandder/homebrew-tools/main/codex-vault-http"
-  version "1.1.0"
-  sha256 "8c7aa1fad7f13ca57fd03d87033cd4dc10d06c4a33bb9ced67dc5eec316fb83b"
+  version "1.2.0"
+  sha256 "cab72f333773be71d93492b6378333979c5b978defea9467d64b8ba00bfd1057"
 
   depends_on "codex-vault"
 

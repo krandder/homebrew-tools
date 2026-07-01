@@ -30,21 +30,42 @@ VAULT_DIR="${CODEX_VAULT_DIR:-$HOME/.codex-vault}"
 ACL_FILE="$VAULT_DIR/acl.json"
 AUDIT_FILE="$VAULT_DIR/audit.jsonl"
 PROFILES_DIR="${CODEX_PROFILES_DIR:-$HOME/.codex-profiles}"
+CLAUDE_PROFILES_DIR="${CLAUDE_PROFILES_DIR:-$HOME/.claude-profiles}"
 SHARED_DIR="${CODEX_SHARED_DIR:-$HOME/shared/codex-tokens}"
+CLAUDE_SHARED_DIR="${CLAUDE_SHARED_DIR:-$HOME/shared/claude-tokens}"
 CLIENT_ID="app_EMoamEEZ73f0CkXaXp7hrann"
 
 die() { echo "codex-vault: error: $*" >&2; exit 1; }
 say() { echo "codex-vault: $*" >&2; }    # status -> stderr (stdout reserved for token data)
 
-mkdir -p "$VAULT_DIR" "$PROFILES_DIR" "$SHARED_DIR"
+mkdir -p "$VAULT_DIR" "$PROFILES_DIR" "$CLAUDE_PROFILES_DIR" "$SHARED_DIR" "$CLAUDE_SHARED_DIR"
 [ -f "$ACL_FILE" ] || printf '{"profiles":{},"admins":["admin"]}' > "$ACL_FILE"
 
 current_user() { echo "${CODEX_VAULT_USER:-${CODEX_USER:-$OPERATOR}}"; }
-auth_file_for() { echo "$PROFILES_DIR/$1/.codex/auth.json"; }
 
 # Operator = who runs the vault directly on the leader (admin). Forced-command
 # connections override this with the key-bound identity via `shell`.
 OPERATOR="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("operator","admin"))' "$ACL_FILE" 2>/dev/null || echo admin)"
+
+# Profile ids are composite "<kind>:<name>" (e.g. "codex:kas", "claude:kas") so
+# the same name can exist for both tools. ACL is keyed by the composite id.
+kind_of() { local id="$1"; echo "${id%%:*}"; }
+name_of() { local id="$1"; echo "${id#*:}"; }
+auth_file_for() {
+    local k n; k="$(kind_of "$1")"; n="$(name_of "$1")"
+    case "$k" in
+        claude) echo "$CLAUDE_PROFILES_DIR/$n/.claude/credentials.json" ;;
+        *)      echo "$PROFILES_DIR/$n/.codex/auth.json" ;;
+    esac
+}
+shared_file_for() {
+    local k n; k="$(kind_of "$1")"; n="$(name_of "$1")"
+    case "$k" in
+        claude) echo "$CLAUDE_SHARED_DIR/$n.json" ;;
+        *)      echo "$SHARED_DIR/$n.json" ;;
+    esac
+}
+publish_tool_for() { case "$(kind_of "$1")" in claude) echo claude-token ;; *) echo codex-token ;; esac; }
 
 # ---- ACL predicates ----
 is_admin() { python3 - "$ACL_FILE" "$(current_user)" <<'PY'
@@ -85,8 +106,9 @@ require_admin() { is_admin || die "'$(current_user)' is not an admin (need: $*)"
 
 # ---- core ops ----
 cmd_receive() { # profile   (stdin = token JSON)
-    local p="$1" af tmp rc
+    local p="$1" af tmp rc kind
     can_push "$p" || { audit "$p" push denied "not owner"; die "receive: '$(current_user)' may not push '$p' (not the owner)"; }
+    kind="$(kind_of "$p")"
     af="$(auth_file_for "$p")"; mkdir -p "$(dirname "$af")"
     tmp="$(mktemp)"; cat > "$tmp"            # capture pushed token from stdin
     set +e
@@ -95,39 +117,46 @@ import json,sys,os
 tmp,af=sys.argv[1],sys.argv[2]
 try: data=json.load(open(tmp))
 except Exception as e: sys.exit("codex-vault: invalid token JSON: "+str(e))
-tok=data.get("tokens") or {}
-if not tok.get("refresh_token"): sys.exit("codex-vault: token has no refresh_token")
+# accept codex ({tokens:{refresh_token}}) or claude ({refreshToken} / {claudeAiOauth:{refreshToken}})
+def rt(o):
+    return ((o.get("tokens") or {}).get("refresh_token") or o.get("refreshToken")
+            or (o.get("claudeAiOauth") or {}).get("refreshToken") or "")
+if not rt(data): sys.exit("codex-vault: token has no refresh_token")
 json.dump(data,open(af,"w"),indent=2); os.chmod(af,0o600)
 PY
     rc=$?
     set -e
     rm -f "$tmp"
     [ "$rc" -eq 0 ] || { audit "$p" push failed "bad token"; exit "$rc"; }
-    codex-token publish --profile "$p" >/dev/null 2>&1 || { audit "$p" push failed "refresh/publish"; die "receive: refresh/publish failed for '$p' (token invalid?)"; }
-    audit "$p" push ok "by $(current_user)"
-    say "received '$p' from $(current_user); refreshed + published"
+    "$(publish_tool_for "$p")" publish --profile "$(name_of "$p")" >/dev/null 2>&1 \
+        || { audit "$p" push failed "refresh/publish"; die "receive: refresh/publish failed for '$p' (token invalid?)"; }
+    audit "$p" push ok "by $(current_user) ($kind)"
+    say "received '$p' ($kind) from $(current_user); refreshed + published"
 }
 
 cmd_serve() { # profile -> stdout follower token JSON
-    local p="$1" sf="$SHARED_DIR/$1.json"
+    local p="$1" sf
+    sf="$(shared_file_for "$p")"
     can_pull "$p" || { audit "$p" pull denied "not authorized"; die "serve: '$(current_user)' is not authorized to pull '$p'"; }
     [ -f "$sf" ] || { audit "$p" pull failed "no published token"; die "serve: no published token for '$p' (owner must push first)"; }
     audit "$p" pull ok "by $(current_user)"
     cat "$sf"
 }
 
-cmd_enroll() { # profile owner
+cmd_enroll() { # kind name [owner]
     require_admin enroll
-    local p="$1" owner="$2"
-    python3 - "$ACL_FILE" "$p" "$owner" <<'PY'
+    local kind="$1" p="$2" owner="${3:-$2}"
+    case "$kind" in codex|claude) ;; *) die "enroll: first arg must be kind (codex|claude)" ;; esac
+    local id="$kind:$p"
+    python3 - "$ACL_FILE" "$id" "$owner" "$kind" <<'PY'
 import json,sys
-f,p,owner=sys.argv[1],sys.argv[2],sys.argv[3]
+f,id,owner,kind=sys.argv[1],sys.argv[2],sys.argv[3],sys.argv[4]
 d=json.load(open(f))
-d.setdefault("profiles",{})[p]={"owner":owner,"pullers":[owner]}
+d.setdefault("profiles",{})[id]={"owner":owner,"pullers":[owner],"kind":kind}
 json.dump(d,open(f,"w"),indent=2)
-print(f"enrolled {p} (owner={owner})")
+print(f"enrolled {id} (owner={owner})")
 PY
-    audit "$p" enroll ok "owner=$owner"
+    audit "$id" enroll ok "owner=$owner"
 }
 
 # Issue a per-user API token for the HTTPS front-end (codex-vault-http).
@@ -151,11 +180,12 @@ PY
 
 # approve <user> <pubkey-line>: enroll the user and install their SSH key with a
 # forced command that binds their identity (no shell). Idempotent.
-cmd_approve() {
+cmd_approve() { # user pubkey-line   (enrolls codex:<user> + claude:<user>, installs forced-command key)
     require_admin approve
     local user="$1" line="${2:-}" authkeys="${CODEX_VAULT_AUTH_KEYS:-$HOME/.ssh/authorized_keys}"
-    [ -n "$line" ] || die "approve: pass the pubkey line printed by 'codex-token pair' (as one quoted arg)"
-    cmd_enroll "$user" "$user" >/dev/null || true
+    [ -n "$line" ] || die "approve: pass the pubkey line printed by '*-token pair' (as one quoted arg)"
+    cmd_enroll codex "$user" "$user" >/dev/null || true
+    cmd_enroll claude "$user" "$user" >/dev/null || true
     local entry
     case "$line" in
         *codex-vault\ shell\ "$user"*) entry="$line" ;;
@@ -165,7 +195,7 @@ cmd_approve() {
     mkdir -p "$(dirname "$authkeys")"; touch "$authkeys"
     grep -qF "$entry" "$authkeys" 2>/dev/null || printf '%s\n' "$entry" >> "$authkeys"
     audit "$user" approve ok "by $(current_user)"
-    say "approved '$user' (enrolled + forced-command key installed in $authkeys)"
+    say "approved '$user' (codex+claude enrolled + forced-command key installed in $authkeys)"
 }
 
 cmd_grant() { # profile user
@@ -207,7 +237,7 @@ import json,sys
 d=json.load(open(sys.argv[1]))
 print("admins:", ", ".join(d.get("admins",[])))
 for p,info in sorted(d.get("profiles",{}).items()):
-    print(f"  {p:10} owner={info.get('owner','?'):10} pullers={','.join(info.get('pullers',[]))}")
+    print(f"  {p:14} {info.get('kind','codex'):6} owner={info.get('owner','?'):10} pullers={','.join(info.get('pullers',[]))}")
 PY
 }
 

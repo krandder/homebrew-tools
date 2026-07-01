@@ -282,15 +282,15 @@ PY
     else
         # ACL-gated path: ask the leader (HTTPS if configured, else SSH).
         local tmp="$af.tmp"
-        if have_http_vault; then
-            say "pulling '$p' from $(vault_url) (HTTPS, ACL-gated)..."
-            vault_http GET "/pull/$p" > "$tmp" || { rm -f "$tmp"; die "pull: leader denied/unavailable for '$p'"; }
-        else
-            need_cmd ssh
-            say "pulling '$p' from leader $LEADER_HOST (vault, ACL-gated)..."
-            ssh_vault "codex-vault serve '$p'" > "$tmp" \
-                || { rm -f "$tmp"; die "pull: leader denied/unavailable for '$p'"; }
-        fi
+    if have_http_vault; then
+        say "pushing '$p' to $(vault_url) (HTTPS)..."
+        vault_http POST "/push/codex/$p" "$af" >/dev/null || die "push: leader rejected '$p' (not owner, or token invalid)"
+    else
+        need_cmd ssh
+        say "pushing '$p' to leader $LEADER_HOST (vault/SSH)..."
+        ssh_vault "codex-vault receive codex:$p" < "$af" \
+            || die "push: leader rejected '$p' (not owner, unreachable, or token invalid)"
+    fi
         python3 - "$tmp" "$af" <<'PY'
 import json,sys,os
 src,dst=sys.argv[1],sys.argv[2]
@@ -508,10 +508,10 @@ cmd_login() {
     if [ -n "$rt" ] && ! is_sentinel "$rt"; then
         if have_http_vault; then
             say "pushing your token to $(vault_url) as '$user'..."
-            vault_http POST "/push/$user" "$LEGACY_AUTH" >/dev/null || die "login: leader rejected push for '$user' (not approved?)"
+            vault_http POST "/push/codex/$user" "$LEGACY_AUTH" >/dev/null || die "login: leader rejected push for '$user' (not approved?)"
         else
             say "pushing your token to the leader as '$user'..."
-            ssh_vault "codex-vault receive '$user'" < "$LEGACY_AUTH" \
+            ssh_vault "codex-vault receive codex:$user" < "$LEGACY_AUTH" \
                 || die "login: leader rejected push for '$user' (not approved yet? wrong user?)"
         fi
         # convert ~/.codex to follower (sentinel RT)
@@ -534,12 +534,12 @@ cmd_run() { # [args...]  -- follower launcher: freshen ~/.codex then exec codex 
     if [ -f "$sf" ]; then
         _copy_token "$sf" "$LEGACY_AUTH"
     elif have_http_vault; then
-        vault_http GET "/pull/$user" > "$LEGACY_AUTH.tmp" \
+        vault_http GET "/pull/codex/$user" > "$LEGACY_AUTH.tmp" \
             || { rm -f "$LEGACY_AUTH.tmp"; die "run: cannot reach/authorized for '$user'"; }
         _copy_token "$LEGACY_AUTH.tmp" "$LEGACY_AUTH"; rm -f "$LEGACY_AUTH.tmp"
     else
         need_cmd ssh
-        ssh_vault "codex-vault serve '$user'" > "$LEGACY_AUTH.tmp" \
+        ssh_vault "codex-vault serve codex:$user" > "$LEGACY_AUTH.tmp" \
             || { rm -f "$LEGACY_AUTH.tmp"; die "run: cannot reach/authorized for '$user' on leader"; }
         _copy_token "$LEGACY_AUTH.tmp" "$LEGACY_AUTH"; rm -f "$LEGACY_AUTH.tmp"
     fi

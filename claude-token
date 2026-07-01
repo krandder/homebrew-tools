@@ -1,220 +1,355 @@
 #!/usr/bin/env bash
-# Extract Claude Code OAuth credentials.
+# claude-token — print Claude Code OAuth credentials and sync them across
+# machines via the vault (leader/follower), analogous to codex-token.
 #
-# Output is the native Claude OAuth object:
-#   {"accessToken":"...","refreshToken":"...","expiresAt":...}
+# Default (no args): print the active Claude OAuth object (backward compatible).
 #
-# Prefer refreshable credentials from Keychain / credentials files over
-# CLAUDE_CODE_OAUTH_TOKEN. Claude Code exports CLAUDE_CODE_OAUTH_TOKEN inside
-# sessions, but that value is only an access token (`sk-ant-oat...`) and does
-# not contain the refresh token (`sk-ant-ort...`).
+# Subcommands:
+#   claude-token                           print active account tokens (default)
+#   claude-token status                    account, token age, sync health
+#   claude-token pair --user NAME          generate a vault key + print approve line
+#   claude-token set-url <url>             configure the HTTPS vault endpoint
+#   claude-token set-token <token>         store the API token the operator issued
+#   claude-token login                     browser OAuth -> push to leader -> follower
+#   claude-token run [claude args...]      follower launcher: freshen store, exec claude
+#   claude-token install-wrapper           make plain `claude` run via `claude-token run`
+#   claude-token publish [--profile P|--all]  LEADER: refresh + publish follower token(s)
+#   claude-token pull   [--profile P]      FOLLOWER: pull a published token into the store
+#   claude-token push   [--profile P]      push local real token to leader (owner-gated)
+#   claude-token --diagnose | --version | --help
+#
+# Claude store: macOS Keychain ("Claude Code-credentials") on Darwin;
+# ~/.claude/.credentials.json on Linux. Token shape: {accessToken,refreshToken,
+# expiresAt,scopes,subscriptionType,rateLimitTier} (flat internally; wrapped in
+# {"claudeAiOauth":...} when written to the macOS Keychain).
+#
+# Model: one leader owns the real refresh token and publishes fresh access
+# tokens (~hours TTL). Followers run with a sentinel refresh token so they can
+# never rotate/invalidate the leader. Refresh endpoint override for Claude is
+# not exposed, so followers re-pull on each launch (access token stays fresh).
 
 set -euo pipefail
+VERSION="2.0.0"
 
-VERSION="1.1.3"
-MODE="run"
-case "${1:-}" in
-    --version|-v)
-        echo "claude-token $VERSION"
-        exit 0
-        ;;
-    --diagnose|--diagnostics|--debug)
-        MODE="diagnose"
-        ;;
-    --help|-h)
-        cat <<'HELP'
-Usage: claude-token [--diagnose|--version]
+CLIENT_ID="9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+TOKEN_EP="https://platform.claude.com/v1/oauth/token"
+SENTINEL_RT="__follower_no_refresh__"
+BLACKHOLE_URL="http://127.0.0.1:9/oauth/token"
 
-Extract Claude Code OAuth credentials as JSON on stdout.
-Diagnostics are printed to stderr and never include token values.
-HELP
-        exit 0
-        ;;
-esac
+CLAUDE_PROFILES_DIR="${CLAUDE_PROFILES_DIR:-$HOME/.claude-profiles}"
+SHARED_DIR="${CLAUDE_SHARED_DIR:-$HOME/shared/claude-tokens}"
+LEADER_HOST="${CLAUDE_LEADER:-farol-ts}"
 
-emit_oauth_json() {
-    local input="$1"
+# Reuse codex-token's pairing config if present (pair once for both tools).
+if [ -d "$HOME/.codex-token" ]; then VAULT_DIR_CLIENT="$HOME/.codex-token"; else VAULT_DIR_CLIENT="$HOME/.claude-token"; fi
+VAULT_DIR_CLIENT="${CLAUDE_VAULT_DIR:-$VAULT_DIR_CLIENT}"
+VAULT_KEY="${CLAUDE_VAULT_KEY:-$VAULT_DIR_CLIENT/id_ed25519}"
+CONFIG_FILE="$VAULT_DIR_CLIENT/config"
+[ -f "$CONFIG_FILE" ] && while IFS='=' read -r _k _v; do
+    case "$_k" in
+        user)   CODEX_USER="${CODEX_USER:-$_v}" ;;
+        leader) LEADER_HOST="${CLAUDE_LEADER:-$_v}" ;;
+    esac
+done < "$CONFIG_FILE" 2>/dev/null || true
 
-    if command -v python3 >/dev/null 2>&1; then
-        python3 -c '
-import json, sys
+die() { echo "claude-token: error: $*" >&2; exit 1; }
+say() { echo "claude-token: $*" >&2; }
+need_cmd() { command -v "$1" >/dev/null 2>&1 || die "missing required command: $1"; }
+need_cmd python3
+short_host() { hostname -s 2>/dev/null || hostname; }
+is_mac() { [ "$(uname)" = Darwin ]; }
 
-data = json.loads(sys.stdin.read())
-oauth = data.get("claudeAiOauth", data) if isinstance(data, dict) else None
-if not isinstance(oauth, dict) or not oauth.get("refreshToken"):
-    sys.exit(1)
-print(json.dumps(oauth, separators=(",", ":")))
-' <<<"$input"
-        return $?
-    fi
-
-    if command -v ruby >/dev/null 2>&1; then
-        ruby -rjson -e '
-data = JSON.parse(STDIN.read)
-oauth = data.is_a?(Hash) ? (data["claudeAiOauth"] || data) : nil
-exit 1 unless oauth.is_a?(Hash) && oauth["refreshToken"]
-puts JSON.generate(oauth)
-' <<<"$input"
-        return $?
-    fi
-
-    return 1
+# ---- vault transport (HTTPS if configured, else SSH) ----
+have_http_vault() { [ -n "${CLAUDE_VAULT_URL:-}${CODEX_VAULT_URL:-}" ] || grep -q '^url=' "$CONFIG_FILE" 2>/dev/null; }
+vault_url()   { echo "${CLAUDE_VAULT_URL:-${CODEX_VAULT_URL:-$(awk -F= '/^url=/{print $2;exit}' "$CONFIG_FILE" 2>/dev/null)}}"; }
+vault_token() { echo "${CLAUDE_VAULT_TOKEN:-${CODEX_VAULT_TOKEN:-$(sed -n 's/^token=//p' "$CONFIG_FILE" 2>/dev/null)}}"; }
+ssh_vault() {
+    if [ -f "$VAULT_KEY" ]; then ssh -i "$VAULT_KEY" -o IdentitiesOnly=yes "$LEADER_HOST" "$@";
+    else ssh "$LEADER_HOST" "$@"; fi
+}
+vault_http() { # method path [data_file]
+    local method="$1" path="$2" data="${3:-}" url tok
+    url="$(vault_url)"; tok="$(vault_token)"
+    [ -n "$url" ] || die "no vault URL (run 'claude-token set-url <url>')"
+    [ -n "$tok" ] || die "no vault token (ask operator, then 'claude-token set-token <token>')"
+    if [ -n "$data" ]; then curl -fsS -X "$method" "$url$path" -H "Authorization: Bearer $tok" --data-binary @"$data";
+    else curl -fsS -X "$method" "$url$path" -H "Authorization: Bearer $tok"; fi
+}
+config_user() {
+    if [ -n "${CODEX_USER:-}" ]; then echo "$CODEX_USER"
+    elif [ -f "$CONFIG_FILE" ]; then awk -F= '/^user=/{print $2;exit}' "$CONFIG_FILE"; fi
+}
+set_config() {
+    mkdir -p "$VAULT_DIR_CLIENT"
+    python3 - "$CONFIG_FILE" "$1" "$2" <<'PY'
+import sys,os
+f,k,v=sys.argv[1],sys.argv[2],sys.argv[3]
+lines=[]; found=False
+if os.path.exists(f):
+    for line in open(f):
+        if line.rstrip("\n").startswith(k+"="): lines.append(f"{k}={v}"); found=True
+        else: lines.append(line.rstrip("\n"))
+if not found: lines.append(f"{k}={v}")
+open(f,"w").write("\n".join(lines)+"\n"); os.chmod(f,0o600)
+PY
+}
+resolve_claude_bin() {
+    local cands="$HOME/bin/claude.real:/opt/homebrew/bin/claude:/usr/local/bin/claude:$(command -v claude 2>/dev/null)" d
+    local IFS=':'
+    for d in $cands; do [ -n "$d" ] && [ -x "$d" ] || continue; case "$d" in *"$HOME/bin"*) continue ;; esac; echo "$d"; return; done
+    command -v claude
 }
 
-try_credentials_file() {
-    local file="$1"
-    [[ -f "$file" ]] || return 1
-    emit_oauth_json "$(cat "$file")"
+# ---- Claude credential store (read/write flat oauth JSON) ----
+KC_SVC="Claude Code-credentials"
+kc_account() {
+    if is_mac; then security find-generic-password -s "$KC_SVC" 2>/dev/null | sed -n 's/.*"acct"<blob>="\([^"]*\)".*/\1/p' | head -1; fi
 }
+read_oauth_json() {  # -> stdout flat oauth JSON
+    if is_mac; then
+        security find-generic-password -s "$KC_SVC" -w 2>/dev/null | python3 -c 'import json,sys
+d=json.load(sys.stdin); o=d.get("claudeAiOauth",d) if isinstance(d,dict) else {}
+print(json.dumps(o))'
+    else
+        local f
+        for f in "$HOME/.claude/.credentials.json" "$HOME/.claude/credentials.json"; do
+            [ -f "$f" ] || continue
+            python3 -c 'import json,sys;d=json.load(open(sys.argv[1]));o=d.get("claudeAiOauth",d) if isinstance(d,dict) else {};print(json.dumps(o))' "$f" && return
+        done
+        return 1
+    fi
+}
+write_oauth_json() { # oauth_str  -> keychain (wrapped) or file (flat)
+    local oauth="$1"
+    if is_mac; then
+        local acct; acct="$(kc_account)"; [ -n "$acct" ] || acct="$(whoami)"
+        local wrapped; wrapped="$(python3 -c 'import json,sys;print(json.dumps({"claudeAiOauth":json.loads(sys.argv[1])}))' "$oauth")"
+        security add-generic-password -U -s "$KC_SVC" -a "$acct" -w "$wrapped" >/dev/null
+    else
+        mkdir -p "$HOME/.claude"; printf '%s\n' "$oauth" > "$HOME/.claude/.credentials.json"; chmod 600 "$HOME/.claude/.credentials.json"
+    fi
+}
+oauth_get() { python3 -c 'import json,sys;o=json.load(open(sys.argv[1]));print(o.get(sys.argv[2],"") or "")' "$1" "$2"; }
 
-describe_json_source() {
-    local label="$1"
-    local input="$2"
-
-    if command -v python3 >/dev/null 2>&1; then
-        CLAUDE_TOKEN_LABEL="$label" python3 -c '
-import json
-import os
-import sys
-
-label = os.environ.get("CLAUDE_TOKEN_LABEL", "source")
-raw = sys.stdin.read()
-print(f"  - {label}: bytes={len(raw)}", file=sys.stderr)
+# refresh a Claude refresh_token -> json {access_token,refresh_token,expires_in,...}
+refresh_claude() { # rt  -> stdout json
+    local rt="$1"
+    python3 - "$rt" "$CLIENT_ID" "$TOKEN_EP" <<'PY'
+import json,sys,urllib.request,urllib.error
+rt,cid,url=sys.argv[1],sys.argv[2],sys.argv[3]
+body=urllib.parse.urlencode({"grant_type":"refresh_token","client_id":cid,"refresh_token":rt}).encode()
+req=urllib.request.Request(url,data=body,method="POST",headers={"Content-Type":"application/x-www-form-urlencoded","Accept":"application/json","User-Agent":"claude-code/2.1.195"})
 try:
-    data = json.loads(raw)
-except Exception as exc:
-    print(f"    json: no ({type(exc).__name__}: {exc})", file=sys.stderr)
-    raise SystemExit(0)
-
-if isinstance(data, dict):
-    oauth = data.get("claudeAiOauth", data)
-    top_keys = ", ".join(sorted(map(str, data.keys()))[:12])
-    contains_oauth = "yes" if "claudeAiOauth" in data else "no"
-    print(f"    json: yes; top-level keys: {top_keys}", file=sys.stderr)
-    print(f"    contains claudeAiOauth: {contains_oauth}", file=sys.stderr)
-else:
-    oauth = None
-    print(f"    json: yes; top-level type: {type(data).__name__}", file=sys.stderr)
-
-def token_state(value, expected_prefix):
-    if not isinstance(value, str) or not value:
-        return "missing"
-    if value.startswith(expected_prefix):
-        return f"present ({expected_prefix}...)"
-    return f"present (unexpected prefix, len={len(value)})"
-
-if isinstance(oauth, dict):
-    access_state = token_state(oauth.get("accessToken"), "sk-ant-oat")
-    refresh_state = token_state(oauth.get("refreshToken"), "sk-ant-ort")
-    print(f"    accessToken: {access_state}", file=sys.stderr)
-    print(f"    refreshToken: {refresh_state}", file=sys.stderr)
-    if "expiresAt" in oauth:
-        print(f"    expiresAt: present", file=sys.stderr)
-else:
-    print("    oauth object: missing", file=sys.stderr)
-' <<<"$input"
-    else
-        echo "  - $label: python3 unavailable; cannot inspect JSON safely" >&2
-    fi
+    r=urllib.request.urlopen(req,timeout=20); print(r.read().decode()); sys.exit(0)
+except urllib.error.HTTPError as e:
+    sys.stderr.write("refresh FAILED: "+e.read().decode()[:200]+"\n"); sys.exit(1)
+PY
 }
 
-file_meta() {
-    local file="$1"
-    if [[ ! -e "$file" ]]; then
-        echo "missing"
-        return 0
-    fi
-    local meta
-    if meta=$(stat -f '%Sp %z bytes' "$file" 2>/dev/null); then
-        echo "$meta"
-    elif meta=$(stat -c '%A %s bytes' "$file" 2>/dev/null); then
-        echo "$meta"
-    else
-        echo "exists"
-    fi
+# ---- LEADER: publish ----
+canonical_file() { echo "$CLAUDE_PROFILES_DIR/$1/.claude/credentials.json"; }
+shared_file()    { echo "$SHARED_DIR/$1.json"; }
+
+publish_profile() { # profile
+    local p="$1" af sf rt resp
+    af="$(canonical_file "$p")"; sf="$(shared_file "$p")"
+    [ -f "$af" ] || die "publish: missing canonical creds at $af"
+    rt="$(python3 -c 'import json,sys;o=json.load(open(sys.argv[1]));o=o.get("claudeAiOauth",o);print(o.get("refreshToken",""))' "$af")"
+    [ -n "$rt" ] || die "publish: no refreshToken for '$p'"
+    [ "$rt" = "$SENTINEL_RT" ] && die "publish: '$p' is a follower (sentinel)"
+    resp="$(refresh_claude "$rt")" || die "publish: refresh failed for '$p'"
+    mkdir -p "$SHARED_DIR" "$(dirname "$af")"
+    python3 - "$af" "$sf" "$p" "$resp" "$SENTINEL_RT" "${CLAUDE_LEADER:-farol-ts}" <<'PY'
+import json,sys,os,time,datetime
+af,sf,profile,resp,sentinel,leader=sys.argv[1:7]
+r=json.loads(resp); ts=int(time.time()*1000)
+d=json.load(open(af)); o=d.get("claudeAiOauth",d)
+o["accessToken"]=r["access_token"]; o["refreshToken"]=r["refresh_token"]
+o["expiresAt"]=ts+int(r.get("expires_in",28800))*1000
+d=dict(d); d["claudeAiOauth"]=o
+json.dump(d,open(af,"w"),indent=2); os.chmod(af,0o600)   # update canonical w/ rotated RT
+pub=dict(o); pub["refreshToken"]=sentinel                 # follower: sentinel RT
+out={"claudeAiOauth":pub,"profile":profile,"leader":leader,
+     "published_at":datetime.datetime.now(datetime.timezone.utc).isoformat()}
+json.dump(out,open(sf,"w"),indent=2); os.chmod(sf,0o600)
+print(f"published {profile} -> {sf} (ttl {r.get('expires_in')}s)")
+PY
 }
 
-print_diagnostics() {
-    echo "claude-token diagnostics:" >&2
-    echo "  uname: $(uname -a 2>/dev/null || uname)" >&2
-    echo "  HOME: ${HOME:-<unset>}" >&2
-    echo "  CLAUDE_CONFIG_DIR: ${CLAUDE_CONFIG_DIR:-<unset>}" >&2
-    if [[ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]]; then
-        echo "  CLAUDE_CODE_OAUTH_TOKEN: set (access-token-only source; value redacted)" >&2
+# ---- FOLLOWER: pull / push ----
+pull_profile() { # profile -> local store
+    local p="$1" sf
+    sf="$(shared_file "$p")"
+    if [ -f "$sf" ]; then
+        : # fast path: syncthing mesh
+    elif have_http_vault; then
+        say "pulling '$p' from $(vault_url) (HTTPS, ACL-gated)..."
+        local tmp; tmp="$(mktemp)"; vault_http GET "/pull/claude/$p" > "$tmp" || { rm -f "$tmp"; die "pull: leader denied/unavailable for '$p'"; }
+        sf="$tmp"
     else
-        echo "  CLAUDE_CODE_OAUTH_TOKEN: unset" >&2
+        need_cmd ssh; local tmp; tmp="$(mktemp)"
+        say "pulling '$p' from leader $LEADER_HOST (vault, ACL-gated)..."
+        ssh_vault "codex-vault serve claude:$p" > "$tmp" || { rm -f "$tmp"; die "pull: leader denied/unavailable for '$p'"; }
+        sf="$tmp"
     fi
-    echo "  python3: $(command -v python3 2>/dev/null || echo '<missing>')" >&2
-    echo "  ruby: $(command -v ruby 2>/dev/null || echo '<missing>')" >&2
-    echo "  claude: $(command -v claude 2>/dev/null || echo '<missing>')" >&2
+    python3 - "$sf" <<'PY'
+import json,sys
+d=json.load(open(sys.argv[1])); o=d.get("claudeAiOauth",d)
+if not o.get("accessToken"): sys.exit("pull: no accessToken in published token")
+print(json.dumps(o))
+PY
+}
 
-    if [[ "$(uname)" == "Darwin" ]]; then
-        echo "  macOS Keychain service: Claude Code-credentials" >&2
-        if ! command -v security >/dev/null 2>&1; then
-            echo "    security command: missing" >&2
+push_profile() { # profile -> leader (then revert local to sentinel)
+    local p="$1" oauth rt
+    oauth="$(read_oauth_json)" || die "push: no local Claude creds found"
+    rt="$(echo "$oauth" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("refreshToken",""))')"
+    [ -n "$rt" ] || die "push: no refreshToken locally"
+    [ "$rt" = "$SENTINEL_RT" ] && die "push: only sentinel token present (already a follower). Run 'claude-token login' first."
+    if have_http_vault; then
+        say "pushing '$p' to $(vault_url) (HTTPS)..."
+        printf '%s' "$oauth" | vault_http POST "/push/claude/$p" /dev/stdin >/dev/null || die "push: leader rejected '$p'"
+    else
+        need_cmd ssh
+        say "pushing '$p' to leader $LEADER_HOST (vault/SSH)..."
+        printf '%s\n' "$oauth" | ssh_vault "codex-vault receive claude:$p" || die "push: leader rejected '$p'"
+    fi
+    # revert local store to follower (sentinel RT), then pull fresh
+    local follower; follower="$(echo "$oauth" | python3 -c 'import json,sys;o=json.load(sys.stdin);o["refreshToken"]="'$SENTINEL_RT'";print(json.dumps(o))')"
+    write_oauth_json "$follower"
+    local fresh; fresh="$(pull_profile "$p" 2>/dev/null || true)"; [ -n "$fresh" ] && write_oauth_json "$fresh"
+    say "reverted '$p' to follower (sentinel token)"
+}
+
+# ---- commands ----
+cmd_print() {
+    read_oauth_json 2>/dev/null || { echo '{"error":"No Claude auth found - run '\''claude login'\'' or '\''claude-token login'\''"}' >&2; exit 1; }
+}
+
+cmd_status() {
+    say "machine: $(short_host)   leader: $LEADER_HOST"
+    local oauth email exp
+    if oauth="$(read_oauth_json 2>/dev/null)"; then
+        email="$(echo "$oauth" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("subscriptionType","?"))' 2>/dev/null)"
+        exp="$(echo "$oauth" | python3 -c 'import json,sys,time;o=json.load(sys.stdin);e=o.get("expiresAt",0);print(round((e/1000-time.time())/3600,1),"h" if e else "?")' 2>/dev/null)"
+        local rt; rt="$(echo "$oauth" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("refreshToken",""))')"
+        local state; [ "$rt" = "$SENTINEL_RT" ] && state="sentinel (follower)" || state="REAL (leader/standalone)"
+        echo "  active: plan=$email  access valid: $exp  rt=$state"
+    else
+        echo "  active: (no creds)"
+    fi
+    local p
+    for p in $(ls "$CLAUDE_PROFILES_DIR" 2>/dev/null); do echo "  profile: $p"; done
+}
+
+cmd_pair() {
+    local user="${CODEX_USER:-}"
+    while [ -z "$user" ]; do read -rp "Your username on the vault: " user; done
+    mkdir -p "$VAULT_DIR_CLIENT"
+    [ -f "$VAULT_KEY" ] || { ssh-keygen -q -t ed25519 -N "" -C "$user@$(short_host)" -f "$VAULT_KEY" && say "generated vault key: $VAULT_KEY"; }
+    set_config user "$user"; set_config leader "$LEADER_HOST" 2>/dev/null || true
+    local pub=""; [ -f "$VAULT_KEY" ] && pub="$(cat "$VAULT_KEY.pub")"
+    cat <<EOF
+
+Pairing as '$user'.
+
+OPTION A — HTTPS vault (recommended; no SSH/Tailscale):
+  Ask the operator to enroll + issue a token, then:
+    codex-vault enroll $user $user claude && codex-vault token $user
+  They send you the token. Then here:
+    claude-token set-url https://vault.ekelvin.com
+    claude-token set-token <token>
+
+OPTION B — SSH (Tailscale + approved key). Send the operator this line:
+--------------------------------------------------------------------------------
+command="codex-vault shell $user",no-pty,no-port-forwarding,no-X11-forwarding,no-agent-forwarding $pub
+--------------------------------------------------------------------------------
+  They run: codex-vault approve $user '<that line>' claude
+
+Then run:  claude-token login
+EOF
+}
+
+cmd_login() {
+    local user; user="$(config_user)"; [ -n "$user" ] || die "login: run 'claude-token pair --user <name>' first"
+    local bin; bin="$(resolve_claude_bin)"; [ -n "$bin" ] || die "login: claude binary not found"
+    say "starting browser login..."
+    "$bin" login "$@" || "$bin" auth login "$@" || true
+    local oauth rt
+    oauth="$(read_oauth_json 2>/dev/null)" || die "login: no creds after login"
+    rt="$(echo "$oauth" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("refreshToken",""))')"
+    if [ -n "$rt" ] && [ "$rt" != "$SENTINEL_RT" ]; then
+        if have_http_vault; then
+            say "pushing your Claude token to $(vault_url) as '$user'..."
+            printf '%s' "$oauth" | vault_http POST "/push/claude/$user" /dev/stdin >/dev/null || die "login: leader rejected push for '$user'"
         else
-            local keychain_value
-            keychain_value=$(security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null || true)
-            if [[ -n "$keychain_value" ]]; then
-                describe_json_source "Keychain Claude Code-credentials" "$keychain_value"
-            else
-                echo "    keychain item: missing or unreadable" >&2
-            fi
+            need_cmd ssh; say "pushing your Claude token to the leader as '$user'..."
+            printf '%s\n' "$oauth" | ssh_vault "codex-vault receive claude:$user" || die "login: leader rejected push for '$user'"
         fi
+        local follower; follower="$(echo "$oauth" | python3 -c 'import json,sys;o=json.load(sys.stdin);o["refreshToken"]="'$SENTINEL_RT'";print(json.dumps(o))')"
+        write_oauth_json "$follower"
+        local fresh; fresh="$(pull_profile "$user" 2>/dev/null || true)"; [ -n "$fresh" ] && write_oauth_json "$fresh"
     fi
-
-    echo "  credential files checked:" >&2
-    local seen_diag=":"
-    local file
-    for file in "${CANDIDATES[@]}"; do
-        [[ "$seen_diag" == *":$file:"* ]] && continue
-        seen_diag="$seen_diag$file:"
-        echo "  - $file: $(file_meta "$file")" >&2
-        if [[ -f "$file" && -r "$file" ]]; then
-            describe_json_source "$file" "$(cat "$file")"
-        fi
-    done
+    say "paired. Use 'claude' (or 'claude-token run') to work as $user."
 }
 
-# 1. Try macOS Keychain first; it is the canonical Claude Code store on macOS.
-if [[ "$(uname)" == "Darwin" ]]; then
-    KEYCHAIN=$(security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null || true)
-    if [[ -n "$KEYCHAIN" ]] && emit_oauth_json "$KEYCHAIN"; then
-        exit 0
+cmd_run() { # [claude args...]
+    local user; user="$(config_user)"; [ -n "$user" ] || die "run: run 'claude-token pair' first"
+    local fresh; fresh="$(pull_profile "$user" 2>/dev/null || true)"
+    [ -n "$fresh" ] && write_oauth_json "$fresh"
+    local bin; bin="$(resolve_claude_bin)"; [ -n "$bin" ] || die "run: claude binary not found"
+    exec "$bin" "$@"
+}
+
+cmd_install_wrapper() {
+    mkdir -p "$HOME/bin"
+    local w="$HOME/bin/claude"
+    [ -e "$w" ] && [ ! -e "$w.pre-claude-token" ] && { mv "$w" "$w.pre-claude-token"; say "backed up existing -> $w.pre-claude-token"; }
+    cat > "$w" <<'EOF'
+#!/usr/bin/env bash
+exec claude-token run "$@"
+EOF
+    chmod +x "$w"
+    say "installed $w -> claude-token run"
+}
+
+cmd_set_url()   { [ -n "${1:-}" ] || die "set-url: specify URL"; set_config url "$1"; say "vault URL = $1"; }
+cmd_set_token() { [ -n "${1:-}" ] || die "set-token: specify token"; set_config token "$1"; say "vault token stored"; }
+
+cmd_publish() {
+    local p="${PROFILE:-}"
+    if [ "${ALL:-0}" = 1 ]; then
+        for p in $(ls "$CLAUDE_PROFILES_DIR" 2>/dev/null); do ( publish_profile "$p" ) || say "  (skipped $p)"; done
+    else
+        [ -n "$p" ] || p="$(config_user)"; [ -n "$p" ] || die "publish: specify --profile <name> or --all"
+        publish_profile "$p"
     fi
-fi
+}
+cmd_pull() { local p="${PROFILE:-$(config_user)}"; [ -n "$p" ] || die "pull: specify --profile <name>"; local o; o="$(pull_profile "$p")"; write_oauth_json "$o"; say "pulled '$p' into store"; }
+cmd_push() { local p="${PROFILE:-$(config_user)}"; [ -n "$p" ] || die "push: specify --profile <name>"; push_profile "$p"; }
 
-# 2. Try credentials files. Check both current and older filenames.
-declare -a CANDIDATES=()
-if [[ -n "${CLAUDE_CONFIG_DIR:-}" ]]; then
-    CANDIDATES+=("$CLAUDE_CONFIG_DIR/.credentials.json")
-    CANDIDATES+=("$CLAUDE_CONFIG_DIR/credentials.json")
-fi
-CANDIDATES+=("$HOME/.claude/.credentials.json")
-CANDIDATES+=("$HOME/.claude/credentials.json")
+cmd_diagnose() {
+    say "claude-token $VERSION"; say "VAULT_DIR_CLIENT=$VAULT_DIR_CLIENT"; say "LEADER_HOST=$LEADER_HOST"; say "SHARED_DIR=$SHARED_DIR"
+    say "is_mac=$(is_mac && echo yes || echo no)  kc_account=$(kc_account)"
+    read_oauth_json >/dev/null 2>&1 && say "local creds: present" || say "local creds: none"
+}
 
-if [[ "$MODE" == "diagnose" ]]; then
-    print_diagnostics
-    exit 0
-fi
-
-SEEN=":"
-for CREDS_FILE in "${CANDIDATES[@]}"; do
-    [[ "$SEEN" == *":$CREDS_FILE:"* ]] && continue
-    SEEN="$SEEN$CREDS_FILE:"
-    if try_credentials_file "$CREDS_FILE"; then
-        exit 0
-    fi
-done
-
-# 3. Last resort: access-token-only environment variable.
-if [[ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]]; then
-    echo "warning: CLAUDE_CODE_OAUTH_TOKEN is access-token-only; no refreshToken is available from it" >&2
-    print_diagnostics
-    echo '{"accessToken":"'"$CLAUDE_CODE_OAUTH_TOKEN"'"}'
-    exit 0
-fi
-
-print_diagnostics
-echo '{"error":"No Claude auth found - run '\''claude auth login'\'' first"}' >&2
-exit 1
+# ---- dispatch ----
+[ $# -eq 0 ] && { cmd_print; exit 0; }
+case "$1" in
+    publish) shift; while [ $# -gt 0 ]; do case "$1" in --profile|-p) PROFILE="$2"; shift 2;; --all|-a) ALL=1; shift;; *) die "unknown arg: $1";; esac; done; cmd_publish;;
+    pull)    shift; while [ $# -gt 0 ]; do case "$1" in --profile|-p) PROFILE="$2"; shift 2;; *) PROFILE="$1"; shift;; esac; done; cmd_pull;;
+    push)    shift; while [ $# -gt 0 ]; do case "$1" in --profile|-p) PROFILE="$2"; shift 2;; *) PROFILE="$1"; shift;; esac; done; cmd_push;;
+    status)  cmd_status;;
+    pair)    shift; while [ $# -gt 0 ]; do case "$1" in --user|-u) CODEX_USER="$2"; shift 2;; *) CODEX_USER="$1"; shift;; esac; done; cmd_pair;;
+    login)   shift; cmd_login "$@";;
+    run)     shift; cmd_run "$@";;
+    install-wrapper) cmd_install_wrapper;;
+    set-url)   shift; cmd_set_url "$@";;
+    set-token) shift; cmd_set_token "$@";;
+    --diagnose|--diagnostics|--debug) cmd_diagnose;;
+    --version|-v) echo "claude-token $VERSION";;
+    --help|-h) sed -n '2,22p' "$0" | sed 's/^# \?//';;
+    *) die "unknown command: $1 (see --help)";;
+esac
+exit 0

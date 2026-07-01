@@ -3,7 +3,7 @@ class CodexToken < Formula
   homepage "https://github.com/krandder/homebrew-tools"
   url "https://raw.githubusercontent.com/krandder/homebrew-tools/main/codex-token"
   version "2.2.0"
-  sha256 "8d6f9a490129d661dcc9a0c182ef9e6876f17b3106e47eda01310f20988200cd"
+  sha256 "f6a2e9f0995576b95f5c2885982ecf567a072bb9934ca9943c641526c0389b54"
 
   def install
     bin.install "codex-token"

@@ -22,7 +22,7 @@
 
 set -euo pipefail
 
-VERSION="2.0.0"
+VERSION="2.2.0"
 
 CLIENT_ID="app_EMoamEEZ73f0CkXaXp7hrann"
 TOKEN_EP="https://auth.openai.com/oauth/token"

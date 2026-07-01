@@ -73,6 +73,45 @@ def parse_id(rest):  # "codex/kas" -> ("codex", "kas") or None
     return parts[0], parts[1]
 
 
+# ---- Transparent OAuth refresh broker (single owner) ----
+# Claude Code on a follower refreshes NORMALLY (real refresh-on-expiry), but its
+# refresh is routed here by a local transparent proxy. We hold the canonical
+# refresh token, perform the rotation with Anthropic, store the rotated token,
+# and hand the follower back a fresh access token + a DUMMY refresh token
+# ("vlt:<account>:<nonce>") so the follower can never rotate/invalidate us.
+CLAUDE_TOKEN_EP = "https://platform.claude.com/v1/oauth/token"
+CLAUDE_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+
+
+def broker_refresh(account):
+    """Refresh using the canonical refresh token for <account>; return (access, expires_in).
+    Stores the rotated refresh token as the new canonical."""
+    import urllib.request, urllib.parse, time
+    af = os.path.expanduser(f"~/.claude-profiles/{account}/.claude/credentials.json")
+    d = json.load(open(af))
+    o = d.get("claudeAiOauth", d)
+    rt = o.get("refreshToken", "")
+    if not rt or rt.startswith("vlt:"):
+        raise RuntimeError("no canonical refresh token for " + account)
+    body = urllib.parse.urlencode(
+        {"grant_type": "refresh_token", "client_id": CLAUDE_CLIENT_ID, "refresh_token": rt}
+    ).encode()
+    req = urllib.request.Request(
+        CLAUDE_TOKEN_EP, data=body, method="POST",
+        headers={"Content-Type": "application/x-www-form-urlencoded",
+                 "Accept": "application/json", "User-Agent": "claude-code/2.1.195"})
+    resp = urllib.request.urlopen(req, timeout=20)
+    j = json.loads(resp.read())
+    # store rotated refresh token as the new canonical (we are the sole owner)
+    o["accessToken"] = j["access_token"]
+    o["refreshToken"] = j["refresh_token"]
+    o["expiresAt"] = int(time.time() * 1000) + int(j.get("expires_in", 28800)) * 1000
+    d["claudeAiOauth"] = o
+    json.dump(d, open(af, "w"), indent=2)
+    os.chmod(af, 0o600)
+    return j["access_token"], int(j.get("expires_in", 28800))
+
+
 class Handler(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
@@ -158,6 +197,26 @@ class Handler(http.server.BaseHTTPRequestHandler):
         user = self._identity()
         if not user:
             return
+        # Transparent OAuth refresh broker: a follower's refresh (routed here by
+        # its local proxy) is fulfilled with the canonical refresh token.
+        if self.path in ("/v1/oauth/token", "/oauth/token"):
+            from urllib.parse import parse_qs
+            import secrets as _sec
+            form = parse_qs(body)
+            grant = (form.get("grant_type") or [""])[0]
+            dummy = (form.get("refresh_token") or [""])[0]
+            if grant != "refresh_token":
+                return self._send(400, '{"error":"unsupported_grant_type"}')
+            account = dummy.split(":", 2)[1] if dummy.startswith("vlt:") else user
+            try:
+                access, exp = broker_refresh(account)
+            except Exception as e:
+                sys.stderr.write("broker refresh failed: %s\n" % e)
+                return self._send(502, '{"error":"invalid_grant","error_description":"broker refresh failed"}')
+            new_dummy = "vlt:" + account + ":" + _sec.token_urlsafe(12)
+            return self._send(200, json.dumps(
+                {"access_token": access, "refresh_token": new_dummy,
+                 "token_type": "Bearer", "expires_in": exp}))
         if self.path.startswith("/push/"):
             pid = parse_id(self.path[len("/push/"):])
             if not pid:

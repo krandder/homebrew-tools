@@ -328,6 +328,23 @@ EOF
 cmd_set_url()   { [ -n "${1:-}" ] || die "set-url: specify URL"; set_config url "$1"; say "vault URL = $1"; }
 cmd_set_token() { [ -n "${1:-}" ] || die "set-token: specify token"; set_config token "$1"; say "vault token stored"; }
 
+# One-shot bootstrap to "go live" on this machine: push the local real refresh
+# token to the leader (making the leader the sole owner), then install the
+# wrapper so plain `claude` runs transparently via the broker. After this, the
+# local keychain refresh token is inert (sentinel) and Claude Code runs on
+# broker-served access tokens — install-and-forget.
+cmd_go_live() {
+    local user; user="$(config_user)"; [ -n "$user" ] || die "go-live: run 'claude-token pair --user <name>' first"
+    local oauth rt
+    oauth="$(read_oauth_json 2>/dev/null)" || die "go-live: no local Claude creds — run 'claude login' first"
+    rt="$(printf '%s' "$oauth" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("refreshToken",""))' 2>/dev/null)"
+    [ -n "$rt" ] && [ "$rt" != "$SENTINEL_RT" ] || die "go-live: no real refresh token locally (already a follower?) — run 'claude login' first"
+    say "go-live: pushing your Claude token to the leader as '$user'..."
+    push_profile "$user" || die "go-live: push failed (leader unreachable or rate-limited — retry later)"
+    cmd_install_wrapper
+    say "go-live complete. Plain 'claude' now runs via the broker. Leader: $LEADER_HOST"
+}
+
 cmd_publish() {
     local p="${PROFILE:-}"
     if [ "${ALL:-0}" = 1 ]; then
@@ -356,6 +373,7 @@ case "$1" in
     pair)    shift; while [ $# -gt 0 ]; do case "$1" in --user|-u) CODEX_USER="$2"; shift 2;; *) CODEX_USER="$1"; shift;; esac; done; cmd_pair;;
     login)   shift; cmd_login "$@";;
     run)     shift; cmd_run "$@";;
+    go-live) shift; cmd_go_live "$@";;
     install-wrapper) cmd_install_wrapper;;
     set-url)   shift; cmd_set_url "$@";;
     set-token) shift; cmd_set_token "$@";;

@@ -58,6 +58,11 @@ def run_vault(user, args, body=None):
     )
 
 
+def run_vault_anon(args, body=None):
+    # pairing routes run without a bound identity (no CODEX_VAULT_USER)
+    return subprocess.run(["codex-vault", *args], input=body, capture_output=True, text=True, env=dict(os.environ))
+
+
 def valid_profile(p):
     return bool(p) and all(c in ALLOWED_PROFILE for c in p)
 
@@ -111,6 +116,36 @@ class Handler(http.server.BaseHTTPRequestHandler):
         return self._send(404, '{"error":"not found"}')
 
     def do_POST(self):
+        length = int(self.headers.get("Content-Length", 0) or 0)
+        body = self.rfile.read(length).decode() if length else ""
+        # ---- unauthenticated pairing routes ----
+        if self.path == "/pair":
+            try:
+                j = json.loads(body) if body else {}
+                user, code, sh = j.get("user", ""), j.get("code", ""), j.get("secret_hash", "")
+            except Exception:
+                return self._send(400, '{"error":"bad json"}')
+            if not (user and code and sh):
+                return self._send(400, '{"error":"need user, code, secret_hash"}')
+            p = run_vault_anon(["pair-create", user, code, sh])
+            return self._send(200 if p.returncode == 0 else 500, p.stdout or p.stderr or '{"ok":true}')
+        if self.path.startswith("/pair/") and self.path.endswith("/poll"):
+            code = self.path[len("/pair/"):-len("/poll")]
+            try:
+                secret = (json.loads(body) if body else {}).get("secret", "")
+            except Exception:
+                secret = ""
+            p = run_vault_anon(["pair-poll", code, secret])
+            out = (p.stdout or "").strip()
+            http = 200
+            if '"pending"' in out:
+                http = 202
+            elif '"unknown"' in out or '"expired"' in out:
+                http = 404
+            elif '"forbidden"' in out:
+                http = 403
+            return self._send(http, out or '{"error":"failed"}')
+        # ---- authenticated routes ----
         user = self._identity()
         if not user:
             return
@@ -118,8 +153,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
             pid = parse_id(self.path[len("/push/"):])
             if not pid:
                 return self._send(400, '{"error":"bad profile; use /push/<kind>/<name>"}')
-            length = int(self.headers.get("Content-Length", 0) or 0)
-            body = self.rfile.read(length).decode() if length else ""
             p = run_vault(user, ["receive", pid[0] + ":" + pid[1]], body=body)
             if p.returncode == 0:
                 return self._send(200, '{"ok":true,"detail":"' + (p.stderr.strip().splitlines()[-1] or "ok") + '"}')

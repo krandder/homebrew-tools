@@ -22,7 +22,7 @@
 
 set -euo pipefail
 
-VERSION="2.2.0"
+VERSION="2.3.0"
 
 CLIENT_ID="app_EMoamEEZ73f0CkXaXp7hrann"
 TOKEN_EP="https://auth.openai.com/oauth/token"
@@ -615,8 +615,11 @@ install_codex_for() {
     else
         say "  codex: pulling follower token..."
         mkdir -p "$(dirname "$LEGACY_AUTH")"
-        vault_http GET "/pull/codex/$user" > "$LEGACY_AUTH.tmp" || { rm -f "$LEGACY_AUTH.tmp"; die "  codex: pull failed (not approved for codex:$user?)"; }
-        _copy_token "$LEGACY_AUTH.tmp" "$LEGACY_AUTH"; rm -f "$LEGACY_AUTH.tmp"; say "  codex: ✓ follower token installed"
+        if vault_http GET "/pull/codex/$user" > "$LEGACY_AUTH.tmp" 2>/dev/null; then
+            _copy_token "$LEGACY_AUTH.tmp" "$LEGACY_AUTH"; rm -f "$LEGACY_AUTH.tmp"; say "  codex: ✓ follower token installed"
+        else
+            rm -f "$LEGACY_AUTH.tmp"; say "  codex: no token on the leader yet — run 'codex login' to push yours"
+        fi
     fi
     cmd_install_wrapper >/dev/null 2>&1 || true
     say "  codex: ✓ wrapper installed (plain 'codex' = follower)"
@@ -665,25 +668,68 @@ cmd_claude_run() { # [args] -- follower launcher: pull claude access token, inje
     exec "$bin" "$@"
 }
 
-# codex-token install --token <API_TOKEN> [--user NAME]  -- one command for codex + claude
+derive_user() {   # default handle from computer name, sanitized
+    local u; u="$(hostname -s 2>/dev/null || hostname)"
+    u="$(printf '%s' "$u" | tr '[:upper:]' '[:lower:]' | tr -dc 'a-z0-9' | cut -c1-20)"
+    [ -n "$u" ] || u="user"; echo "$u"
+}
+random_code()   { python3 -c 'import secrets;print("".join(secrets.choice("23456789ABCDEFGHJKMNPQRSTVWXYZ") for _ in range(5)))'; }
+random_secret() { python3 -c 'import secrets;print(secrets.token_urlsafe(32))'; }
+
+# pair_and_get_token <user>: POST a pairing request, show the code, poll until
+# the operator approves; print the resulting API token to stdout.
+pair_and_get_token() {
+    local user="$1" code secret sh tok
+    code="$(random_code)"; secret="$(random_secret)"
+    sh="$(printf '%s' "$secret" | shasum -a 256 | cut -d' ' -f1)"
+    curl -fsS -X POST "$(vault_url)/pair" -H "Content-Type: application/json" \
+        --data "{\"user\":\"$user\",\"code\":\"$code\",\"secret_hash\":\"$sh\"}" >/dev/null \
+        || die "pair: cannot reach vault at $(vault_url)"
+    cat >&2 <<EOF
+
+  Pairing as '$user'.  Pairing code:  $code
+  Tell the operator to run, on the leader:
+      codex-vault pair-approve $code
+  Waiting for approval (up to ~5 min)…
+EOF
+    local i
+    for i in $(seq 1 60); do
+        sleep 5
+        tok="$(curl -fsS -X POST "$(vault_url)/pair/$code/poll" -H "Content-Type: application/json" \
+            --data "{\"secret\":\"$secret\"}" 2>/dev/null | python3 -c 'import json,sys
+d=json.load(sys.stdin)
+if d.get("status")=="approved": print(d.get("token",""))
+' 2>/dev/null)" || true
+        [ -n "$tok" ] && { say "  ✓ paired as '$user'" >&2; printf '%s' "$tok"; return 0; }
+    done
+    return 1
+}
+
+# codex-token install [--token <API_TOKEN>] [--user NAME]
+#   no --token  -> magical pairing (user defaults to your computer name)
+#   --token T   -> direct (token from `codex-vault onboard/pair-approve`)
 cmd_install() {
     local user="${CODEX_USER:-}" token=""
     while [ $# -gt 0 ]; do
         case "$1" in
             --token) token="${2:-}"; shift 2;;
             --user)  user="${2:-}";  shift 2;;
-            -h|--help) echo "usage: codex-token install --token <API_TOKEN> [--user NAME]"; return 0;;
+            -h|--help) echo "usage: codex-token install [--token <API_TOKEN>] [--user NAME]"; return 0;;
             *) die "install: unknown arg: $1";;
         esac
     done
-    [ -n "$token" ] || { read -rp "API token (the operator gives you this): " token; }
-    [ -n "$token" ] || die "install: --token required"
-    while [ -z "$user" ]; do read -rp "Your vault username: " user; done
     mkdir -p "$VAULT_DIR_CLIENT"
+    if [ -z "$token" ]; then
+        [ -n "$user" ] || user="$(derive_user)"
+        token="$(pair_and_get_token "$user")" || die "install: pairing timed out / failed"
+    fi
+    [ -n "$user" ] || user="$(derive_user)"
     set_config user "$user"
     set_config token "$token"
     say "vault: user=$user  url=$(vault_url)"
-    vault_http GET /status >/dev/null 2>&1 || die "install: vault rejected the token (wrong token / not approved?). url=$(vault_url)"
+    # verify the token authenticates (/status is admin-only; use the user's own pull endpoint)
+    local probe; probe="$(vault_http GET "/pull/codex/$user" 2>&1 || true)"
+    case "$probe" in *401*|*unauthorized*) die "install: vault rejected the token (401). url=$(vault_url)" ;; esac
     say "  ✓ authenticated"
     if command -v codex >/dev/null 2>&1 || [ -f "$LEGACY_AUTH" ]; then install_codex_for "$user"; else say "  – codex CLI not found; skipping codex"; fi
     if command -v claude >/dev/null 2>&1; then install_claude_for "$user"; else say "  – claude CLI not found; skipping claude"; fi

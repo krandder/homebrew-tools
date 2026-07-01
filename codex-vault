@@ -211,6 +211,69 @@ cmd_onboard() {
     cmd_token "$user"
 }
 
+# ---- pairing flow (magical onboarding) ----
+# Follower posts {user,code,secret_hash} (POST /pair); operator runs
+# `pair-approve <code>`; follower polls (POST /pair/<code>/poll) with the long
+# secret and receives the API token. Records expire after 10 min.
+PAIRING_FILE="$VAULT_DIR/pairings.json"
+PAIR_TTL=600
+
+cmd_pair_create() { # user code secret_hash   (no auth — pairing entry point)
+    local user="$1" code="$2" sh="$3"
+    [ -n "$user" ] && [ -n "$code" ] && [ -n "$sh" ] || die "pair-create: need user code secret_hash"
+    python3 - "$PAIRING_FILE" "$user" "$code" "$sh" "$PAIR_TTL" <<'PY'
+import json,sys,os,time
+f,user,code,sh,ttl=sys.argv[1],sys.argv[2],sys.argv[3],sys.argv[4],int(sys.argv[5])
+d=json.load(open(f)) if os.path.exists(f) else {}
+now=time.time()
+d={k:v for k,v in d.items() if now-float(v.get("created_at",0))<ttl}   # expire old
+d[code]={"user":user,"secret_hash":sh,"status":"pending","created_at":now}
+json.dump(d,open(f,"w"),indent=2); os.chmod(f,0o600)
+PY
+    say "pairing request: code=$code user=$user"
+}
+
+cmd_pair_poll() { # code secret  -> stdout JSON {status[,token,user]}  (no auth)
+    local code="$1" secret="$2"
+    python3 - "$PAIRING_FILE" "$code" "$secret" "$PAIR_TTL" <<'PY'
+import json,sys,os,time,hashlib
+f,code,secret,ttl=sys.argv[1],sys.argv[2],sys.argv[3],int(sys.argv[4])
+d=json.load(open(f)) if os.path.exists(f) else {}
+rec=d.get(code)
+if not rec: print(json.dumps({"status":"unknown"})); sys.exit()
+if time.time()-float(rec.get("created_at",0))>ttl: print(json.dumps({"status":"expired"})); sys.exit()
+if rec.get("status")!="approved": print(json.dumps({"status":"pending"})); sys.exit()
+if hashlib.sha256(secret.encode()).hexdigest()!=rec.get("secret_hash"): print(json.dumps({"status":"forbidden"})); sys.exit()
+print(json.dumps({"status":"approved","token":rec.get("token",""),"user":rec.get("user","")}))
+PY
+}
+
+cmd_pair_approve() { # code   (admin) — enroll codex+claude, issue token, mark approved
+    require_admin pair-approve
+    local code="$1" user token
+    [ -n "$code" ] || die "pair-approve: specify the pairing code"
+    user="$(python3 - "$PAIRING_FILE" "$code" "$PAIR_TTL" <<'PY'
+import json,sys,os,time
+f,code,ttl=sys.argv[1],sys.argv[2],int(sys.argv[3])
+d=json.load(open(f)) if os.path.exists(f) else {}
+rec=d.get(code)
+if rec and time.time()-float(rec.get("created_at",0))<ttl: print(rec.get("user",""))
+PY
+)"
+    [ -n "$user" ] || die "pair-approve: unknown or expired code '$code'"
+    cmd_enroll codex "$user" "$user" >/dev/null 2>&1 || true
+    cmd_enroll claude "$user" "$user" >/dev/null 2>&1 || true
+    token="$(cmd_token "$user")"
+    python3 - "$PAIRING_FILE" "$code" "$token" <<'PY'
+import json,sys,os
+f,code,token=sys.argv[1],sys.argv[2],sys.argv[3]
+d=json.load(open(f)); d[code]["status"]="approved"; d[code]["token"]=token
+json.dump(d,open(f,"w"),indent=2); os.chmod(f,0o600)
+PY
+    audit "$user" pair-approve ok "code=$code"
+    say "approved pairing code '$code' for user '$user' (codex+claude enrolled); the follower will auto-complete." >&2
+}
+
 cmd_grant() { # profile user
     local p="$1" u="$2"
     { is_admin || [ "$(profile_owner "$p")" = "$(current_user)" ]; } || die "grant: only admin/owner may grant '$p'"
@@ -288,10 +351,13 @@ cmd="$1"; shift || true
 case "$cmd" in
     receive)    cmd_receive "$@" ;;
     serve)      cmd_serve "$@" ;;
-    enroll)     cmd_enroll "$@" ;;
-    onboard)    cmd_onboard "$1" ;;
-    approve)    cmd_approve "$@" ;;
-    token)      cmd_token "$1" ;;
+    enroll)      cmd_enroll "$@" ;;
+    onboard)     cmd_onboard "$1" ;;
+    pair-create) cmd_pair_create "$@" ;;
+    pair-poll)   cmd_pair_poll "$@" ;;
+    pair-approve) cmd_pair_approve "$1" ;;
+    approve)     cmd_approve "$@" ;;
+    token)       cmd_token "$1" ;;
     grant)      cmd_grant "$@" ;;
     revoke)     cmd_revoke "$@" ;;
     list)       cmd_list ;;

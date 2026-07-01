@@ -3,7 +3,7 @@ class CodexVaultHttp < Formula
   homepage "https://github.com/krandder/homebrew-tools"
   url "https://raw.githubusercontent.com/krandder/homebrew-tools/main/codex-vault-http"
   version "1.1.0"
-  sha256 "2ce57fa690ad9b708bb50e4092aa42d88b92bd6e988ac73153a8d471eaedc728"
+  sha256 "8c7aa1fad7f13ca57fd03d87033cd4dc10d06c4a33bb9ced67dc5eec316fb83b"
 
   depends_on "codex-vault"
 

@@ -1,0 +1,9 @@
+#!/bin/bash
+# Bring the agent browser to the front for manual interaction (logins, 2FA).
+# Pauses the sentinel until `hide` is run.
+set -euo pipefail
+DATA_DIR="${AGENT_BROWSER_DATA_DIR:-$HOME/.agent-chrome}"
+BASE_DIR="$(cd "$(dirname "$0")" && pwd)"
+touch "$DATA_DIR/.show"
+node "$BASE_DIR/scripts/winctl.mjs" show
+echo "agent browser is now visible — run 'hide' when done"

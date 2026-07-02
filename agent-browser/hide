@@ -1,0 +1,8 @@
+#!/bin/bash
+# Put the agent browser away again and re-enable the sentinel.
+set -euo pipefail
+DATA_DIR="${AGENT_BROWSER_DATA_DIR:-$HOME/.agent-chrome}"
+BASE_DIR="$(cd "$(dirname "$0")" && pwd)"
+rm -f "$DATA_DIR/.show"
+node "$BASE_DIR/scripts/winctl.mjs" minimize
+echo "agent browser hidden"

@@ -91,6 +91,29 @@ cmd_seed(){
   say "seeded '$user' ✓ (dummy refresh + fresh access in keychain). Try: claude"
 }
 
+cmd_seed_profile(){  # user — seed the ai-as PROFILE DIR (no login needed; pulls from broker)
+  local user="$1"
+  [ -n "$user" ] || { say "seed-profile: specify --user <name>"; exit 1; }
+  local access="" TOK; TOK="$(vault_token)"
+  [ -n "$TOK" ] || { say "seed-profile: ✗ no vault token"; exit 1; }
+  say "pulling adriana's token from $BROKER_URL (no login needed)..."
+  for i in 1 2 3 4 5; do
+    access="$(curl -fsS -H "Authorization: Bearer $TOK" "$BROKER_URL/access/claude/$user" 2>/dev/null || true)"
+    [ -n "$access" ] && break; sleep 1
+  done
+  [ -n "$access" ] || { say "seed-profile: ✗ no token from broker (leader needs to publish). Run: claude-broker doctor"; exit 1; }
+  local pdir="$HOME/.claude-profiles/$user/.claude"
+  mkdir -p "$pdir"
+  python3 -c '
+import json,sys,time
+d={"claudeAiOauth":{"accessToken":sys.argv[1],"refreshToken":"vlt:'"$user"':seed","expiresAt":int(time.time()*1000)+3600000,"scopes":[],"subscriptionType":"max"}}
+json.dump(d,open(sys.argv[2]+"/credentials.json","w"),indent=2)
+import os; os.chmod(sys.argv[2]+"/credentials.json",0o600)
+' "$access" "$pdir"
+  say "seeded profile '$user' ✓ — ~/.claude-profiles/$user/.claude/credentials.json (pulled from leader, no login)"
+  say "claude-adriana (or claude-$user) will now refresh through the broker. Try: claude-$user"
+}
+
 cmd_doctor(){
   echo "=== claude-broker diagnostics ==="
   local TOK; TOK="$(vault_token)"
@@ -217,11 +240,12 @@ cmd_uninstall(){
 }
 
 case "${1:-}" in
-  install)   shift; cmd_install "${1:-}";;
-  seed)      shift; cmd_seed "${1:-}";;
-  doctor|-d) cmd_doctor;;
-  logs)      tail -f "$DIR/proxy.log" 2>/dev/null || echo "no proxy log";;
-  status)    cmd_status;;
-  uninstall) cmd_uninstall;;
-  *) echo "usage: claude-broker {install|seed|doctor|logs|status|uninstall}" >&2; exit 1;;
+  install)        shift; cmd_install "${1:-}";;
+  seed)           shift; cmd_seed "${1:-}";;
+  seed-profile)   shift; cmd_seed_profile "${1:-}";;
+  doctor|-d)      cmd_doctor;;
+  logs)           tail -f "$DIR/proxy.log" 2>/dev/null || echo "no proxy log";;
+  status)         cmd_status;;
+  uninstall)      cmd_uninstall;;
+  *) echo "usage: claude-broker {install|seed|seed-profile|doctor|logs|status|uninstall}" >&2; exit 1;;
 esac

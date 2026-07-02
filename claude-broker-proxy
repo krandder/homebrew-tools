@@ -121,8 +121,14 @@ def handle_mitm(conn, host):
             length = int(headers.get("content-length", 0) or 0)
             body = rfile.read(length) if length else b""
             if method == "POST" and path.rstrip("/") in TOKEN_PATHS:
-                log("routing %s %s -> broker" % (method, path))
-                status, b = broker_forward(method, path, headers, body)
+                # Only route refresh_token grants to the broker.
+                # Login (authorization_code etc.) passes through to real Anthropic.
+                if b"grant_type=refresh_token" in body:
+                    log("routing refresh -> broker")
+                    status, b = broker_forward(method, path, headers, body)
+                else:
+                    log("passthrough non-refresh (%s) -> real %s" % (method, host))
+                    status, b = forward_real(host, method, path, headers, body)
             else:
                 status, b = forward_real(host, method, path, headers, body)
             wfile.write(("HTTP/1.1 %d OK\r\n" % status).encode())

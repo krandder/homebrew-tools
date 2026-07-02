@@ -29,7 +29,7 @@
 # not exposed, so followers re-pull on each launch (access token stays fresh).
 
 set -euo pipefail
-VERSION="2.3.1"
+VERSION="2.3.3"
 
 CLIENT_ID="9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 TOKEN_EP="https://platform.claude.com/v1/oauth/token"

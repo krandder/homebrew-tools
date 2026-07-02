@@ -82,63 +82,112 @@ cmd_seed(){
 
 cmd_doctor(){
   echo "=== claude-broker diagnostics ==="
-  echo "  broker URL:  $BROKER_URL"
-  echo "  proxy dir:   $DIR"
-  # 1. proxy service
-  local pid; pid="$(launchctl list 2>/dev/null | awk -v l=$LABEL_PROXY '$3==l{print $2}')"
-  if [ -n "$pid" ] && [ "$pid" != "-" ]; then
-    echo "  proxy service: ✓ running (pid $pid)"
-  else
-    echo "  proxy service: ✗ NOT RUNNING — run: claude-broker install"
-  fi
-  # 2. proxy port
-  if nc -z 127.0.0.1 $PROXY_PORT 2>/dev/null; then
-    echo "  proxy port :$PROXY_PORT: ✓ listening"
-  else
-    echo "  proxy port :$PROXY_PORT: ✗ NOT LISTENING (proxy crashed? check $DIR/proxy.log)"
-  fi
-  # 3. CA cert
-  if [ -f "$DIR/ca.pem" ]; then
-    echo "  CA cert: ✓ present ($DIR/ca.pem)"
-  else
-    echo "  CA cert: ✗ MISSING — proxy may not have started (check $DIR/proxy.log)"
-  fi
-  # 4. vault token
   local TOK; TOK="$(vault_token)"
-  if [ -n "$TOK" ]; then
-    echo "  vault token: ✓ present"
-  else
-    echo "  vault token: ✗ MISSING — run: claude-token setup"
-  fi
-  # 5. broker reachable?
-  if [ -n "$TOK" ]; then
-    local h; h="$(curl -fsS --max-time 5 -o /dev/null -w '%{http_code}' "$BROKER_URL/healthz" 2>/dev/null || echo 'fail')"
-    if [ "$h" = "200" ]; then
-      echo "  broker ($BROKER_URL): ✓ reachable"
+  local user; user="$(awk -F= '/^user=/{print $2}' "$HOME/.codex-token/config" 2>/dev/null)"
+  local needs_fix=0
+
+  # --- check + auto-fix ---
+  check_proxy_service(){
+    local pid; pid="$(launchctl list 2>/dev/null | awk -v l=$LABEL_PROXY '$3==l{print $2}')"
+    if [ -n "$pid" ] && [ "$pid" != "-" ]; then
+      echo "  proxy service: ✓ running (pid $pid)"; return 0
+    fi
+    echo "  proxy service: ✗ NOT RUNNING"
+    if [ -f "$LDIR/$LABEL_PROXY.plist" ]; then
+      echo "    → restarting..."
+      launchctl unload "$LDIR/$LABEL_PROXY.plist" 2>/dev/null || true
+      launchctl load -w "$LDIR/$LABEL_PROXY.plist" 2>/dev/null && echo "    → restarted ✓" || { echo "    → restart FAILED"; return 1; }
+      sleep 1; return 0
     else
-      echo "  broker ($BROKER_URL): ✗ NOT REACHABLE (HTTP $h)"
+      echo "    → no plist — run: claude-broker install"; return 1
     fi
-    # 6. token for this user?
-    local user; user="$(awk -F= '/^user=/{print $2}' "$HOME/.codex-token/config" 2>/dev/null)"
-    if [ -n "$user" ]; then
-      local acc; acc="$(curl -fsS --max-time 5 -H "Authorization: Bearer $TOK" "$BROKER_URL/access/claude/$user" 2>/dev/null || echo '')"
-      if [ -n "$acc" ] && [ "${acc:0:1}" != "{" ]; then
-        echo "  token claude:$user: ✓ available (len ${#acc})"
-      else
-        echo "  token claude:$user: ✗ NOT AVAILABLE — has the leader published? ($acc)"
-      fi
+  }
+
+  check_port(){
+    if nc -z 127.0.0.1 $PROXY_PORT 2>/dev/null; then
+      echo "  proxy port :$PROXY_PORT: ✓ listening"; return 0
     fi
-  fi
-  # 7. proxy log
+    echo "  proxy port :$PROXY_PORT: ✗ NOT LISTENING"
+    echo "    → check $DIR/proxy.log for errors (claude-broker logs)"; return 1
+  }
+
+  check_ca(){
+    if [ -f "$DIR/ca.pem" ]; then
+      echo "  CA cert: ✓ present"; return 0
+    fi
+    echo "  CA cert: ✗ MISSING"
+    if [ -f "$LDIR/$LABEL_PROXY.plist" ]; then
+      echo "    → restarting proxy (it generates the CA on startup)..."
+      launchctl unload "$LDIR/$LABEL_PROXY.plist" 2>/dev/null || true
+      launchctl load -w "$LDIR/$LABEL_PROXY.plist" 2>/dev/null && sleep 1
+      [ -f "$DIR/ca.pem" ] && echo "    → CA generated ✓" || echo "    → CA still missing (proxy may be crashing — check $DIR/proxy.log)"
+    fi
+    return 1
+  }
+
+  check_token(){
+    [ -n "$TOK" ] && { echo "  vault token: ✓ present"; return 0; }
+    echo "  vault token: ✗ MISSING — run: claude-token setup"; return 1
+  }
+
+  check_broker(){
+    [ -z "$TOK" ] && return 1
+    local h; h="$(curl -fsS --max-time 5 -o /dev/null -w '%{http_code}' "$BROKER_URL/healthz" 2>/dev/null || echo 'fail')"
+    [ "$h" = "200" ] && { echo "  broker ($BROKER_URL): ✓ reachable"; return 0; }
+    echo "  broker ($BROKER_URL): ✗ NOT REACHABLE (HTTP $h) — check network"; return 1
+  }
+
+  check_user_token(){
+    [ -z "$TOK" ] || [ -z "$user" ] && return 1
+    local acc; acc="$(curl -fsS --max-time 5 -H "Authorization: Bearer $TOK" "$BROKER_URL/access/claude/$user" 2>/dev/null || echo '')"
+    if [ -n "$acc" ] && [ "${acc:0:1}" != "{" ]; then
+      echo "  token claude:$user: ✓ available (len ${#acc})"; return 0
+    fi
+    echo "  token claude:$user: ✗ NOT AVAILABLE — leader needs to publish (cron handles it)"; return 1
+  }
+
+  check_wrapper(){
+    if [ -x "$HOME/bin/claude" ]; then
+      echo "  wrapper: ✓ present"; return 0
+    fi
+    echo "  wrapper: ✗ MISSING — reinstalling..."
+    mkdir -p "$HOME/bin"
+    cat > "$HOME/bin/claude" <<EOF
+#!/usr/bin/env bash
+if ! nc -z 127.0.0.1 $PROXY_PORT 2>/dev/null; then
+  echo "⚠ claude-broker: proxy not responding — running claude standalone" >&2
+  exec "$REAL_CLAUDE" "\$@"
+fi
+exec env HTTPS_PROXY=http://127.0.0.1:$PROXY_PORT NODE_EXTRA_CA_CERTS=$DIR/ca.pem "$REAL_CLAUDE" "\$@"
+EOF
+    chmod +x "$HOME/bin/claude"
+    echo "    → wrapper reinstalled ✓"
+    return 0
+  }
+
+  echo "  broker URL:  $BROKER_URL"
+  echo ""
+
+  check_proxy_service || needs_fix=1
+  check_port          || needs_fix=1
+  check_ca            || needs_fix=1
+  check_token         || needs_fix=1
+  check_broker        || needs_fix=1
+  check_user_token    || needs_fix=1
+  check_wrapper       || needs_fix=1
+
   if [ -f "$DIR/proxy.log" ]; then
+    echo ""
     echo "  proxy log (last 3 lines):"
     tail -3 "$DIR/proxy.log" 2>/dev/null | sed 's/^/    /'
   fi
-  # 8. wrapper
-  if [ -x "$HOME/bin/claude" ]; then
-    echo "  wrapper: ✓ present"
+
+  echo ""
+  if [ "$needs_fix" = "0" ]; then
+    echo "  ✓ all checks passed — claude-broker is healthy"
   else
-    echo "  wrapper: ✗ MISSING — run: claude-broker install"
+    echo "  ⚠ some checks failed — auto-fixed what was fixable; for the rest, follow the suggestions above."
+    echo "  If claude still fails, run: claude-broker uninstall  (restores standalone claude)"
   fi
   echo "=== end ==="
 }

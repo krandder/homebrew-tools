@@ -22,7 +22,7 @@
 
 set -euo pipefail
 
-VERSION="2.5.0"
+VERSION="2.6.0"
 
 CLIENT_ID="app_EMoamEEZ73f0CkXaXp7hrann"
 TOKEN_EP="https://auth.openai.com/oauth/token"
@@ -681,8 +681,6 @@ cmd_claude_run() { # [--user U] [claude args] -- follower launcher: pull access 
     local bin; bin="$(resolve_claude_bin)"
     [ -n "$bin" ] || die "claude-run: claude binary not found."
     export ANTHROPIC_AUTH_TOKEN="$tok"
-    # isolate conversation/state per account (don't share ~/.claude with the default login)
-    export CLAUDE_CONFIG_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude-profiles/$user}"
     exec "$bin" "$@"
 }
 

@@ -40,7 +40,7 @@ claude-token push [--profile P]           push local real token to leader (owner
 claude-token --diagnose | --version
 ```
 
-Pairing/onboarding is identical to `codex-token` (pair → operator `codex-vault
+Pairing/onboarding is identical to `codex-token` (pair → operator `ai-vault
 approve`/`enroll … claude` + `token` → `set-url`/`set-token` → `login`). Profile
 ids in the vault are composite `<kind>:<name>` (e.g. `claude:kas`, `codex:kas`),
 so the same name can exist for both tools.
@@ -115,7 +115,7 @@ codex-token --diagnose | --version | --help
 ```bash
 brew tap krandder/tools && brew install codex-token
 codex-token pair --user fred        # prints one command=... line — send it to the operator
-# …operator runs, on the leader:  codex-vault approve fred '<that line>'
+# …operator runs, on the leader:  ai-vault approve fred '<that line>'
 codex-token login                   # browser sign-in as fred's account → pushes to leader
 codex-token install-wrapper         # plain `codex` now runs as fred's follower account
 codex                               # works
@@ -128,30 +128,30 @@ Environment: `CODEX_USER`, `CODEX_PROFILE`, `CODEX_LEADER` (default `farol-ts`),
 
 ---
 
-### `codex-vault`
+### `ai-vault`
 
-Leader-side **token vault with per-user ACL and audit**. Runs on the leader (e.g. `farol`). Holds the canonical refresh tokens, enforces who may **push** (the profile owner) and **pull** (granted pullers/admins), refreshes + publishes follower tokens, and keeps an append-only audit log. Identity is bound to each user's SSH key via an SSH forced command (`codex-vault shell <user>`).
+Leader-side **token vault with per-user ACL and audit**. Runs on the leader (e.g. `farol`). Holds the canonical refresh tokens, enforces who may **push** (the profile owner) and **pull** (granted pullers/admins), refreshes + publishes follower tokens, and keeps an append-only audit log. Identity is bound to each user's SSH key via an SSH forced command (`ai-vault shell <user>`).
 
 **Install (on the leader):**
 ```bash
-brew tap krandder/tools && brew install codex-vault   # depends on codex-token
+brew tap krandder/tools && brew install ai-vault   # depends on codex-token
 ```
 
 #### Commands
 ```
-codex-vault approve USER '<pubkey-line>'    enroll USER + install their key with a forced command (admin)
-codex-vault enroll USER OWNER               register a profile (admin)
-codex-vault grant  PROFILE USER             allow USER to pull PROFILE (admin/owner)
-codex-vault revoke PROFILE USER             remove USER's pull right (admin/owner)
-codex-vault receive PROFILE                 read a token on stdin, store + refresh + publish (owner)
-codex-vault serve  PROFILE                  write the follower token to stdout (puller)
-codex-vault list                            show the ACL (admin)
-codex-vault show-audit [N]                  last N audit entries (admin)
-codex-vault whoami                          print identity + admin flag
-codex-vault shell USER -- <cmd>             SSH forced-command wrapper (binds identity to USER)
+ai-vault approve USER '<pubkey-line>'    enroll USER + install their key with a forced command (admin)
+ai-vault enroll USER OWNER               register a profile (admin)
+ai-vault grant  PROFILE USER             allow USER to pull PROFILE (admin/owner)
+ai-vault revoke PROFILE USER             remove USER's pull right (admin/owner)
+ai-vault receive PROFILE                 read a token on stdin, store + refresh + publish (owner)
+ai-vault serve  PROFILE                  write the follower token to stdout (puller)
+ai-vault list                            show the ACL (admin)
+ai-vault show-audit [N]                  last N audit entries (admin)
+ai-vault whoami                          print identity + admin flag
+ai-vault shell USER -- <cmd>             SSH forced-command wrapper (binds identity to USER)
 ```
 
-The ACL lives at `~/.codex-vault/acl.json` (`{admins, operator, profiles:{NAME:{owner,pullers}}}`); audit at `~/.codex-vault/audit.jsonl`.
+The ACL lives at `~/.ai-vault/acl.json` (`{admins, operator, profiles:{NAME:{owner,pullers}}}`); audit at `~/.ai-vault/audit.jsonl`.
 
 ---
 

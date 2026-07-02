@@ -266,7 +266,7 @@ print(f"published {profile} ({email}) -> {sf}")
 PY
 }
 
-pull_profile() { # profile -> local auth: shared file (mesh) or codex-vault serve (ACL)
+pull_profile() { # profile -> local auth: shared file (mesh) or ai-vault serve (ACL)
     local p="$1" sf af
     sf="$(shared_file "$p")"; af="$(auth_file "$p")"
     mkdir -p "$(dirname "$af")"
@@ -289,7 +289,7 @@ PY
     else
         need_cmd ssh
         say "pushing '$p' to leader $LEADER_HOST (vault/SSH)..."
-        ssh_vault "codex-vault receive codex:$p" < "$af" \
+        ssh_vault "ai-vault receive codex:$p" < "$af" \
             || die "push: leader rejected '$p' (not owner, unreachable, or token invalid)"
     fi
         python3 - "$tmp" "$af" <<'PY'
@@ -316,7 +316,7 @@ push_profile() { # profile -> vault receive (owner-gated), then revert local to 
         vault_http POST "/push/$p" "$af" >/dev/null || die "push: leader rejected '$p' (not owner, or token invalid)"
     else
         say "pushing '$p' to leader $LEADER_HOST (vault/SSH)..."
-        ssh_vault "codex-vault receive '$p'" < "$af" \
+        ssh_vault "ai-vault receive '$p'" < "$af" \
             || die "push: leader rejected '$p' (not owner, unreachable, or token invalid)"
     fi
     # Leader stored + refreshed + published -> safe to revert local to follower.
@@ -485,7 +485,7 @@ OPTION A — HTTPS vault (recommended; no SSH/Tailscale needed):
 
 OPTION B — SSH (Tailscale + approved SSH key). Send this one line to the operator:
 --------------------------------------------------------------------------------
-command="codex-vault shell $user",no-pty,no-port-forwarding,no-X11-forwarding,no-agent-forwarding $pub
+command="ai-vault shell $user",no-pty,no-port-forwarding,no-X11-forwarding,no-agent-forwarding $pub
 --------------------------------------------------------------------------------
   They run: codex-vault approve $user '<that line>'
 
@@ -510,7 +510,7 @@ cmd_login() {
             vault_http POST "/push/codex/$user" "$LEGACY_AUTH" >/dev/null || die "login: leader rejected push for '$user' (not approved?)"
         else
             say "pushing your token to the leader as '$user'..."
-            ssh_vault "codex-vault receive codex:$user" < "$LEGACY_AUTH" \
+            ssh_vault "ai-vault receive codex:$user" < "$LEGACY_AUTH" \
                 || die "login: leader rejected push for '$user' (not approved yet? wrong user?)"
         fi
         # convert ~/.codex to follower (sentinel RT)
@@ -538,7 +538,7 @@ cmd_run() { # [args...]  -- follower launcher: freshen ~/.codex then exec codex 
         _copy_token "$LEGACY_AUTH.tmp" "$LEGACY_AUTH"; rm -f "$LEGACY_AUTH.tmp"
     else
         need_cmd ssh
-        ssh_vault "codex-vault serve codex:$user" > "$LEGACY_AUTH.tmp" \
+        ssh_vault "ai-vault serve codex:$user" > "$LEGACY_AUTH.tmp" \
             || { rm -f "$LEGACY_AUTH.tmp"; die "run: cannot reach/authorized for '$user' on leader"; }
         _copy_token "$LEGACY_AUTH.tmp" "$LEGACY_AUTH"; rm -f "$LEGACY_AUTH.tmp"
     fi

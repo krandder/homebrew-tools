@@ -82,7 +82,7 @@ claude.ai connectors / full refresh transparency are later required.
 | Robust to access expiry | breaks until leader republishes | wrapper pulls fresh on each launch |
 
 ## Implementation plan
-1. **Broker access endpoint**: extend `codex-vault-http` with
+1. **Broker access endpoint**: extend `ai-vault-http` with
    `GET /access/<kind>/<name>` → returns the **current fresh access token** (no
    refresh token) for a profile. The leader's existing publish step already
    refreshes; this just exposes the access token. (Auth: same bearer-token ACL.)

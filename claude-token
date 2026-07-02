@@ -221,7 +221,7 @@ pull_profile() { # profile -> local store
     else
         need_cmd ssh; local tmp; tmp="$(mktemp)"
         say "pulling '$p' from leader $LEADER_HOST (vault, ACL-gated)..."
-        ssh_vault "codex-vault serve claude:$p" > "$tmp" || { rm -f "$tmp"; die "pull: leader denied/unavailable for '$p'"; }
+        ssh_vault "ai-vault serve claude:$p" > "$tmp" || { rm -f "$tmp"; die "pull: leader denied/unavailable for '$p'"; }
         sf="$tmp"
     fi
     python3 - "$sf" <<'PY'
@@ -244,7 +244,7 @@ push_profile() { # profile -> leader (then revert local to sentinel)
     else
         need_cmd ssh
         say "pushing '$p' to leader $LEADER_HOST (vault/SSH)..."
-        printf '%s\n' "$oauth" | ssh_vault "codex-vault receive claude:$p" || die "push: leader rejected '$p'"
+        printf '%s\n' "$oauth" | ssh_vault "ai-vault receive claude:$p" || die "push: leader rejected '$p'"
     fi
     # revert local store to follower (sentinel RT), then pull fresh
     local follower; follower="$(echo "$oauth" | python3 -c 'import json,sys;o=json.load(sys.stdin);o["refreshToken"]="'$SENTINEL_RT'";print(json.dumps(o))')"
@@ -344,7 +344,7 @@ cmd_login() {
         if have_http_vault; then
             printf '%s' "$oauth" | vault_http POST "/push/claude/$user" /dev/stdin >/dev/null || say "  (push deferred — leader will retry)"
         else
-            need_cmd ssh; printf '%s\n' "$oauth" | ssh_vault "codex-vault receive claude:$user" || say "  (push deferred)"
+            need_cmd ssh; printf '%s\n' "$oauth" | ssh_vault "ai-vault receive claude:$user" || say "  (push deferred)"
         fi
         say "logged in + pushed to leader. 'claude' works (standalone); follower mode activates when the broker serves."
     else

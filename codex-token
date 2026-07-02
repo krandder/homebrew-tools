@@ -22,7 +22,7 @@
 
 set -euo pipefail
 
-VERSION="2.3.0"
+VERSION="2.4.0"
 
 CLIENT_ID="app_EMoamEEZ73f0CkXaXp7hrann"
 TOKEN_EP="https://auth.openai.com/oauth/token"
@@ -631,9 +631,24 @@ cmd_install_claude_wrapper() {
     if [ -e "$w" ] && [ ! -e "$w.pre-codex-token" ]; then mv "$w" "$w.pre-codex-token"; fi
     cat > "$w" <<'EOF'
 #!/usr/bin/env bash
+if [ "${1:-}" = "login" ]; then exec codex-token claude-login "$@"; fi
 exec codex-token claude-run "$@"
 EOF
     chmod +x "$w"
+}
+
+# install-claude-launcher <user> -> ~/bin/claude-<user> (run claude as claude:<user>)
+cmd_install_claude_launcher() {
+    local user="$1"
+    [ -n "$user" ] || die "install-claude-launcher: specify a user (e.g. adriana)"
+    mkdir -p "$HOME/bin"
+    local w="$HOME/bin/claude-$user"
+    cat > "$w" <<EOF
+#!/usr/bin/env bash
+exec codex-token claude-run --user $user "\$@"
+EOF
+    chmod +x "$w"
+    say "installed $w -> runs claude as claude:$user (pulls its access token, injects ANTHROPIC_AUTH_TOKEN)"
 }
 
 install_claude_for() {
@@ -651,9 +666,10 @@ install_claude_for() {
     say "  claude: ✓ wrapper installed (plain 'claude' = follower via ANTHROPIC_AUTH_TOKEN)"
 }
 
-cmd_claude_run() { # [args] -- follower launcher: pull claude access token, inject, exec
+cmd_claude_run() { # [--user U] [claude args] -- follower launcher: pull access token, inject, exec
     local user; user="$(config_user)"
-    [ -n "$user" ] || die "claude-run: no user configured. Run 'codex-token install'."
+    if [ "${1:-}" = "--user" ]; then user="$2"; shift 2; fi
+    [ -n "$user" ] || die "claude-run: no user. Run 'codex-token install' or pass --user."
     local sf="$CLAUDE_SHARED_DIR/$user.json" tok=""
     if [ -f "$sf" ]; then tok="$(claude_access_token "$sf")"; fi
     if [ -z "$tok" ] && have_http_vault; then
@@ -661,11 +677,30 @@ cmd_claude_run() { # [args] -- follower launcher: pull claude access token, inje
         vault_http GET "/pull/claude/$user" > "$tmp" 2>/dev/null && tok="$(claude_access_token "$tmp")"
         rm -f "$tmp"
     fi
-    [ -n "$tok" ] || die "claude-run: no access token for claude:$user (not pushed/approved?)"
+    [ -n "$tok" ] || die "claude-run: no access token for claude:$user (not pushed/revived?)"
     local bin; bin="$(resolve_claude_bin)"
     [ -n "$bin" ] || die "claude-run: claude binary not found."
     export ANTHROPIC_AUTH_TOKEN="$tok"
     exec "$bin" "$@"
+}
+
+# claude-login [--user U] [login args] -- run `claude login`, then push creds to the vault
+cmd_claude_login() {
+    local user; user="$(config_user)"
+    if [ "${1:-}" = "--user" ]; then user="$2"; shift 2; fi
+    [ -n "$user" ] || die "claude-login: no user. Run 'codex-token install' or pass --user."
+    local bin; bin="$(resolve_claude_bin)"
+    [ -n "$bin" ] || die "claude-login: claude binary not found."
+    "$bin" login "$@"
+    local creds tmp; creds="$(claude_local_creds)" || true
+    if [ -n "$creds" ] && printf '%s' "$creds" | grep -q refreshToken; then
+        say "pushing claude credentials to leader as claude:$user..."
+        tmp="$(mktemp)"; printf '%s' "$creds" > "$tmp"
+        vault_http POST "/push/claude/$user" "$tmp" >/dev/null || { rm -f "$tmp"; die "claude-login: leader rejected push (not approved for claude:$user?)"; }
+        rm -f "$tmp"; say "claude: ✓ pushed (leader will refresh + publish)"
+    else
+        say "claude-login: no refresh token found after login; nothing pushed"
+    fi
 }
 
 derive_user() {   # default handle from computer name, sanitized
@@ -799,7 +834,9 @@ case "${1:-}" in
     run)   shift; cmd_run "$@"; exit $? ;;
     login) shift; cmd_login "$@"; exit $? ;;
     claude-run) shift; cmd_claude_run "$@"; exit $? ;;
+    claude-login) shift; cmd_claude_login "$@"; exit $? ;;
     install)    shift; cmd_install "$@"; exit $? ;;
+    install-claude-launcher) shift; cmd_install_claude_launcher "${1:-}"; exit $? ;;
     set-url)   shift; cmd_set_url "${1:-}"; exit $? ;;
     set-token) shift; cmd_set_token "${1:-}"; exit $? ;;
 esac

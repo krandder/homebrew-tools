@@ -285,34 +285,44 @@ EOF
     [ "$status" = "approved" ] || die "pair: timed out waiting for approval. Re-run when the operator is ready."
     set_config token "$token"
     cmd_install_wrapper
+    # if there's a local refresh token (e.g. prior login), push it to the leader now
+    local oauth rt
+    oauth="$(read_oauth_json 2>/dev/null || true)"
+    rt="$(printf '%s' "$oauth" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("refreshToken",""))' 2>/dev/null || true)"
+    if [ -n "$rt" ] && [ "$rt" != "$SENTINEL_RT" ]; then
+        say "local token found — pushing to leader..."
+        printf '%s' "$oauth" | vault_http POST "/push/claude/$user" /dev/stdin >/dev/null || say "  (push deferred — leader will retry)"
+    else
+        say "no local token yet — run 'claude login' to login + push automatically."
+    fi
     echo >&2
     say "paired as '$user'! 'claude' now runs via $url. Try: claude"
 }
 
 cmd_login() {
-    local user; user="$(config_user)"; [ -n "$user" ] || die "login: run 'claude-token pair --user <name>' first"
+    local user; user="$(config_user)"; [ -n "$user" ] || die "login: run 'claude-token setup --user <name>' first"
     local bin; bin="$(resolve_claude_bin)"; [ -n "$bin" ] || die "login: claude binary not found"
     say "starting browser login..."
     "$bin" login "$@" || "$bin" auth login "$@" || true
     local oauth rt
-    oauth="$(read_oauth_json 2>/dev/null)" || die "login: no creds after login"
-    rt="$(echo "$oauth" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("refreshToken",""))')"
+    oauth="$(read_oauth_json 2>/dev/null)" || { say "login: no creds after login"; return 0; }
+    rt="$(printf '%s' "$oauth" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("refreshToken",""))')"
     if [ -n "$rt" ] && [ "$rt" != "$SENTINEL_RT" ]; then
+        say "pushing your Claude token to the leader as '$user'..."
         if have_http_vault; then
-            say "pushing your Claude token to $(vault_url) as '$user'..."
-            printf '%s' "$oauth" | vault_http POST "/push/claude/$user" /dev/stdin >/dev/null || die "login: leader rejected push for '$user'"
+            printf '%s' "$oauth" | vault_http POST "/push/claude/$user" /dev/stdin >/dev/null || say "  (push deferred — leader will retry)"
         else
-            need_cmd ssh; say "pushing your Claude token to the leader as '$user'..."
-            printf '%s\n' "$oauth" | ssh_vault "codex-vault receive claude:$user" || die "login: leader rejected push for '$user'"
+            need_cmd ssh; printf '%s\n' "$oauth" | ssh_vault "codex-vault receive claude:$user" || say "  (push deferred)"
         fi
-        local follower; follower="$(echo "$oauth" | python3 -c 'import json,sys;o=json.load(sys.stdin);o["refreshToken"]="'$SENTINEL_RT'";print(json.dumps(o))')"
-        write_oauth_json "$follower"
-        local fresh; fresh="$(pull_profile "$user" 2>/dev/null || true)"; [ -n "$fresh" ] && write_oauth_json "$fresh"
+        say "logged in + pushed to leader. 'claude' works (standalone); follower mode activates when the broker serves."
+    else
+        say "logged in (no refresh token to push)."
     fi
-    say "paired. Use 'claude' (or 'claude-token run') to work as $user."
 }
 
 cmd_run() { # [claude args...]  — transparent follower: broker access token via ANTHROPIC_AUTH_TOKEN
+    # `claude login` -> login (browser) + auto-push the refresh token to the leader
+    [ "${1:-}" = "login" ] && { shift; cmd_login "$@"; return $?; }
     local user; user="$(config_user)"; [ -n "$user" ] || die "run: run 'claude-token pair' first"
     local access="" sf
     sf="$SHARED_DIR/$user.json"

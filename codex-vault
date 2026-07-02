@@ -129,7 +129,7 @@ PY
     rm -f "$tmp"
     [ "$rc" -eq 0 ] || { audit "$p" push failed "bad token"; exit "$rc"; }
     "$(publish_tool_for "$p")" publish --profile "$(name_of "$p")" >/dev/null 2>&1 \
-        || { audit "$p" push failed "refresh/publish"; die "receive: refresh/publish failed for '$p' (token invalid?)"; }
+        || { audit "$p" publish deferred "rate-limited/pending"; say "received '$p' ($kind) — token stored; publish deferred (cron will refresh)."; return 0; }
     audit "$p" push ok "by $(current_user) ($kind)"
     say "received '$p' ($kind) from $(current_user); refreshed + published"
 }

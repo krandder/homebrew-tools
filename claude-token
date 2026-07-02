@@ -320,25 +320,37 @@ cmd_login() {
     fi
 }
 
-cmd_run() { # [claude args...]  — transparent follower: broker access token via ANTHROPIC_AUTH_TOKEN
+cmd_run() { # [claude args...]  — follower launcher; falls back to normal claude if no fresh broker token
     # `claude login` -> login (browser) + auto-push the refresh token to the leader
     [ "${1:-}" = "login" ] && { shift; cmd_login "$@"; return $?; }
-    local user; user="$(config_user)"; [ -n "$user" ] || die "run: run 'claude-token pair' first"
-    local access="" sf
-    sf="$SHARED_DIR/$user.json"
-    # 1. broker: syncthing shared file (fast) or HTTPS /access/
+    local user; user="$(config_user)"
+    local bin; bin="$(resolve_claude_bin)"; [ -n "$bin" ] || die "run: claude binary not found"
+    # If no user configured, just run claude normally (standalone).
+    [ -n "$user" ] || exec "$bin" "$@"
+
+    local sf="$SHARED_DIR/$user.json" access=""
+    # 1. syncthing shared file — only if the access token is still fresh
     if [ -f "$sf" ]; then
-        access="$(python3 -c 'import json,sys;d=json.load(open(sys.argv[1]));o=d.get("claudeAiOauth",d);print(o.get("accessToken") or "")' "$sf" 2>/dev/null)"
-    elif have_http_vault; then
+        access="$(python3 -c '
+import json,sys,base64,time
+d=json.load(open(sys.argv[1])); o=d.get("claudeAiOauth",d); t=o.get("accessToken","")
+try:
+    p=t.split(".")[1]; p+="="*(-len(p)%4); exp=json.loads(base64.b64decode(p)).get("exp",0)
+    sys.stdout.write(t if exp>time.time() else "")
+except: sys.stdout.write("")
+' "$sf" 2>/dev/null)"
+    fi
+    # 2. broker /access/ (HTTPS)
+    if [ -z "$access" ] && have_http_vault; then
         access="$(vault_http GET "/access/claude/$user" 2>/dev/null || true)"
     fi
-    # 2. fallback: local keychain/file access token (standalone)
-    if [ -z "$access" ]; then
-        access="$(read_oauth_json 2>/dev/null | python3 -c 'import json,sys;print(json.load(sys.stdin).get("accessToken",""))' 2>/dev/null || true)"
+    # If we have a fresh broker/shared token -> follower mode (ANTHROPIC_AUTH_TOKEN).
+    # Otherwise -> fall through to normal claude (uses the local keychain/login).
+    if [ -n "$access" ]; then
+        export ANTHROPIC_AUTH_TOKEN="$access"
+        exec "$bin" "$@"
     fi
-    [ -n "$access" ] || die "run: no access token (broker unreachable and no local creds)"
-    local bin; bin="$(resolve_claude_bin)"; [ -n "$bin" ] || die "run: claude binary not found"
-    export ANTHROPIC_AUTH_TOKEN="$access"
+    # Fallback: run claude normally (keychain OAuth mode — connectors work, standalone).
     exec "$bin" "$@"
 }
 

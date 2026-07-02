@@ -104,3 +104,65 @@ assumption in this design.
   same broker model for uniformity, but it's not required.
 - This depends only on standard OAuth (refresh_token grant) + Claude Code's
   documented auth-token mode — no Anthropic-specific behavior beyond that.
+
+## Appendix: Anthropic OAuth Rate Limits — Community Research
+
+### The OAuth token-endpoint rate limit is separate, aggressive, and undocumented
+
+Official rate limits (platform.claude.com/docs/en/api/rate-limits) cover **inference**
+calls (1000 RPM, 2M ITPM at Start tier). The OAuth token endpoint
+(`POST platform.claude.com/v1/oauth/token`) has its own undocumented rate limit.
+
+### GitHub issues (anthropics/claude-code)
+
+1. **#38248** — 6 refresh calls/day on a dedicated Max account gets persistent 429.
+   Worked through March 19 2026, broke March 20 with no changes. Closed "not planned."
+2. **#47754** — Cloudflare WAF blocks refreshes from headless Linux (403 then 429).
+   User locked out 26 days. Two protection layers: WAF + rate limit, both per-IP.
+3. **#54443** — Two concurrent sessions sharing one credential store → one refreshes →
+   the other's in-memory RT is stale → 400 → cascading failure. User asks: "Are refresh
+   tokens rotating and single-use?" — Anthropic hasn't answered.
+4. **#61912** — Transient Cloudflare 502 during refresh corrupts credentials on disk.
+   697 logged 401s across 48 sessions.
+5. **#72552** — Headless `claude -p` silently uses machine-default Keychain credential.
+   Access tokens in Keychain are shared across all Claude processes on macOS.
+6. **#43801** — "Log out all sessions" does NOT invalidate OAuth tokens for 3-4 days.
+   Access tokens are long-lived and not immediately revocable.
+
+### Key characteristics
+
+| Characteristic | Value |
+|---|---|
+| Scope | Per-IP (not per-account) |
+| Threshold | Very low — 6 calls/day can trigger |
+| Mechanism | Token bucket (continuously replenished) |
+| Recovery | Slow — hours; probing extends it |
+| Cloudflare | WAF bot detection (403) + rate limit (429) |
+| Documented limits | None |
+| Tightened | ~March 19-20 2026 |
+
+### Refresh token rotation (community-confirmed)
+
+- Each refresh returns a NEW refresh token; old one is invalidated.
+- Already-used RT → 400/401 `refresh_token_reused`.
+- Multiple machines refreshing the same account → mutual invalidation.
+- Standard OAuth 2.0 refresh-token rotation (RFC 6749 §6).
+
+### Can multiple machines use the same ACCESS token?
+
+**YES.** Access tokens are standard bearer tokens (`sk-ant-oat...`), sent as
+`Authorization: Bearer <token>`. Anthropic does NOT check source IP for inference
+calls — only the OAuth token endpoint is IP-rate-limited.
+
+Evidence: #43801 (tokens work for days from different IPs), our own testing (same
+token works from mac + farol for inference).
+
+**Implication:** Multiple followers CAN share the same access token for inference.
+Only the LEADER calls the OAuth endpoint (once per ~7h). Followers never touch it.
+This is our broker model and it should NOT trigger OAuth rate limits on followers.
+
+### Mitigations applied
+
+1. Cron interval: 2h → **7h** (3 calls/day/account, within safe zone).
+2. No manual probing.
+3. Followers use `ANTHROPIC_AUTH_TOKEN` or broker proxy — never call OAuth endpoint.

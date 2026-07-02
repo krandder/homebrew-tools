@@ -35,17 +35,11 @@ binary found the relevant knobs:
   refresh.
 
 **Conclusion: Claude Code has no usable, unblocked override to redirect the
-standard subscription OAuth refresh to our broker.** So the goal's fallback
-applies: either a local transparent proxy, or a different transparency hook.
+standard subscription OAuth refresh to our broker.** The local transparent proxy
+(Option B2) was built, validated, and then **deleted** — it was too heavy and
+fragile (TLS interception + custom CA + always-on service) for install-and-forget.
 
-### Option B2 — local transparent proxy (HTTPS_PROXY + NODE_EXTRA_CA_CERTS)
-Fully transparent: Claude Code keeps a real refresh token, refreshes normally,
-and the call is intercepted and routed to the broker (connectors stay enabled).
-**Cost:** a TLS-intercepting proxy must run on every follower + a custom CA must
-be trusted; if the proxy is down, refresh fails *mid-session*. That is heavy and
-fragile — the opposite of "install-and-forget."
-
-### Option A — `ANTHROPIC_AUTH_TOKEN` (chosen)
+### Option A — `ANTHROPIC_AUTH_TOKEN` (chosen, the only shipped mechanism)
 Claude Code's auth-token mode: it is handed a credential and uses it as a normal
 `Authorization: Bearer` (byte-identical to OAuth mode on the wire → same
 subscription), and **never refreshes**, so it can never rotate anyone. The
@@ -56,11 +50,9 @@ validated. **Tradeoff:** in auth-token mode Claude Code disables claude.ai
 Claude Code itself).
 
 ### Decision
-The clean refresh-routing override is allowlist-blocked, and the local proxy is
-too heavy/fragile for "install-and-forget." We therefore ship **Option A**
-(`ANTHROPIC_AUTH_TOKEN` + broker-served fresh access tokens) as the pragmatic,
-robust, install-and-forget solution, and document B2 as the upgrade path if
-claude.ai connectors / full refresh transparency are later required.
+The clean refresh-routing override is allowlist-blocked. Option A
+(`ANTHROPIC_AUTH_TOKEN` + broker-served fresh access tokens) is the **only
+shipped mechanism** — robust, install-and-forget, no proxy.
 - **Broker (leader = farol)** is the **sole owner** of the real refresh token. It
   refreshes **once per access-token TTL (~hours)** — not per client, not per
   launch — and serves the current fresh access token over the existing

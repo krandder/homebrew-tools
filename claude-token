@@ -151,15 +151,33 @@ canonical_file() { echo "$CLAUDE_PROFILES_DIR/$1/.claude/credentials.json"; }
 shared_file()    { echo "$SHARED_DIR/$1.json"; }
 
 publish_profile() { # profile
-    local p="$1" af sf rt resp
+    local p="$1" af sf
     af="$(canonical_file "$p")"; sf="$(shared_file "$p")"
     [ -f "$af" ] || die "publish: missing canonical creds at $af"
-    rt="$(python3 -c 'import json,sys;o=json.load(open(sys.argv[1]));o=o.get("claudeAiOauth",o);print(o.get("refreshToken",""))' "$af")"
-    [ -n "$rt" ] || die "publish: no refreshToken for '$p'"
-    [ "$rt" = "$SENTINEL_RT" ] && die "publish: '$p' is a follower (sentinel)"
-    resp="$(refresh_claude "$rt")" || die "publish: refresh failed for '$p'"
+    # Check if the existing access token is still valid; only refresh if needed.
     mkdir -p "$SHARED_DIR" "$(dirname "$af")"
-    python3 - "$af" "$sf" "$p" "$resp" "$SENTINEL_RT" "${CLAUDE_LEADER:-farol-ts}" <<'PY'
+    local needs_refresh
+    needs_refresh="$(python3 - "$af" <<'PY'
+import json,sys,time
+o=json.load(open(sys.argv[1])); o=o.get("claudeAiOauth",o)
+rt=o.get("refreshToken","")
+# need refresh if: no RT, sentinel RT, or access token expired
+exp=o.get("expiresAt",0)/1000
+if not rt or rt.startswith("vlt:") or rt=="__follower_no_refresh__":
+    print("yes")  # can't use existing
+elif exp < time.time() + 600:  # less than 10 min left
+    print("yes")  # about to expire
+else:
+    print("no")   # still valid — publish as-is
+PY
+)"
+    if [ "$needs_refresh" = "yes" ]; then
+        local rt resp
+        rt="$(python3 -c 'import json,sys;o=json.load(open(sys.argv[1]));o=o.get("claudeAiOauth",o);print(o.get("refreshToken",""))' "$af")"
+        [ -n "$rt" ] || die "publish: no refreshToken for '$p'"
+        [ "$rt" = "$SENTINEL_RT" ] && die "publish: '$p' is a follower (sentinel)"
+        resp="$(refresh_claude "$rt")" || die "publish: refresh failed for '$p'"
+        python3 - "$af" "$sf" "$p" "$resp" "$SENTINEL_RT" "$LEADER_HOST" <<'PY'
 import json,sys,os,time,datetime
 af,sf,profile,resp,sentinel,leader=sys.argv[1:7]
 r=json.loads(resp); ts=int(time.time()*1000)
@@ -167,13 +185,27 @@ d=json.load(open(af)); o=d.get("claudeAiOauth",d)
 o["accessToken"]=r["access_token"]; o["refreshToken"]=r["refresh_token"]
 o["expiresAt"]=ts+int(r.get("expires_in",28800))*1000
 d=dict(d); d["claudeAiOauth"]=o
-json.dump(d,open(af,"w"),indent=2); os.chmod(af,0o600)   # update canonical w/ rotated RT
-pub=dict(o); pub["refreshToken"]=sentinel                 # follower: sentinel RT
+json.dump(d,open(af,"w"),indent=2); os.chmod(af,0o600)
+pub=dict(o); pub["refreshToken"]=sentinel
 out={"claudeAiOauth":pub,"profile":profile,"leader":leader,
      "published_at":datetime.datetime.now(datetime.timezone.utc).isoformat()}
 json.dump(out,open(sf,"w"),indent=2); os.chmod(sf,0o600)
-print(f"published {profile} -> {sf} (ttl {r.get('expires_in')}s)")
+print(f"published {profile} -> {sf} (refreshed, ttl {r.get('expires_in')}s)")
 PY
+    else
+        # Access token still valid — publish it directly (NO refresh needed!)
+        python3 - "$af" "$sf" "$p" "$SENTINEL_RT" "$LEADER_HOST" <<'PY'
+import json,sys,os,datetime
+af,sf,profile,sentinel,leader=sys.argv[1:6]
+d=json.load(open(af)); o=d.get("claudeAiOauth",d)
+pub=dict(o); pub["refreshToken"]=sentinel
+out={"claudeAiOauth":pub,"profile":profile,"leader":leader,
+     "published_at":datetime.datetime.now(datetime.timezone.utc).isoformat(),
+     "note":"published existing access token (no refresh needed)"}
+json.dump(out,open(sf,"w"),indent=2); os.chmod(sf,0o600)
+print(f"published {profile} -> {sf} (existing token, no refresh)")
+PY
+    fi
 }
 
 # ---- FOLLOWER: pull / push ----

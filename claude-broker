@@ -45,11 +45,16 @@ EOF
   launchctl unload "$LDIR/$LABEL_PROXY.plist" >/dev/null 2>&1 || true
   launchctl load -w "$LDIR/$LABEL_PROXY.plist"
   sleep 1
-  # wrapper: HTTPS_PROXY + CA -> real claude (normal OAuth mode; refreshes through proxy)
+  # wrapper: check proxy first; fall back to standalone if it's down
   if [ ! -e "$HOME/bin/claude.pre-broker" ] && [ -e "$HOME/bin/claude" ]; then mv "$HOME/bin/claude" "$HOME/bin/claude.pre-broker"; fi
   mkdir -p "$HOME/bin"
   cat > "$HOME/bin/claude" <<EOF
 #!/usr/bin/env bash
+# Transparent broker wrapper — falls back to standalone if the proxy is down.
+if ! nc -z 127.0.0.1 $PROXY_PORT 2>/dev/null; then
+  echo "⚠ claude-broker: proxy not responding on :$PROXY_PORT — running claude standalone" >&2
+  exec "$REAL_CLAUDE" "\$@"
+fi
 exec env HTTPS_PROXY=http://127.0.0.1:$PROXY_PORT NODE_EXTRA_CA_CERTS=$DIR/ca.pem "$REAL_CLAUDE" "\$@"
 EOF
   chmod +x "$HOME/bin/claude"
@@ -61,16 +66,81 @@ cmd_seed(){
   local user="$1"
   [ -n "$user" ] || { say "seed: specify --user <name>"; exit 1; }
   local access="" TOK; TOK="$(vault_token)"
+  [ -n "$TOK" ] || { say "seed: ✗ no vault token — run 'claude-token setup' first"; exit 1; }
+  say "fetching fresh access token from $BROKER_URL for claude:$user..."
   for i in 1 2 3 4 5; do
     access="$(curl -fsS -H "Authorization: Bearer $TOK" "$BROKER_URL/access/claude/$user" 2>/dev/null || true)"
     [ -n "$access" ] && break; sleep 1
   done
-  [ -n "$access" ] || { say "seed: no token from broker (is the leader publishing?)"; exit 1; }
+  [ -n "$access" ] || { say "seed: ✗ no token from broker after 5 tries. Run 'claude-broker doctor' to diagnose."; exit 1; }
   local kc="Claude Code-credentials"
   local acct; acct="$(security find-generic-password -s "$kc" 2>/dev/null | sed -n 's/.*"acct"<blob>="\([^"]*\)".*/\1/p' | head -1)"; [ -n "$acct" ] || acct="$(whoami)"
   local seed; seed="$(python3 -c 'import json,sys,time;print(json.dumps({"claudeAiOauth":{"accessToken":sys.argv[1],"refreshToken":"vlt:'"$user"':seed","expiresAt":int(time.time()*1000)+3600000,"scopes":[],"subscriptionType":"max"}}))' "$access")"
   security add-generic-password -U -s "$kc" -a "$acct" -w "$seed" >/dev/null
-  say "seeded '$user'. Claude Code will refresh through the broker. Try: claude"
+  say "seeded '$user' ✓ (dummy refresh + fresh access in keychain). Try: claude"
+}
+
+cmd_doctor(){
+  echo "=== claude-broker diagnostics ==="
+  echo "  broker URL:  $BROKER_URL"
+  echo "  proxy dir:   $DIR"
+  # 1. proxy service
+  local pid; pid="$(launchctl list 2>/dev/null | awk -v l=$LABEL_PROXY '$3==l{print $2}')"
+  if [ -n "$pid" ] && [ "$pid" != "-" ]; then
+    echo "  proxy service: ✓ running (pid $pid)"
+  else
+    echo "  proxy service: ✗ NOT RUNNING — run: claude-broker install"
+  fi
+  # 2. proxy port
+  if nc -z 127.0.0.1 $PROXY_PORT 2>/dev/null; then
+    echo "  proxy port :$PROXY_PORT: ✓ listening"
+  else
+    echo "  proxy port :$PROXY_PORT: ✗ NOT LISTENING (proxy crashed? check $DIR/proxy.log)"
+  fi
+  # 3. CA cert
+  if [ -f "$DIR/ca.pem" ]; then
+    echo "  CA cert: ✓ present ($DIR/ca.pem)"
+  else
+    echo "  CA cert: ✗ MISSING — proxy may not have started (check $DIR/proxy.log)"
+  fi
+  # 4. vault token
+  local TOK; TOK="$(vault_token)"
+  if [ -n "$TOK" ]; then
+    echo "  vault token: ✓ present"
+  else
+    echo "  vault token: ✗ MISSING — run: claude-token setup"
+  fi
+  # 5. broker reachable?
+  if [ -n "$TOK" ]; then
+    local h; h="$(curl -fsS --max-time 5 -o /dev/null -w '%{http_code}' "$BROKER_URL/healthz" 2>/dev/null || echo 'fail')"
+    if [ "$h" = "200" ]; then
+      echo "  broker ($BROKER_URL): ✓ reachable"
+    else
+      echo "  broker ($BROKER_URL): ✗ NOT REACHABLE (HTTP $h)"
+    fi
+    # 6. token for this user?
+    local user; user="$(awk -F= '/^user=/{print $2}' "$HOME/.codex-token/config" 2>/dev/null)"
+    if [ -n "$user" ]; then
+      local acc; acc="$(curl -fsS --max-time 5 -H "Authorization: Bearer $TOK" "$BROKER_URL/access/claude/$user" 2>/dev/null || echo '')"
+      if [ -n "$acc" ] && [ "${acc:0:1}" != "{" ]; then
+        echo "  token claude:$user: ✓ available (len ${#acc})"
+      else
+        echo "  token claude:$user: ✗ NOT AVAILABLE — has the leader published? ($acc)"
+      fi
+    fi
+  fi
+  # 7. proxy log
+  if [ -f "$DIR/proxy.log" ]; then
+    echo "  proxy log (last 3 lines):"
+    tail -3 "$DIR/proxy.log" 2>/dev/null | sed 's/^/    /'
+  fi
+  # 8. wrapper
+  if [ -x "$HOME/bin/claude" ]; then
+    echo "  wrapper: ✓ present"
+  else
+    echo "  wrapper: ✗ MISSING — run: claude-broker install"
+  fi
+  echo "=== end ==="
 }
 
 cmd_status(){
@@ -89,7 +159,9 @@ cmd_uninstall(){
 case "${1:-}" in
   install)   shift; cmd_install "${1:-}";;
   seed)      shift; cmd_seed "${1:-}";;
+  doctor|-d) cmd_doctor;;
+  logs)      tail -f "$DIR/proxy.log" 2>/dev/null || echo "no proxy log";;
   status)    cmd_status;;
   uninstall) cmd_uninstall;;
-  *) echo "usage: claude-broker {install|seed|status|uninstall}" >&2; exit 1;;
+  *) echo "usage: claude-broker {install|seed|doctor|logs|status|uninstall}" >&2; exit 1;;
 esac

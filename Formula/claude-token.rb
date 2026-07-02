@@ -2,8 +2,8 @@ class ClaudeToken < Formula
   desc "Print and sync Claude Code credentials across machines (leader/follower vault client)"
   homepage "https://github.com/krandder/homebrew-tools"
   url "https://raw.githubusercontent.com/krandder/homebrew-tools/main/claude-token"
-  version "2.3.0"
-  sha256 "c95a71f0c300706475d90cbdf0c461d105821ebe09ee74132f945d007d12ae9b"
+  version "2.3.1"
+  sha256 "0494af1781bcedc4a4aff9e3e392fb6aa32216ea0a3a91e7cd0c575f1bcd07e4"
 
   def install
     bin.install "claude-token"

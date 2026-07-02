@@ -12,12 +12,23 @@ DIR="${CLAUDE_BROKER_DIR:-$HOME/.claude-broker}"
 PROXY_PORT="${CLAUDE_BROKER_PROXY_PORT:-8443}"
 BROKER_URL="${CLAUDE_BROKER_URL:-https://vault.ekelvin.com}"
 PROXY="$(command -v claude-broker-proxy || echo "")"
-REAL_CLAUDE="$(for d in /opt/homebrew/bin /usr/local/bin; do [ -x "$d/claude" ] && echo "$d/claude" && break; done)"
+REAL_CLAUDE="$(for d in /opt/homebrew/bin /usr/local/bin "$HOME/.local/bin" "$HOME/.claude/local/bin"; do [ -x "$d/claude" ] && echo "$d/claude" && break; done)"
 LABEL_PROXY="com.claudebroker.proxy"
 LDIR="$HOME/Library/LaunchAgents"
 
 say(){ echo "claude-broker: $*"; }
-vault_token(){ awk -F= '/^token=/{print $2}' "$HOME/.codex-token/config" 2>/dev/null || true; }
+vault_token(){
+  for f in "$HOME/.codex-token/config" "$HOME/.claude-token/config"; do
+    local t; t="$(awk -F= '/^token=/{print $2}' "$f" 2>/dev/null)"
+    [ -n "$t" ] && { echo "$t"; return; }
+  done
+}
+vault_user(){
+  for f in "$HOME/.codex-token/config" "$HOME/.claude-token/config"; do
+    local u; u="$(awk -F= '/^user=/{print $2}' "$f" 2>/dev/null)"
+    [ -n "$u" ] && { echo "$u"; return; }
+  done
+}
 
 cmd_install(){
   local user="${1:-}"; [ -n "$user" ] || user="$(awk -F= '/^user=/{print $2}' "$HOME/.codex-token/config" 2>/dev/null)"

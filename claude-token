@@ -242,32 +242,51 @@ cmd_status() {
     for p in $(ls "$CLAUDE_PROFILES_DIR" 2>/dev/null); do echo "  profile: $p"; done
 }
 
-cmd_pair() {
+cmd_pair() {  # [--user NAME] — magical onboarding: print a code, poll until approved, auto-configure
     local user="${CODEX_USER:-}"
     while [ -z "$user" ]; do read -rp "Your username on the vault: " user; done
     mkdir -p "$VAULT_DIR_CLIENT"
-    [ -f "$VAULT_KEY" ] || { ssh-keygen -q -t ed25519 -N "" -C "$user@$(short_host)" -f "$VAULT_KEY" && say "generated vault key: $VAULT_KEY"; }
-    set_config user "$user"; set_config leader "$LEADER_HOST" 2>/dev/null || true
-    local pub=""; [ -f "$VAULT_KEY" ] && pub="$(cat "$VAULT_KEY.pub")"
+    local url; url="${CLAUDE_VAULT_URL:-$(vault_url 2>/dev/null)}"
+    [ -n "$url" ] || url="https://vault.ekelvin.com"
+    set_config url "$url"; set_config user "$user"
+    need_cmd curl
+    # generate a short pairing code + a long secret
+    local code secret sh
+    code="$(python3 -c 'import secrets,string;print("".join(secrets.choice(string.ascii_uppercase+string.digits) for _ in range(8)))')"
+    secret="$(python3 -c 'import secrets;print(secrets.token_urlsafe(32))')"
+    sh="$(python3 -c 'import hashlib,sys;print(hashlib.sha256(sys.argv[1].encode()).hexdigest())' "$secret")"
+    # post the pairing request
+    curl -fsS -X POST "$url/pair" -H "Content-Type: application/json" \
+        -d "{\"user\":\"$user\",\"code\":\"$code\",\"secret_hash\":\"$sh\"}" >/dev/null \
+        || die "pair: cannot reach $url (is it correct?)"
     cat <<EOF
 
-Pairing as '$user'.
+Pairing as '$user' against $url
 
-OPTION A — HTTPS vault (recommended; no SSH/Tailscale):
-  Ask the operator to enroll + issue a token, then:
-    codex-vault enroll $user $user claude && codex-vault token $user
-  They send you the token. Then here:
-    claude-token set-url https://vault.ekelvin.com
-    claude-token set-token <token>
+   Pairing code:  $code
 
-OPTION B — SSH (Tailscale + approved key). Send the operator this line:
---------------------------------------------------------------------------------
-command="codex-vault shell $user",no-pty,no-port-forwarding,no-X11-forwarding,no-agent-forwarding $pub
---------------------------------------------------------------------------------
-  They run: codex-vault approve $user '<that line>' claude
+Ask the operator to approve it on the leader (farol):
 
-Then run:  claude-token login
+   codex-vault pair-approve $code
+
+Waiting for approval — this auto-completes (timeout 5 min)...
 EOF
+    # poll until approved / timeout
+    local i status token
+    for i in $(seq 1 60); do
+        sleep 5
+        local resp; resp="$(curl -fsS -X POST "$url/pair/$code/poll" -H "Content-Type: application/json" \
+            -d "{\"secret\":\"$secret\"}" 2>/dev/null || echo '{}')"
+        status="$(printf '%s' "$resp" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("status",""))' 2>/dev/null)"
+        [ "$status" = "approved" ] && { token="$(printf '%s' "$resp" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("token",""))' 2>/dev/null)"; break; }
+        { [ "$status" = "unknown" ] || [ "$status" = "expired" ]; } && die "pair: pairing $status before approval — please retry."
+        printf "." >&2
+    done
+    [ "$status" = "approved" ] || die "pair: timed out waiting for approval. Re-run when the operator is ready."
+    set_config token "$token"
+    cmd_install_wrapper
+    echo >&2
+    say "paired as '$user'! 'claude' now runs via $url. Try: claude"
 }
 
 cmd_login() {
@@ -370,7 +389,7 @@ case "$1" in
     pull)    shift; while [ $# -gt 0 ]; do case "$1" in --profile|-p) PROFILE="$2"; shift 2;; *) PROFILE="$1"; shift;; esac; done; cmd_pull;;
     push)    shift; while [ $# -gt 0 ]; do case "$1" in --profile|-p) PROFILE="$2"; shift 2;; *) PROFILE="$1"; shift;; esac; done; cmd_push;;
     status)  cmd_status;;
-    pair)    shift; while [ $# -gt 0 ]; do case "$1" in --user|-u) CODEX_USER="$2"; shift 2;; *) CODEX_USER="$1"; shift;; esac; done; cmd_pair;;
+    pair|setup) shift; while [ $# -gt 0 ]; do case "$1" in --user|-u) CODEX_USER="$2"; shift 2;; *) CODEX_USER="$1"; shift;; esac; done; cmd_pair;;
     login)   shift; cmd_login "$@";;
     run)     shift; cmd_run "$@";;
     go-live) shift; cmd_go_live "$@";;

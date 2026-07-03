@@ -29,7 +29,7 @@
 # not exposed, so followers re-pull on each launch (access token stays fresh).
 
 set -euo pipefail
-VERSION="2.3.3"
+VERSION="2.4.1"
 
 CLIENT_ID="9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 TOKEN_EP="https://platform.claude.com/v1/oauth/token"
@@ -157,20 +157,7 @@ publish_profile() { # profile
     # Check if the existing access token is still valid; only refresh if needed.
     mkdir -p "$SHARED_DIR" "$(dirname "$af")"
     local needs_refresh
-    needs_refresh="$(python3 - "$af" <<'PY'
-import json,sys,time
-o=json.load(open(sys.argv[1])); o=o.get("claudeAiOauth",o)
-rt=o.get("refreshToken","")
-# need refresh if: no RT, sentinel RT, or access token expired
-exp=o.get("expiresAt",0)/1000
-if not rt or rt.startswith("vlt:") or rt=="__follower_no_refresh__":
-    print("yes")  # can't use existing
-elif exp < time.time() + 600:  # less than 10 min left
-    print("yes")  # about to expire
-else:
-    print("no")   # still valid — publish as-is
-PY
-)"
+    needs_refresh="$(python3 -c 'import json,sys,time;o=json.load(open(sys.argv[1]));o=o.get("claudeAiOauth",o);rt=o.get("refreshToken","");exp=o.get("expiresAt",0)/1000;print("yes" if (not rt or rt.startswith("vlt:") or rt=="__follower_no_refresh__" or exp < time.time()+600) else "no")' "$af")"
     if [ "$needs_refresh" = "yes" ]; then
         local rt resp
         rt="$(python3 -c 'import json,sys;o=json.load(open(sys.argv[1]));o=o.get("claudeAiOauth",o);print(o.get("refreshToken",""))' "$af")"

@@ -30,7 +30,7 @@
 # not exposed, so followers re-pull on each launch (access token stays fresh).
 
 set -euo pipefail
-VERSION="2.4.2"
+VERSION="2.4.3"
 
 CLIENT_ID="9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 TOKEN_EP="https://platform.claude.com/v1/oauth/token"
@@ -323,7 +323,7 @@ Pairing as '$user' against $url
 
 Ask the operator to approve it on the leader (farol):
 
-   codex-vault pair-approve $code
+   ai-vault pair-approve $code
 
 Waiting for approval — this auto-completes (timeout 5 min)...
 EOF

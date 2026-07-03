@@ -12,6 +12,12 @@ if (!['show', 'minimize'].includes(mode)) {
 
 const browser = await chromium.connectOverCDP(`http://127.0.0.1:${PORT}`)
 const cdp = await browser.newBrowserCDPSession()
+// A freshly-restarted headed instance boots with --no-startup-window; make
+// sure there is a window to show.
+if (mode === 'show') {
+  const ctx = browser.contexts()[0]
+  if (ctx && ctx.pages().length === 0) await ctx.newPage()
+}
 const { targetInfos } = await cdp.send('Target.getTargets')
 for (const t of targetInfos.filter((t) => t.type === 'page')) {
   try {

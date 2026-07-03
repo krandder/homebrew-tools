@@ -11,9 +11,9 @@ Agent browser automation normally either (a) attaches to your visible Chrome and
 fights you for focus, or (b) runs a fresh profile that's logged into nothing.
 This gives you a third option: a **separate Chrome instance** that boots from a
 **synced clone of one of your real Chrome profiles** (so it's already
-authenticated everywhere) and is kept permanently minimized, enforced
-event-driven over CDP the instant any window/tab appears. Tabs agents open never
-become visible; your active window is never touched.
+authenticated everywhere) and runs **headless by default** — it never connects a
+window at all, so there is no Dock icon, no window flash, and nothing that can
+take focus, while screenshots and the full CDP surface keep working.
 
 ## How it works
 
@@ -25,13 +25,20 @@ become visible; your active window is never touched.
 - **Synced identity.** `sync-profile.sh` rsyncs a chosen profile (default
   `Default`) out of your live Chrome data dir into the clone, minus caches.
   Re-run it whenever a session expires. Your Chrome keeps running during sync.
-- **Invisible, robustly.** `--no-startup-window` means launch never activates
-  the app. A **sentinel** (`scripts/sentinel.mjs`) subscribes to CDP
-  `Target.targetCreated` and forces every page's window to `minimized` the
-  moment it appears — no polling flash. A LaunchAgent keeps the whole thing
-  alive across logins and Chrome updates.
-- **On-demand human access.** `show` restores + focuses the window (for a login
-  or 2FA) and pauses the sentinel; `hide` puts it away and re-arms it.
+- **Invisible, structurally.** The instance runs with `--headless=new`, so
+  macOS registers it as `ApplicationType=BackgroundOnly`: no Dock icon, no
+  minimized-window tiles, and `bringToFront` calls from automation clients
+  cannot pop anything on screen. (An earlier design kept a headed instance
+  minimized via a CDP sentinel; minimized windows still create Dock tiles and
+  can be restored on top by `Page.bringToFront`, so headless replaced it.)
+  Headless Chrome advertises `HeadlessChrome` in the User-Agent, which some
+  sites reject — `run.sh` overrides it with the normal Chrome UA for the
+  installed version. A LaunchAgent keeps the whole thing alive across logins
+  and Chrome updates.
+- **On-demand human access.** `show` restarts the instance **headed** and
+  raises a window (for a login or 2FA); `hide` restarts it headless. While
+  headed, the sentinel (`scripts/sentinel.mjs`) keeps agent-opened windows
+  minimized. Note the restart drops tabs agents had open.
 
 ## Install
 
@@ -58,8 +65,8 @@ claude mcp add --scope user agent-browser -- \
 | Command | What it does |
 |---|---|
 | `sync-profile.sh` | Refresh the clone from your real Chrome profile (run after a login/session expires) |
-| `show` | Bring the agent browser to the front for manual interaction |
-| `hide` | Put it away and re-arm the sentinel |
+| `show` | Restart headed and bring a window to the front for manual interaction |
+| `hide` | Restart headless (fully invisible) |
 
 ## Configuration (env)
 
@@ -69,6 +76,7 @@ claude mcp add --scope user agent-browser -- \
 | `AGENT_BROWSER_CDP_PORT` | `9222` | DevTools port the instance listens on |
 | `AGENT_BROWSER_DATA_DIR` | `~/.agent-chrome` | The clone's user-data-dir |
 | `AGENT_BROWSER_PREFIX` | `~/agent-browser` | Install location |
+| `AGENT_BROWSER_LABEL` | `com.agent-browser` | LaunchAgent label `show`/`hide` restart |
 
 ## Security notes
 

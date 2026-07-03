@@ -1,9 +1,21 @@
 #!/bin/bash
-# Bring the agent browser to the front for manual interaction (logins, 2FA).
-# Pauses the sentinel until `hide` is run.
+# Bring the agent browser up for manual interaction (logins, 2FA).
+# The instance runs headless by default, so this flips the .show flag and
+# restarts the LaunchAgent headed, then raises a window. Run `hide` when done.
 set -euo pipefail
 DATA_DIR="${AGENT_BROWSER_DATA_DIR:-$HOME/.agent-chrome}"
+PORT="${AGENT_BROWSER_CDP_PORT:-9222}"
 BASE_DIR="$(cd "$(dirname "$0")" && pwd)"
+LABEL="${AGENT_BROWSER_LABEL:-com.agent-browser}"
+
 touch "$DATA_DIR/.show"
+launchctl kickstart -k "gui/$(id -u)/$LABEL"
+
+# Wait for the headed instance's CDP endpoint to come back.
+for _ in $(seq 1 60); do
+  curl -fsS "http://127.0.0.1:$PORT/json/version" >/dev/null 2>&1 && break
+  sleep 0.5
+done
+
 node "$BASE_DIR/scripts/winctl.mjs" show
 echo "agent browser is now visible — run 'hide' when done"

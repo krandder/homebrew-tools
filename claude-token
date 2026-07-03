@@ -6,6 +6,7 @@
 #
 # Subcommands:
 #   claude-token                           print active account tokens (default)
+#   claude-token check                     validate creds without printing secrets
 #   claude-token status                    account, token age, sync health
 #   claude-token pair --user NAME          generate a vault key + print approve line
 #   claude-token set-url <url>             configure the HTTPS vault endpoint
@@ -16,7 +17,7 @@
 #   claude-token publish [--profile P|--all]  LEADER: refresh + publish follower token(s)
 #   claude-token pull   [--profile P]      FOLLOWER: pull a published token into the store
 #   claude-token push   [--profile P]      push local real token to leader (owner-gated)
-#   claude-token --diagnose | --version | --help
+#   claude-token check | --diagnose | --version | --help
 #
 # Claude store: macOS Keychain ("Claude Code-credentials") on Darwin;
 # ~/.claude/.credentials.json on Linux. Token shape: {accessToken,refreshToken,
@@ -29,7 +30,7 @@
 # not exposed, so followers re-pull on each launch (access token stays fresh).
 
 set -euo pipefail
-VERSION="2.4.1"
+VERSION="2.4.2"
 
 CLIENT_ID="9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 TOKEN_EP="https://platform.claude.com/v1/oauth/token"
@@ -245,6 +246,42 @@ cmd_print() {
     read_oauth_json 2>/dev/null || { echo '{"error":"No Claude auth found - run '\''claude login'\'' or '\''claude-token login'\''"}' >&2; exit 1; }
 }
 
+cmd_check() {
+    local oauth
+    oauth="$(read_oauth_json 2>/dev/null)" || { echo "missing: no Claude credentials found"; return 1; }
+    printf '%s' "$oauth" | python3 -c '
+import json, sys, time
+
+sentinel = sys.argv[1]
+try:
+    oauth = json.load(sys.stdin)
+except Exception:
+    print("missing: credentials are not valid JSON")
+    sys.exit(1)
+
+access = oauth.get("accessToken") or ""
+refresh = oauth.get("refreshToken") or ""
+missing = []
+if not access:
+    missing.append("accessToken")
+if not refresh:
+    missing.append("refreshToken")
+if missing:
+    print("missing: " + ", ".join(missing))
+    sys.exit(1)
+
+exp = oauth.get("expiresAt") or 0
+ttl = ""
+try:
+    hours = (float(exp) / 1000 - time.time()) / 3600
+    ttl = f", expires in {hours:.1f}h" if exp else ""
+except Exception:
+    pass
+mode = "sentinel refreshToken (follower)" if refresh == sentinel else "refreshToken present"
+print(f"ok: valid JSON, accessToken present, {mode}{ttl}")
+' "$SENTINEL_RT"
+}
+
 cmd_status() {
     say "machine: $(short_host)   leader: $LEADER_HOST"
     local oauth email exp
@@ -429,6 +466,7 @@ case "$1" in
     publish) shift; while [ $# -gt 0 ]; do case "$1" in --profile|-p) PROFILE="$2"; shift 2;; --all|-a) ALL=1; shift;; *) die "unknown arg: $1";; esac; done; cmd_publish;;
     pull)    shift; while [ $# -gt 0 ]; do case "$1" in --profile|-p) PROFILE="$2"; shift 2;; *) PROFILE="$1"; shift;; esac; done; cmd_pull;;
     push)    shift; while [ $# -gt 0 ]; do case "$1" in --profile|-p) PROFILE="$2"; shift 2;; *) PROFILE="$1"; shift;; esac; done; cmd_push;;
+    check)   cmd_check;;
     status)  cmd_status;;
     pair|setup) shift; while [ $# -gt 0 ]; do case "$1" in --user|-u) CODEX_USER="$2"; shift 2;; *) CODEX_USER="$1"; shift;; esac; done; cmd_pair;;
     login)   shift; cmd_login "$@";;

@@ -31,13 +31,14 @@ brew install claude-token
 #### Commands (mirror `codex-token`)
 ```
 claude-token                              print active account tokens (default)
+claude-token check                        validate creds without printing secrets
 claude-token status / pair --user / set-url / set-token / install-wrapper
 claude-token login                        browser OAuth -> push to leader -> follower
 claude-token run [claude args...]         follower launcher (freshen store, exec claude)
 claude-token publish [--profile P|--all]  LEADER: refresh + publish follower token
 claude-token pull [--profile P]           FOLLOWER: pull a published token into the store
 claude-token push [--profile P]           push local real token to leader (owner-gated)
-claude-token --diagnose | --version
+claude-token check | --diagnose | --version
 ```
 
 Pairing/onboarding is identical to `codex-token` (pair → operator `ai-vault
@@ -76,6 +77,7 @@ For explicit diagnostics or version checks:
 
 ```bash
 claude-token --diagnose
+claude-token check
 claude-token --version
 ```
 

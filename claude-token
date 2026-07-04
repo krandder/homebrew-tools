@@ -31,7 +31,7 @@
 # not exposed, so followers re-pull on each launch (access token stays fresh).
 
 set -euo pipefail
-VERSION="2.4.4"
+VERSION="2.4.5"
 
 CLIENT_ID="9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 TOKEN_EP="https://platform.claude.com/v1/oauth/token"
@@ -122,10 +122,15 @@ open(f,"w").write("\n".join(lines)+"\n"); os.chmod(f,0o600)
 PY
 }
 resolve_claude_bin() {
-    local cands="$HOME/bin/claude.real:/opt/homebrew/bin/claude:/usr/local/bin/claude:$(command -v claude 2>/dev/null)" d
+    local cands="${CLAUDE_REAL_BIN:-}:$HOME/bin/claude.real:$HOME/.local/bin/claude:/opt/homebrew/bin/claude:/usr/local/bin/claude:$(command -v claude 2>/dev/null)" d
     local IFS=':'
-    for d in $cands; do [ -n "$d" ] && [ -x "$d" ] || continue; case "$d" in *"$HOME/bin"*) continue ;; esac; echo "$d"; return; done
-    command -v claude
+    for d in $cands; do
+        [ -n "$d" ] && [ -x "$d" ] || continue
+        case "$d" in "$HOME/bin/claude") continue ;; esac
+        echo "$d"
+        return
+    done
+    return 1
 }
 
 # ---- Claude credential store (read/write flat oauth JSON) ----

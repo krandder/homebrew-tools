@@ -31,11 +31,12 @@
 # not exposed, so followers re-pull on each launch (access token stays fresh).
 
 set -euo pipefail
-VERSION="2.4.5"
+VERSION="2.4.6"
 
 CLIENT_ID="9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 TOKEN_EP="https://platform.claude.com/v1/oauth/token"
-DEFAULT_SCOPE="org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload"
+DEFAULT_SCOPE="user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload"
+PROFILE_EP="https://api.anthropic.com/api/oauth/profile"
 SENTINEL_RT="__follower_no_refresh__"
 BLACKHOLE_URL="http://127.0.0.1:9/oauth/token"
 
@@ -203,10 +204,10 @@ PY
 # refresh a Claude credentials file -> json {access_token,refresh_token,expires_in,...}
 refresh_claude() { # auth_file -> stdout json
     local af="$1"
-    python3 - "$af" "$CLIENT_ID" "$TOKEN_EP" "$DEFAULT_SCOPE" <<'PY'
+    python3 - "$af" "$CLIENT_ID" "$TOKEN_EP" "$DEFAULT_SCOPE" "$PROFILE_EP" <<'PY'
 import json, sys, urllib.request, urllib.error
 
-af, default_cid, url, default_scope = sys.argv[1:5]
+af, default_cid, url, default_scope, profile_url = sys.argv[1:6]
 d = json.load(open(af))
 o = d.get("claudeAiOauth", d) if isinstance(d, dict) else {}
 rt = o.get("refreshToken", "")
@@ -239,13 +240,45 @@ req = urllib.request.Request(
     },
 )
 try:
-    r=urllib.request.urlopen(req,timeout=30); print(r.read().decode()); sys.exit(0)
+    r = urllib.request.urlopen(req, timeout=30)
+    token = json.loads(r.read().decode())
 except urllib.error.HTTPError as e:
     retry = e.headers.get("Retry-After") or e.headers.get("retry-after") or "none"
     cf_ray = e.headers.get("CF-RAY") or e.headers.get("cf-ray") or "none"
     sys.stderr.write(f"refresh FAILED: HTTP {e.code} retry-after={retry} cf-ray={cf_ray} ")
     sys.stderr.write(e.read().decode(errors="replace")[:200] + "\n")
     sys.exit(1)
+
+access = token.get("access_token") or ""
+token["_profile_fetch"] = {"status": "skipped", "reason": "missing_access_token"}
+if access:
+    profile_req = urllib.request.Request(
+        profile_url,
+        method="GET",
+        headers={
+            "Authorization": f"Bearer {access}",
+            "Content-Type": "application/json",
+            "Cache-Control": "no-cache",
+            "Accept": "application/json, text/plain, */*",
+            "User-Agent": "axios/1.15.2",
+        },
+    )
+    try:
+        pr = urllib.request.urlopen(profile_req, timeout=10)
+        token["_profile"] = json.loads(pr.read().decode())
+        token["_profile_fetch"] = {"status": "ok"}
+    except urllib.error.HTTPError as e:
+        retry = e.headers.get("Retry-After") or e.headers.get("retry-after") or "none"
+        cf_ray = e.headers.get("CF-RAY") or e.headers.get("cf-ray") or "none"
+        token["_profile_fetch"] = {"status": "failed", "http": e.code, "retry_after": retry, "cf_ray": cf_ray}
+        sys.stderr.write(f"profile GET failed: HTTP {e.code} retry-after={retry} cf-ray={cf_ray} ")
+        sys.stderr.write(e.read().decode(errors="replace")[:200] + "\n")
+    except Exception as e:
+        token["_profile_fetch"] = {"status": "failed", "error": type(e).__name__}
+        sys.stderr.write(f"profile GET failed: {type(e).__name__}: {e}\n")
+
+print(json.dumps(token, separators=(",", ":")))
+sys.exit(0)
 PY
 }
 
@@ -286,6 +319,9 @@ publish_profile() { # profile
             log_event refresh "$p" failed "token-endpoint"
             die "publish: refresh failed for '$p'"
         fi
+        local profile_status
+        profile_status="$(printf '%s' "$resp" | python3 -c 'import json,sys; print((json.load(sys.stdin).get("_profile_fetch") or {}).get("status","unknown"))' 2>/dev/null || echo unknown)"
+        log_event profile "$p" "$profile_status" "api/oauth/profile"
         set +e
         python3 - "$af" "$sf" "$p" "$resp" "$SENTINEL_RT" "$LEADER_HOST" <<'PY'
 import json,sys,os,time,datetime
@@ -294,6 +330,41 @@ r=json.loads(resp); ts=int(time.time()*1000)
 d=json.load(open(af)); o=d.get("claudeAiOauth",d)
 o["accessToken"]=r["access_token"]; o["refreshToken"]=r["refresh_token"]
 o["expiresAt"]=ts+int(r.get("expires_in",28800))*1000
+if r.get("scope"):
+    o["scopes"]=[s for s in str(r.get("scope")).split(" ") if s]
+
+raw_profile=r.get("_profile")
+if isinstance(raw_profile,dict):
+    account=raw_profile.get("account") or {}
+    org=raw_profile.get("organization") or {}
+    org_type=org.get("organization_type")
+    subscription={"claude_max":"max","claude_pro":"pro","claude_enterprise":"enterprise","claude_team":"team"}.get(org_type)
+    o["profile"]=raw_profile
+    o["profileFetchedAt"]=ts
+    o["subscriptionType"]=subscription
+    o["rateLimitTier"]=org.get("rate_limit_tier")
+    o["seatTier"]=org.get("seat_tier")
+    o["hasExtraUsageEnabled"]=org.get("has_extra_usage_enabled")
+    o["billingType"]=org.get("billing_type")
+    o["ccOnboardingFlags"]=org.get("cc_onboarding_flags") or {}
+    o["claudeCodeTrialEndsAt"]=org.get("claude_code_trial_ends_at")
+    o["claudeCodeTrialDurationDays"]=org.get("claude_code_trial_duration_days")
+    if account.get("display_name") is not None:
+        o["displayName"]=account.get("display_name")
+    if account.get("created_at") is not None:
+        o["accountCreatedAt"]=account.get("created_at")
+    if org.get("subscription_created_at") is not None:
+        o["subscriptionCreatedAt"]=org.get("subscription_created_at")
+
+if isinstance(r.get("account"),dict) or isinstance(r.get("organization"),dict):
+    account=r.get("account") or {}
+    org=r.get("organization") or {}
+    o["tokenAccount"]={
+        "uuid": account.get("uuid"),
+        "emailAddress": account.get("email_address"),
+        "organizationUuid": org.get("uuid"),
+    }
+
 d=dict(d); d["claudeAiOauth"]=o
 json.dump(d,open(af,"w"),indent=2); os.chmod(af,0o600)
 pub=dict(o); pub["refreshToken"]=sentinel

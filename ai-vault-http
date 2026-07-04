@@ -12,6 +12,7 @@ Routes:
   GET  /healthz                 (no auth) liveness
   POST /push/<profile>          (owner)   body = token JSON -> receive+refresh+publish
   GET  /pull/<profile>          (puller)  -> follower token JSON
+  POST /debug-logs/<tool>       (auth)    body = redacted debug bundle -> vault storage
   GET  /status                  (admin)   -> ACL listing
 
 Env:
@@ -22,6 +23,7 @@ import hashlib
 import http.server
 import json
 import os
+import datetime
 import socketserver
 import subprocess
 import sys
@@ -29,8 +31,11 @@ from pathlib import Path
 
 VAULT_DIR = Path(os.environ.get("CODEX_VAULT_DIR", str(Path.home() / ".codex-vault")))
 TOKENS_FILE = VAULT_DIR / "tokens.json"
+HTTP_EVENTS_FILE = VAULT_DIR / "http-events.jsonl"
+DEBUG_LOG_DIR = VAULT_DIR / "debug-logs"
 LISTEN = os.environ.get("CODEX_VAULT_LISTEN", "127.0.0.1:8231")
 ALLOWED_PROFILE = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.")
+ALLOWED_TOOL = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.")
 
 
 def load_tokens():
@@ -52,6 +57,7 @@ def identity_for(auth_header):
 def run_vault(user, args, body=None):
     env = dict(os.environ)
     env["CODEX_VAULT_USER"] = user
+    env["CODEX_VAULT_DIR"] = str(VAULT_DIR)
     return subprocess.run(
         ["ai-vault", *args],
         input=body, capture_output=True, text=True, env=env,
@@ -60,11 +66,33 @@ def run_vault(user, args, body=None):
 
 def run_vault_anon(args, body=None):
     # pairing routes run without a bound identity (no CODEX_VAULT_USER)
-    return subprocess.run(["ai-vault", *args], input=body, capture_output=True, text=True, env=dict(os.environ))
+    env = dict(os.environ)
+    env["CODEX_VAULT_DIR"] = str(VAULT_DIR)
+    return subprocess.run(["ai-vault", *args], input=body, capture_output=True, text=True, env=env)
 
 
 def valid_profile(p):
     return bool(p) and all(c in ALLOWED_PROFILE for c in p)
+
+def valid_tool(p):
+    return bool(p) and all(c in ALLOWED_TOOL for c in p)
+
+def server_event(event, user="", profile="", status="", detail=""):
+    try:
+        HTTP_EVENTS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        rec = {
+            "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "event": event,
+            "user": user,
+            "profile": profile,
+            "status": status,
+            "detail": detail,
+        }
+        with HTTP_EVENTS_FILE.open("a") as fh:
+            fh.write(json.dumps(rec, separators=(",", ":")) + "\n")
+        os.chmod(HTTP_EVENTS_FILE, 0o600)
+    except Exception as e:
+        sys.stderr.write("server_event failed: %s\n" % e)
 
 def parse_id(rest):  # "codex/kas" -> ("codex", "kas") or None
     parts = rest.split("/", 1)
@@ -86,21 +114,34 @@ CLAUDE_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 def broker_refresh(account):
     """Refresh using the canonical refresh token for <account>; return (access, expires_in).
     Stores the rotated refresh token as the new canonical."""
-    import urllib.request, urllib.parse, time
+    import urllib.request, urllib.error, time
     af = os.path.expanduser(f"~/.claude-profiles/{account}/.claude/credentials.json")
     d = json.load(open(af))
     o = d.get("claudeAiOauth", d)
     rt = o.get("refreshToken", "")
     if not rt or rt.startswith("vlt:"):
         raise RuntimeError("no canonical refresh token for " + account)
-    body = urllib.parse.urlencode(
-        {"grant_type": "refresh_token", "client_id": CLAUDE_CLIENT_ID, "refresh_token": rt}
-    ).encode()
+    scope = o.get("scope") or o.get("scopes") or "org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload"
+    if isinstance(scope, list):
+        scope = " ".join(scope)
+    body = json.dumps({
+        "grant_type": "refresh_token",
+        "client_id": o.get("clientId") or o.get("client_id") or CLAUDE_CLIENT_ID,
+        "refresh_token": rt,
+        "scope": scope,
+    }, separators=(",", ":")).encode()
     req = urllib.request.Request(
         CLAUDE_TOKEN_EP, data=body, method="POST",
-        headers={"Content-Type": "application/x-www-form-urlencoded",
-                 "Accept": "application/json", "User-Agent": "claude-code/2.1.195"})
-    resp = urllib.request.urlopen(req, timeout=20)
+        headers={"Content-Type": "application/json",
+                 "Accept": "application/json, text/plain, */*", "User-Agent": "axios/1.15.2"})
+    server_event("broker-refresh", account, "claude:" + account, "start", "shape=json")
+    try:
+        resp = urllib.request.urlopen(req, timeout=30)
+    except urllib.error.HTTPError as e:
+        retry = e.headers.get("Retry-After") or e.headers.get("retry-after") or "none"
+        cf_ray = e.headers.get("CF-RAY") or e.headers.get("cf-ray") or "none"
+        server_event("broker-refresh", account, "claude:" + account, "failed", f"http={e.code} retry-after={retry} cf-ray={cf_ray}")
+        raise
     j = json.loads(resp.read())
     # store rotated refresh token as the new canonical (we are the sole owner)
     o["accessToken"] = j["access_token"]
@@ -109,6 +150,7 @@ def broker_refresh(account):
     d["claudeAiOauth"] = o
     json.dump(d, open(af, "w"), indent=2)
     os.chmod(af, 0o600)
+    server_event("broker-refresh", account, "claude:" + account, "ok", "updated-canonical")
     return j["access_token"], int(j.get("expires_in", 28800))
 
 
@@ -149,7 +191,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return self._send(400, '{"error":"bad profile; use /access/<kind>/<name>"}')
             p = run_vault(user, ["access", pid[0] + ":" + pid[1]])
             if p.returncode == 0 and p.stdout:
+                server_event("access", user, pid[0] + ":" + pid[1], "ok", "")
                 return self._send(200, p.stdout, ctype="text/plain")
+            server_event("access", user, pid[0] + ":" + pid[1], "failed", p.stderr.strip().splitlines()[-1] if p.stderr.strip() else "")
             return self._send(403 if "authorized" in p.stderr else 404,
                               '{"error":"' + (p.stderr.strip().splitlines()[-1] or 'failed') + '"}')
         if self.path.startswith("/pull/"):
@@ -158,7 +202,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return self._send(400, '{"error":"bad profile; use /pull/<kind>/<name>"}')
             p = run_vault(user, ["serve", pid[0] + ":" + pid[1]])
             if p.returncode == 0:
+                server_event("pull", user, pid[0] + ":" + pid[1], "ok", "")
                 return self._send(200, p.stdout)
+            server_event("pull", user, pid[0] + ":" + pid[1], "failed", p.stderr.strip().splitlines()[-1] if p.stderr.strip() else "")
             return self._send(403 if "authorized" in p.stderr else 404,
                               '{"error":"' + (p.stderr.strip().splitlines()[-1] or 'failed') + '"}')
         return self._send(404, '{"error":"not found"}')
@@ -197,6 +243,20 @@ class Handler(http.server.BaseHTTPRequestHandler):
         user = self._identity()
         if not user:
             return
+        if self.path.startswith("/debug-logs/"):
+            tool = self.path[len("/debug-logs/"):]
+            if not valid_tool(tool):
+                return self._send(400, '{"error":"bad tool name"}')
+            if length > 1000000:
+                return self._send(413, '{"error":"debug log bundle too large"}')
+            ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+            out_dir = DEBUG_LOG_DIR / user
+            out_dir.mkdir(parents=True, exist_ok=True)
+            out = out_dir / f"{ts}-{tool}.json"
+            out.write_text(body)
+            os.chmod(out, 0o600)
+            server_event("debug-logs", user, "", "ok", str(out))
+            return self._send(200, json.dumps({"ok": True, "stored": str(out)}))
         # Transparent OAuth refresh broker: a follower's refresh (routed here by
         # its local proxy) is fulfilled with the canonical refresh token.
         if self.path in ("/v1/oauth/token", "/oauth/token"):
@@ -223,7 +283,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return self._send(400, '{"error":"bad profile; use /push/<kind>/<name>"}')
             p = run_vault(user, ["receive", pid[0] + ":" + pid[1]], body=body)
             if p.returncode == 0:
+                server_event("push", user, pid[0] + ":" + pid[1], "ok", p.stderr.strip().splitlines()[-1] if p.stderr.strip() else "")
                 return self._send(200, '{"ok":true,"detail":"' + (p.stderr.strip().splitlines()[-1] or "ok") + '"}')
+            server_event("push", user, pid[0] + ":" + pid[1], "failed", p.stderr.strip().splitlines()[-1] if p.stderr.strip() else "")
             return self._send(403 if "owner" in p.stderr or "may not" in p.stderr else 400,
                               '{"error":"' + (p.stderr.strip().splitlines()[-1] or 'failed') + '"}')
         return self._send(404, '{"error":"not found"}')

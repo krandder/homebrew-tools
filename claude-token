@@ -17,6 +17,7 @@
 #   claude-token publish [--profile P|--all]  LEADER: refresh + publish follower token(s)
 #   claude-token pull   [--profile P]      FOLLOWER: pull a published token into the store
 #   claude-token push   [--profile P]      push local real token to leader (owner-gated)
+#   claude-token push-logs                 upload local redacted debug logs to the vault
 #   claude-token check | --diagnose | --version | --help
 #
 # Claude store: macOS Keychain ("Claude Code-credentials") on Darwin;
@@ -30,10 +31,11 @@
 # not exposed, so followers re-pull on each launch (access token stays fresh).
 
 set -euo pipefail
-VERSION="2.4.3"
+VERSION="2.4.4"
 
 CLIENT_ID="9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 TOKEN_EP="https://platform.claude.com/v1/oauth/token"
+DEFAULT_SCOPE="org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload"
 SENTINEL_RT="__follower_no_refresh__"
 BLACKHOLE_URL="http://127.0.0.1:9/oauth/token"
 
@@ -46,6 +48,8 @@ if [ -d "$HOME/.codex-token" ]; then VAULT_DIR_CLIENT="$HOME/.codex-token"; else
 VAULT_DIR_CLIENT="${CLAUDE_VAULT_DIR:-$VAULT_DIR_CLIENT}"
 VAULT_KEY="${CLAUDE_VAULT_KEY:-$VAULT_DIR_CLIENT/id_ed25519}"
 CONFIG_FILE="$VAULT_DIR_CLIENT/config"
+LOG_DIR="${CLAUDE_TOKEN_LOG_DIR:-$VAULT_DIR_CLIENT/logs}"
+LOG_FILE="$LOG_DIR/events.jsonl"
 [ -f "$CONFIG_FILE" ] && while IFS='=' read -r _k _v; do
     case "$_k" in
         user)   CODEX_USER="${CODEX_USER:-$_v}" ;;
@@ -59,6 +63,29 @@ need_cmd() { command -v "$1" >/dev/null 2>&1 || die "missing required command: $
 need_cmd python3
 short_host() { hostname -s 2>/dev/null || hostname; }
 is_mac() { [ "$(uname)" = Darwin ]; }
+log_event() { # event profile status detail
+    local event="${1:-event}" profile="${2:-}" status="${3:-}" detail="${4:-}"
+    mkdir -p "$LOG_DIR"
+    python3 - "$LOG_FILE" "$VERSION" "$(short_host)" "$(config_user 2>/dev/null || true)" "$event" "$profile" "$status" "$detail" <<'PY'
+import datetime, json, os, sys
+path, version, host, user, event, profile, status, detail = sys.argv[1:9]
+rec = {
+    "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    "tool": "claude-token",
+    "version": version,
+    "host": host,
+    "user": user,
+    "event": event,
+    "profile": profile,
+    "status": status,
+    "detail": detail,
+    "pid": os.getpid(),
+}
+with open(path, "a") as fh:
+    fh.write(json.dumps(rec, separators=(",", ":")) + "\n")
+os.chmod(path, 0o600)
+PY
+}
 
 # ---- vault transport (HTTPS if configured, else SSH) ----
 have_http_vault() { [ -n "${CLAUDE_VAULT_URL:-}${CODEX_VAULT_URL:-}" ] || grep -q '^url=' "$CONFIG_FILE" 2>/dev/null; }
@@ -132,18 +159,88 @@ write_oauth_json() { # oauth_str  -> keychain (wrapped) or file (flat)
 }
 oauth_get() { python3 -c 'import json,sys;o=json.load(open(sys.argv[1]));print(o.get(sys.argv[2],"") or "")' "$1" "$2"; }
 
-# refresh a Claude refresh_token -> json {access_token,refresh_token,expires_in,...}
-refresh_claude() { # rt  -> stdout json
-    local rt="$1"
-    python3 - "$rt" "$CLIENT_ID" "$TOKEN_EP" <<'PY'
-import json,sys,urllib.request,urllib.error
-rt,cid,url=sys.argv[1],sys.argv[2],sys.argv[3]
-body=urllib.parse.urlencode({"grant_type":"refresh_token","client_id":cid,"refresh_token":rt}).encode()
-req=urllib.request.Request(url,data=body,method="POST",headers={"Content-Type":"application/x-www-form-urlencoded","Accept":"application/json","User-Agent":"claude-code/2.1.195"})
+stat_mtime() {
+    if stat -f %m "$1" >/dev/null 2>&1; then stat -f %m "$1"; else stat -c %Y "$1"; fi
+}
+
+acquire_oauth_refresh_lock() {
+    local lock_dir="${CLAUDE_OAUTH_LOCK_DIR:-$HOME/.claude}" lock i now mt age delay
+    lock="$lock_dir/.oauth_refresh.lock"
+    mkdir -p "$lock_dir"
+    for i in 1 2 3 4 5; do
+        if ( set -C; printf '%s %s\n' "$$" "$(date +%s)" > "$lock" ) 2>/dev/null; then
+            printf '%s\n' "$lock"
+            return 0
+        fi
+        now="$(date +%s)"
+        mt="$(stat_mtime "$lock" 2>/dev/null || echo 0)"
+        age=$((now - mt))
+        if [ "$age" -ge 10 ]; then
+            rm -f "$lock"
+            continue
+        fi
+        delay="$(python3 -c 'import random; print("%.3f" % (1 + random.random()))')"
+        sleep "$delay"
+    done
+    return 1
+}
+
+profile_needs_refresh() { # auth_file -> yes/no
+    python3 - "$1" <<'PY'
+import json, sys, time
+o=json.load(open(sys.argv[1])); o=o.get("claudeAiOauth",o)
+rt=o.get("refreshToken","")
+exp=(o.get("expiresAt") or 0)/1000
+print("yes" if (not rt or rt.startswith("vlt:") or rt=="__follower_no_refresh__" or exp < time.time()+300) else "no")
+PY
+}
+
+# refresh a Claude credentials file -> json {access_token,refresh_token,expires_in,...}
+refresh_claude() { # auth_file -> stdout json
+    local af="$1"
+    python3 - "$af" "$CLIENT_ID" "$TOKEN_EP" "$DEFAULT_SCOPE" <<'PY'
+import json, sys, urllib.request, urllib.error
+
+af, default_cid, url, default_scope = sys.argv[1:5]
+d = json.load(open(af))
+o = d.get("claudeAiOauth", d) if isinstance(d, dict) else {}
+rt = o.get("refreshToken", "")
+if not rt:
+    sys.stderr.write("refresh FAILED: no refreshToken in credential file\n")
+    sys.exit(1)
+
+cid = o.get("clientId") or o.get("client_id") or d.get("clientId") or d.get("client_id") or default_cid
+scope = o.get("scope") or o.get("scopes") or d.get("scope") or d.get("scopes") or default_scope
+if isinstance(scope, list):
+    scope = " ".join(scope)
+
+payload = {
+    "grant_type": "refresh_token",
+    "refresh_token": rt,
+    "client_id": cid,
+}
+if scope:
+    payload["scope"] = scope
+
+body = json.dumps(payload, separators=(",", ":")).encode()
+req = urllib.request.Request(
+    url,
+    data=body,
+    method="POST",
+    headers={
+        "Content-Type": "application/json",
+        "Accept": "application/json, text/plain, */*",
+        "User-Agent": "axios/1.15.2",
+    },
+)
 try:
-    r=urllib.request.urlopen(req,timeout=20); print(r.read().decode()); sys.exit(0)
+    r=urllib.request.urlopen(req,timeout=30); print(r.read().decode()); sys.exit(0)
 except urllib.error.HTTPError as e:
-    sys.stderr.write("refresh FAILED: "+e.read().decode()[:200]+"\n"); sys.exit(1)
+    retry = e.headers.get("Retry-After") or e.headers.get("retry-after") or "none"
+    cf_ray = e.headers.get("CF-RAY") or e.headers.get("cf-ray") or "none"
+    sys.stderr.write(f"refresh FAILED: HTTP {e.code} retry-after={retry} cf-ray={cf_ray} ")
+    sys.stderr.write(e.read().decode(errors="replace")[:200] + "\n")
+    sys.exit(1)
 PY
 }
 
@@ -154,17 +251,37 @@ shared_file()    { echo "$SHARED_DIR/$1.json"; }
 publish_profile() { # profile
     local p="$1" af sf
     af="$(canonical_file "$p")"; sf="$(shared_file "$p")"
+    log_event publish "$p" start "canonical=$af shared=$sf"
     [ -f "$af" ] || die "publish: missing canonical creds at $af"
     # Check if the existing access token is still valid; only refresh if needed.
     mkdir -p "$SHARED_DIR" "$(dirname "$af")"
     local needs_refresh
-    needs_refresh="$(python3 -c 'import json,sys,time;o=json.load(open(sys.argv[1]));o=o.get("claudeAiOauth",o);rt=o.get("refreshToken","");exp=o.get("expiresAt",0)/1000;print("yes" if (not rt or rt.startswith("vlt:") or rt=="__follower_no_refresh__" or exp < time.time()+600) else "no")' "$af")"
+    needs_refresh="$(profile_needs_refresh "$af")"
     if [ "$needs_refresh" = "yes" ]; then
-        local rt resp
+        local rt resp lock rc
         rt="$(python3 -c 'import json,sys;o=json.load(open(sys.argv[1]));o=o.get("claudeAiOauth",o);print(o.get("refreshToken",""))' "$af")"
         [ -n "$rt" ] || die "publish: no refreshToken for '$p'"
         [ "$rt" = "$SENTINEL_RT" ] && die "publish: '$p' is a follower (sentinel)"
-        resp="$(refresh_claude "$rt")" || die "publish: refresh failed for '$p'"
+        log_event refresh "$p" start "threshold=300s shape=json"
+        lock="$(acquire_oauth_refresh_lock)" || { log_event refresh "$p" failed "lock"; die "publish: could not acquire OAuth refresh lock"; }
+        log_event refresh_lock "$p" acquired "$lock"
+        needs_refresh="$(profile_needs_refresh "$af")"
+        if [ "$needs_refresh" != "yes" ]; then
+            rm -f "$lock"
+            log_event refresh "$p" skipped "fresh-after-lock"
+            publish_profile "$p"
+            return $?
+        fi
+        set +e
+        resp="$(refresh_claude "$af")"
+        rc=$?
+        set -e
+        if [ "$rc" -ne 0 ]; then
+            rm -f "$lock"
+            log_event refresh "$p" failed "token-endpoint"
+            die "publish: refresh failed for '$p'"
+        fi
+        set +e
         python3 - "$af" "$sf" "$p" "$resp" "$SENTINEL_RT" "$LEADER_HOST" <<'PY'
 import json,sys,os,time,datetime
 af,sf,profile,resp,sentinel,leader=sys.argv[1:7]
@@ -180,6 +297,12 @@ out={"claudeAiOauth":pub,"profile":profile,"leader":leader,
 json.dump(out,open(sf,"w"),indent=2); os.chmod(sf,0o600)
 print(f"published {profile} -> {sf} (refreshed, ttl {r.get('expires_in')}s)")
 PY
+        rc=$?
+        set -e
+        rm -f "$lock"
+        log_event refresh_lock "$p" released "$lock"
+        log_event refresh "$p" ok "updated canonical+shared"
+        [ "$rc" -eq 0 ] || exit "$rc"
     else
         # Access token still valid — publish it directly (NO refresh needed!)
         python3 - "$af" "$sf" "$p" "$SENTINEL_RT" "$LEADER_HOST" <<'PY'
@@ -193,17 +316,20 @@ out={"claudeAiOauth":pub,"profile":profile,"leader":leader,
 json.dump(out,open(sf,"w"),indent=2); os.chmod(sf,0o600)
 print(f"published {profile} -> {sf} (existing token, no refresh)")
 PY
+        log_event publish "$p" ok "existing-access-no-refresh"
     fi
 }
 
 # ---- FOLLOWER: pull / push ----
 pull_profile() { # profile -> local store
     local p="$1" sf
+    log_event pull "$p" start ""
     sf="$(shared_file "$p")"
     if [ -f "$sf" ]; then
         : # fast path: syncthing mesh
     elif have_http_vault; then
         say "pulling '$p' from $(vault_url) (HTTPS, ACL-gated)..."
+        log_event pull "$p" http "$(vault_url)"
         local tmp; tmp="$(mktemp)"; vault_http GET "/pull/claude/$p" > "$tmp" || { rm -f "$tmp"; die "pull: leader denied/unavailable for '$p'"; }
         sf="$tmp"
     else
@@ -218,27 +344,30 @@ d=json.load(open(sys.argv[1])); o=d.get("claudeAiOauth",d)
 if not o.get("accessToken"): sys.exit("pull: no accessToken in published token")
 print(json.dumps(o))
 PY
+    log_event pull "$p" ok "token-json"
 }
 
 push_profile() { # profile -> leader (then revert local to sentinel)
     local p="$1" oauth rt
+    log_event push "$p" start ""
     oauth="$(read_oauth_json)" || die "push: no local Claude creds found"
     rt="$(echo "$oauth" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("refreshToken",""))')"
     [ -n "$rt" ] || die "push: no refreshToken locally"
     [ "$rt" = "$SENTINEL_RT" ] && die "push: only sentinel token present (already a follower). Run 'claude-token login' first."
     if have_http_vault; then
         say "pushing '$p' to $(vault_url) (HTTPS)..."
-        printf '%s' "$oauth" | vault_http POST "/push/claude/$p" /dev/stdin >/dev/null || die "push: leader rejected '$p'"
+        printf '%s' "$oauth" | vault_http POST "/push/claude/$p" /dev/stdin >/dev/null || { log_event push "$p" failed "http-rejected"; die "push: leader rejected '$p'"; }
     else
         need_cmd ssh
         say "pushing '$p' to leader $LEADER_HOST (vault/SSH)..."
-        printf '%s\n' "$oauth" | ssh_vault "ai-vault receive claude:$p" || die "push: leader rejected '$p'"
+        printf '%s\n' "$oauth" | ssh_vault "ai-vault receive claude:$p" || { log_event push "$p" failed "ssh-rejected"; die "push: leader rejected '$p'"; }
     fi
     # revert local store to follower (sentinel RT), then pull fresh
     local follower; follower="$(echo "$oauth" | python3 -c 'import json,sys;o=json.load(sys.stdin);o["refreshToken"]="'$SENTINEL_RT'";print(json.dumps(o))')"
     write_oauth_json "$follower"
     local fresh; fresh="$(pull_profile "$p" 2>/dev/null || true)"; [ -n "$fresh" ] && write_oauth_json "$fresh"
     say "reverted '$p' to follower (sentinel token)"
+    log_event push "$p" ok "reverted-local-to-follower"
 }
 
 # ---- commands ----
@@ -358,6 +487,7 @@ EOF
 cmd_login() {
     local user; user="$(config_user)"; [ -n "$user" ] || die "login: run 'claude-token setup --user <name>' first"
     local bin; bin="$(resolve_claude_bin)"; [ -n "$bin" ] || die "login: claude binary not found"
+    log_event login "$user" start "$bin"
     say "starting browser login..."
     "$bin" login "$@" || "$bin" auth login "$@" || true
     local oauth rt
@@ -366,13 +496,15 @@ cmd_login() {
     if [ -n "$rt" ] && [ "$rt" != "$SENTINEL_RT" ]; then
         say "pushing your Claude token to the leader as '$user'..."
         if have_http_vault; then
-            printf '%s' "$oauth" | vault_http POST "/push/claude/$user" /dev/stdin >/dev/null || say "  (push deferred — leader will retry)"
+            printf '%s' "$oauth" | vault_http POST "/push/claude/$user" /dev/stdin >/dev/null || { log_event login "$user" push-deferred "http"; say "  (push deferred — leader will retry)"; }
         else
-            need_cmd ssh; printf '%s\n' "$oauth" | ssh_vault "ai-vault receive claude:$user" || say "  (push deferred)"
+            need_cmd ssh; printf '%s\n' "$oauth" | ssh_vault "ai-vault receive claude:$user" || { log_event login "$user" push-deferred "ssh"; say "  (push deferred)"; }
         fi
         say "logged in + pushed to leader. 'claude' works (standalone); follower mode activates when the broker serves."
+        log_event login "$user" ok "pushed"
     else
         say "logged in (no refresh token to push)."
+        log_event login "$user" ok "no-refresh-token"
     fi
 }
 
@@ -453,6 +585,38 @@ cmd_publish() {
 }
 cmd_pull() { local p="${PROFILE:-$(config_user)}"; [ -n "$p" ] || die "pull: specify --profile <name>"; local o; o="$(pull_profile "$p")"; write_oauth_json "$o"; say "pulled '$p' into store"; }
 cmd_push() { local p="${PROFILE:-$(config_user)}"; [ -n "$p" ] || die "push: specify --profile <name>"; push_profile "$p"; }
+cmd_push_logs() {
+    local tmp response
+    tmp="$(mktemp)"
+    python3 - "$LOG_DIR" "$VERSION" "$(short_host)" "$(config_user 2>/dev/null || true)" > "$tmp" <<'PY'
+import datetime, json, os, sys
+log_dir, version, host, user = sys.argv[1:5]
+files = []
+if os.path.isdir(log_dir):
+    for name in sorted(os.listdir(log_dir)):
+        path = os.path.join(log_dir, name)
+        if os.path.isfile(path) and name.endswith((".jsonl", ".log")):
+            with open(path, "r", errors="replace") as fh:
+                files.append({"name": name, "content": fh.read()[-200000:]})
+print(json.dumps({
+    "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    "tool": "claude-token",
+    "version": version,
+    "host": host,
+    "user": user,
+    "files": files,
+}))
+PY
+    if have_http_vault; then
+        response="$(vault_http POST "/debug-logs/claude-token" "$tmp")" || { rm -f "$tmp"; die "push-logs: upload failed"; }
+        rm -f "$tmp"
+        log_event push-logs "" ok "http"
+        printf '%s\n' "$response"
+    else
+        rm -f "$tmp"
+        die "push-logs: HTTPS vault URL/token required"
+    fi
+}
 
 cmd_diagnose() {
     say "claude-token $VERSION"; say "VAULT_DIR_CLIENT=$VAULT_DIR_CLIENT"; say "LEADER_HOST=$LEADER_HOST"; say "SHARED_DIR=$SHARED_DIR"
@@ -466,6 +630,7 @@ case "$1" in
     publish) shift; while [ $# -gt 0 ]; do case "$1" in --profile|-p) PROFILE="$2"; shift 2;; --all|-a) ALL=1; shift;; *) die "unknown arg: $1";; esac; done; cmd_publish;;
     pull)    shift; while [ $# -gt 0 ]; do case "$1" in --profile|-p) PROFILE="$2"; shift 2;; *) PROFILE="$1"; shift;; esac; done; cmd_pull;;
     push)    shift; while [ $# -gt 0 ]; do case "$1" in --profile|-p) PROFILE="$2"; shift 2;; *) PROFILE="$1"; shift;; esac; done; cmd_push;;
+    push-logs|logs-push) shift; cmd_push_logs "$@";;
     check)   cmd_check;;
     status)  cmd_status;;
     pair|setup) shift; while [ $# -gt 0 ]; do case "$1" in --user|-u) CODEX_USER="$2"; shift 2;; *) CODEX_USER="$1"; shift;; esac; done; cmd_pair;;

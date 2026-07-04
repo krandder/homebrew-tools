@@ -108,7 +108,9 @@ def parse_id(rest):  # "codex/kas" -> ("codex", "kas") or None
 # and hand the follower back a fresh access token + a DUMMY refresh token
 # ("vlt:<account>:<nonce>") so the follower can never rotate/invalidate us.
 CLAUDE_TOKEN_EP = "https://platform.claude.com/v1/oauth/token"
+CLAUDE_PROFILE_EP = "https://api.anthropic.com/api/oauth/profile"
 CLAUDE_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+CLAUDE_DEFAULT_SCOPE = "user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload"
 
 
 def broker_refresh(account):
@@ -121,7 +123,7 @@ def broker_refresh(account):
     rt = o.get("refreshToken", "")
     if not rt or rt.startswith("vlt:"):
         raise RuntimeError("no canonical refresh token for " + account)
-    scope = o.get("scope") or o.get("scopes") or "org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload"
+    scope = o.get("scope") or o.get("scopes") or CLAUDE_DEFAULT_SCOPE
     if isinstance(scope, list):
         scope = " ".join(scope)
     body = json.dumps({
@@ -143,10 +145,60 @@ def broker_refresh(account):
         server_event("broker-refresh", account, "claude:" + account, "failed", f"http={e.code} retry-after={retry} cf-ray={cf_ray}")
         raise
     j = json.loads(resp.read())
+    profile = None
+    profile_req = urllib.request.Request(
+        CLAUDE_PROFILE_EP,
+        method="GET",
+        headers={
+            "Authorization": f"Bearer {j['access_token']}",
+            "Content-Type": "application/json",
+            "Cache-Control": "no-cache",
+            "Accept": "application/json, text/plain, */*",
+            "User-Agent": "axios/1.15.2",
+        },
+    )
+    try:
+        profile_resp = urllib.request.urlopen(profile_req, timeout=10)
+        profile = json.loads(profile_resp.read())
+        server_event("broker-profile", account, "claude:" + account, "ok", "api/oauth/profile")
+    except urllib.error.HTTPError as e:
+        retry = e.headers.get("Retry-After") or e.headers.get("retry-after") or "none"
+        cf_ray = e.headers.get("CF-RAY") or e.headers.get("cf-ray") or "none"
+        server_event("broker-profile", account, "claude:" + account, "failed", f"http={e.code} retry-after={retry} cf-ray={cf_ray}")
+    except Exception as e:
+        server_event("broker-profile", account, "claude:" + account, "failed", type(e).__name__)
+
     # store rotated refresh token as the new canonical (we are the sole owner)
     o["accessToken"] = j["access_token"]
     o["refreshToken"] = j["refresh_token"]
     o["expiresAt"] = int(time.time() * 1000) + int(j.get("expires_in", 28800)) * 1000
+    if j.get("scope"):
+        o["scopes"] = [s for s in str(j.get("scope")).split(" ") if s]
+    if isinstance(profile, dict):
+        account_info = profile.get("account") or {}
+        org = profile.get("organization") or {}
+        org_type = org.get("organization_type")
+        o["profile"] = profile
+        o["profileFetchedAt"] = int(time.time() * 1000)
+        o["subscriptionType"] = {
+            "claude_max": "max",
+            "claude_pro": "pro",
+            "claude_enterprise": "enterprise",
+            "claude_team": "team",
+        }.get(org_type)
+        o["rateLimitTier"] = org.get("rate_limit_tier")
+        o["seatTier"] = org.get("seat_tier")
+        o["hasExtraUsageEnabled"] = org.get("has_extra_usage_enabled")
+        o["billingType"] = org.get("billing_type")
+        o["ccOnboardingFlags"] = org.get("cc_onboarding_flags") or {}
+        o["claudeCodeTrialEndsAt"] = org.get("claude_code_trial_ends_at")
+        o["claudeCodeTrialDurationDays"] = org.get("claude_code_trial_duration_days")
+        if account_info.get("display_name") is not None:
+            o["displayName"] = account_info.get("display_name")
+        if account_info.get("created_at") is not None:
+            o["accountCreatedAt"] = account_info.get("created_at")
+        if org.get("subscription_created_at") is not None:
+            o["subscriptionCreatedAt"] = org.get("subscription_created_at")
     d["claudeAiOauth"] = o
     json.dump(d, open(af, "w"), indent=2)
     os.chmod(af, 0o600)

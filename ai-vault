@@ -373,6 +373,16 @@ print(json.dumps({"status":"approved","token":rec.get("token",""),"user":rec.get
 PY
 }
 
+ensure_pair_profile() { # kind user -> create once, otherwise preserve ACL
+    local kind="$1" user="$2" id="$1:$2" owner
+    owner="$(profile_owner "$id")"
+    if [ -z "$owner" ]; then
+        cmd_enroll "$kind" "$user" "$user" >/dev/null
+    else
+        [ "$owner" = "$user" ] || die "pair-approve: '$id' is owned by '$owner', not '$user'"
+    fi
+}
+
 cmd_pair_approve() { # code   (admin) — enroll codex+claude, issue token, mark approved
     require_admin pair-approve
     local code="$1" user token
@@ -386,8 +396,8 @@ if rec and time.time()-float(rec.get("created_at",0))<ttl: print(rec.get("user",
 PY
 )"
     [ -n "$user" ] || die "pair-approve: unknown or expired code '$code'"
-    cmd_enroll codex "$user" "$user" >/dev/null 2>&1 || true
-    cmd_enroll claude "$user" "$user" >/dev/null 2>&1 || true
+    ensure_pair_profile codex "$user"
+    ensure_pair_profile claude "$user"
     token="$(cmd_token "$user")"
     python3 - "$PAIRING_FILE" "$code" "$token" <<'PY'
 import json,sys,os

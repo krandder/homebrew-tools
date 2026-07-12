@@ -168,7 +168,9 @@ ai-vault whoami                          print identity + admin flag
 ai-vault shell USER -- <cmd>             SSH forced-command wrapper (binds identity to USER)
 ```
 
-The ACL lives at `~/.ai-vault/acl.json` (`{admins, operator, profiles:{NAME:{owner,pullers}}}`); audit at `~/.ai-vault/audit.jsonl`.
+The ACL and audit live under `CODEX_VAULT_DIR` (normally `~/.codex-vault`).
+An existing legacy-only `~/.ai-vault` remains supported when the canonical
+directory is absent.
 
 ---
 

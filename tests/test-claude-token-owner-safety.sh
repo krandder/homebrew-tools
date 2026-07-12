@@ -207,6 +207,19 @@ run_token pair --user adriana >/dev/null
 grep -q '^mode=auto$' "$HOME/.claude-token/config"
 [ ! -e "$HOME/bin/claude" ]
 
+# Direct operator commands select the same canonical store as ai-vault-http,
+# while installations with only the legacy directory remain compatible.
+DEFAULT_HOME="$TMP/default-vault-home"
+mkdir -p "$DEFAULT_HOME/.codex-vault" "$DEFAULT_HOME/.ai-vault"
+printf '{"admins":["adriana"],"profiles":{}}\n' > "$DEFAULT_HOME/.codex-vault/acl.json"
+printf '{"admins":[],"profiles":{}}\n' > "$DEFAULT_HOME/.ai-vault/acl.json"
+( unset CODEX_VAULT_DIR; HOME="$DEFAULT_HOME" CODEX_VAULT_USER=adriana "$ROOT/ai-vault" list >/dev/null )
+
+LEGACY_HOME="$TMP/legacy-vault-home"
+mkdir -p "$LEGACY_HOME/.ai-vault"
+printf '{"admins":["adriana"],"profiles":{}}\n' > "$LEGACY_HOME/.ai-vault/acl.json"
+( unset CODEX_VAULT_DIR; HOME="$LEGACY_HOME" CODEX_VAULT_USER=adriana "$ROOT/ai-vault" list >/dev/null )
+
 # The vault never serves an expired Claude access token.
 VAULT="$TMP/vault"
 mkdir -p "$VAULT/state" "$VAULT/shared" "$VAULT/profiles"

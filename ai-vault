@@ -28,7 +28,13 @@
 
 set -euo pipefail
 
-VAULT_DIR="${CODEX_VAULT_DIR:-$HOME/.ai-vault}"
+if [ -n "${CODEX_VAULT_DIR:-}" ]; then
+    VAULT_DIR="$CODEX_VAULT_DIR"
+elif [ -d "$HOME/.codex-vault" ] || [ ! -d "$HOME/.ai-vault" ]; then
+    VAULT_DIR="$HOME/.codex-vault"
+else
+    VAULT_DIR="$HOME/.ai-vault"
+fi
 ACL_FILE="$VAULT_DIR/acl.json"
 AUDIT_FILE="$VAULT_DIR/audit.jsonl"
 PROFILES_DIR="${CODEX_PROFILES_DIR:-$HOME/.codex-profiles}"

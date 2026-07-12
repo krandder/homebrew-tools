@@ -41,6 +41,8 @@ claude-token pair --user NAME --owner     owner mode; leaves plain claude untouc
 claude-token pair --user NAME --follower  explicit follower mode; installs wrapper
 claude-token login                        native browser OAuth + best-effort sync
 claude-token sync [--profile P]           copy credentials; never changes local Claude
+claude-token add-follower NAME            pair + install isolated claude-NAME
+claude-token run-follower NAME [...]      run an isolated named follower
 claude-token run [claude args...]         follower launcher (freshen store, exec claude)
 claude-token publish [--profile P|--all]  LEADER: refresh + publish follower token
 claude-token pull [--profile P]           FOLLOWER: replace local store with follower token
@@ -55,6 +57,20 @@ claude-token login
 # Plain claude remains native. Re-run this safely whenever needed:
 claude-token sync --profile NAME
 ```
+
+Multiple follower identities can coexist without replacing plain `claude` or
+reading/writing its macOS Keychain entry:
+
+```bash
+claude-token add-follower kas
+# After the operator approves the displayed pairing code:
+claude-kas
+```
+
+Each named follower keeps its vault configuration under
+`~/.claude-token/followers/NAME` and Claude state under
+`~/.claude-profiles/NAME`. Login/logout/setup-token commands are refused on a
+named follower; authenticate and sync on that profile's owner machine.
 
 Pairing/onboarding is identical to `codex-token` (pair → operator `ai-vault
 approve`/`enroll … claude` + `token` → `set-url`/`set-token` → `login`). Profile

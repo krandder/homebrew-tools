@@ -14,6 +14,8 @@
 #   claude-token set-mode <auto|owner|follower>  choose native-owner or vault-follower launches
 #   claude-token login                     native browser OAuth + best-effort non-destructive sync
 #   claude-token sync [--profile P]        copy local credentials to vault without changing them
+#   claude-token add-follower NAME         pair + install isolated `claude-NAME`
+#   claude-token run-follower NAME [...]   run an isolated named follower
 #   claude-token run [claude args...]      follower launcher: freshen store, exec claude
 #   claude-token install-wrapper           make plain `claude` run via `claude-token run`
 #   claude-token publish [--profile P|--all]  LEADER: refresh + publish follower token(s)
@@ -33,7 +35,8 @@
 # refresh token. Legacy vault-managed handoff remains explicit and available.
 
 set -euo pipefail
-VERSION="2.5.2"
+VERSION="2.5.3"
+CLAUDE_TOKEN_REAL_HOME="${CLAUDE_TOKEN_REAL_HOME:-$HOME}"
 
 CLIENT_ID="9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 TOKEN_EP="https://platform.claude.com/v1/oauth/token"
@@ -128,6 +131,25 @@ if os.path.exists(f):
 if not found: lines.append(f"{k}={v}")
 open(f,"w").write("\n".join(lines)+"\n"); os.chmod(f,0o600)
 PY
+}
+validate_profile_name() {
+    case "${1:-}" in ""|.|..|*[!A-Za-z0-9._-]*) die "invalid profile name '$1'" ;; esac
+}
+use_follower_context() { # profile -> isolated config/runtime globals
+    local p="$1" configured_leader
+    validate_profile_name "$p"
+    CODEX_USER="$p"
+    VAULT_DIR_CLIENT="${CLAUDE_FOLLOWERS_DIR:-$CLAUDE_TOKEN_REAL_HOME/.claude-token/followers}/$p"
+    VAULT_KEY="$VAULT_DIR_CLIENT/id_ed25519"
+    CONFIG_FILE="$VAULT_DIR_CLIENT/config"
+    LOG_DIR="$VAULT_DIR_CLIENT/logs"
+    LOG_FILE="$LOG_DIR/events.jsonl"
+    CLAUDE_TOKEN_MODE=follower
+    CLAUDE_TOKEN_ISOLATED_FOLLOWER=1
+    CLAUDE_PROFILE_HOME="$CLAUDE_TOKEN_REAL_HOME/.claude-profiles/$p"
+    unset CLAUDE_VAULT_TOKEN CODEX_VAULT_TOKEN
+    configured_leader="$(awk -F= '/^leader=/{print $2;exit}' "$CONFIG_FILE" 2>/dev/null || true)"
+    [ -z "$configured_leader" ] || LEADER_HOST="$configured_leader"
 }
 resolve_claude_bin() {
     local cands="${CLAUDE_REAL_BIN:-}:$HOME/bin/claude.real:$HOME/.local/bin/claude:/opt/homebrew/bin/claude:/usr/local/bin/claude:$(command -v claude 2>/dev/null)" d
@@ -623,21 +645,29 @@ EOF
     done
     [ "$status" = "approved" ] || die "pair: timed out waiting for approval. Re-run when the operator is ready."
     set_config token "$token"
-    local local_mode; local_mode="$(local_refresh_mode)"
+    local local_mode=missing
+    [ "$mode" = follower ] || local_mode="$(local_refresh_mode)"
     if [ "$mode" = owner ] || { [ "$mode" = auto ] && [ "$local_mode" = owner ]; }; then
         say "native owner path selected; plain 'claude' was not changed"
+    elif [ "${PAIR_SKIP_WRAPPER:-0}" = 1 ]; then
+        say "named follower selected; plain 'claude' was not changed"
     else
         cmd_install_wrapper
     fi
-    # If there is a local owner login, sync it without changing local Claude.
-    local oauth rt
-    oauth="$(read_oauth_json 2>/dev/null || true)"
-    rt="$(printf '%s' "$oauth" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("refreshToken",""))' 2>/dev/null || true)"
-    if [ -n "$rt" ] && [ "$rt" != "$SENTINEL_RT" ]; then
-        say "local login found — syncing without changing it..."
-        ( sync_profile "$user" ) || say "sync deferred; retry with: claude-token sync --profile $user"
+    if [ "$mode" = follower ]; then
+        say "follower pairing complete; local Claude credentials were not read or changed"
     else
-        say "no local owner login yet — run 'claude-token login' after pairing."
+        # Owner/auto pairing may publish an existing native login, but never
+        # changes it. Follower pairing must not inspect the macOS Keychain.
+        local oauth rt
+        oauth="$(read_oauth_json 2>/dev/null || true)"
+        rt="$(printf '%s' "$oauth" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("refreshToken",""))' 2>/dev/null || true)"
+        if [ -n "$rt" ] && [ "$rt" != "$SENTINEL_RT" ]; then
+            say "local login found — syncing without changing it..."
+            ( sync_profile "$user" ) || say "sync deferred; retry with: claude-token sync --profile $user"
+        else
+            say "no local owner login yet — run 'claude-token login' after pairing."
+        fi
     fi
     echo >&2
     say "paired as '$user' in $mode mode."
@@ -675,9 +705,15 @@ cmd_login() {
 }
 
 cmd_run() { # [claude args...]  — follower launcher; falls back to normal claude if no fresh broker token
+    local isolated="${CLAUDE_TOKEN_ISOLATED_FOLLOWER:-0}"
+    if [ "$isolated" = 1 ]; then
+        case "${1:-}" in
+            login|logout|auth|setup-token) die "named followers cannot change login state; authenticate on the owner machine" ;;
+        esac
+    fi
     # `claude login` -> login (browser) + auto-push the refresh token to the leader
-    [ "${1:-}" = "login" ] && { shift; cmd_login "$@"; return $?; }
-    if [ "${1:-}" = auth ] && [ "${2:-}" = login ]; then shift 2; cmd_login "$@"; return $?; fi
+    if [ "$isolated" != 1 ] && [ "${1:-}" = login ]; then shift; cmd_login "$@"; return $?; fi
+    if [ "$isolated" != 1 ] && [ "${1:-}" = auth ] && [ "${2:-}" = login ]; then shift 2; cmd_login "$@"; return $?; fi
     local user; user="$(config_user)"
     local bin; bin="$(resolve_claude_bin)"; [ -n "$bin" ] || die "run: claude binary not found"
     case "${1:-}" in auth|setup-token) exec "$bin" "$@" ;; esac
@@ -688,9 +724,9 @@ cmd_run() { # [claude args...]  — follower launcher; falls back to normal clau
     # protects existing standalone installs that already hold a real refresh token.
     local mode local_mode
     mode="$(config_mode)"; [ -n "$mode" ] || mode=auto
-    local_mode="$(local_refresh_mode)"
+    if [ "$isolated" = 1 ]; then local_mode=follower; else local_mode="$(local_refresh_mode)"; fi
     case "$mode" in auto|owner|follower) ;; *) die "invalid mode '$mode' (expected auto, owner, or follower)" ;; esac
-    if [ "$mode" = owner ] || [ "$local_mode" = owner ]; then
+    if [ "$isolated" != 1 ] && { [ "$mode" = owner ] || [ "$local_mode" = owner ]; }; then
         log_event run "$user" native "mode=$mode local=$local_mode"
         exec "$bin" "$@"
     fi
@@ -713,6 +749,12 @@ cmd_run() { # [claude args...]  — follower launcher; falls back to normal clau
     # If we have a fresh broker/shared token -> follower mode (ANTHROPIC_AUTH_TOKEN).
     # Otherwise -> fall through to normal claude (uses the local keychain/login).
     if [ -n "$access" ]; then
+        if [ "$isolated" = 1 ]; then
+            unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN CLAUDE_CODE_OAUTH_TOKEN
+            mkdir -p "$CLAUDE_PROFILE_HOME/.claude"
+            export HOME="$CLAUDE_PROFILE_HOME"
+            export CLAUDE_CONFIG_DIR="$CLAUDE_PROFILE_HOME/.claude"
+        fi
         export ANTHROPIC_AUTH_TOKEN="$access"
         exec "$bin" "$@"
     fi
@@ -733,6 +775,50 @@ exec claude-token run "$@"
 EOF
     chmod +x "$w"
     say "installed $w -> claude-token run"
+}
+
+named_wrapper_dir() {
+    local d="${CLAUDE_TOKEN_WRAPPER_DIR:-}" command_path
+    if [ -z "$d" ]; then
+        command_path="$(command -v claude-token 2>/dev/null || true)"
+        [ -z "$command_path" ] || d="$(dirname "$command_path")"
+    fi
+    [ -n "$d" ] && [ -w "$d" ] || d="$CLAUDE_TOKEN_REAL_HOME/bin"
+    echo "$d"
+}
+cmd_install_follower_wrapper() { # profile
+    local p="$1" dir w marker="# generated by claude-token named follower"
+    validate_profile_name "$p"
+    dir="$(named_wrapper_dir)"; mkdir -p "$dir"; w="$dir/claude-$p"
+    if [ -e "$w" ] && ! grep -qF "$marker" "$w" 2>/dev/null; then
+        [ ! -e "$w.pre-claude-token" ] || die "$w exists and its backup already exists"
+        mv "$w" "$w.pre-claude-token"
+        say "backed up existing -> $w.pre-claude-token"
+    fi
+    cat > "$w" <<EOF
+#!/usr/bin/env bash
+$marker
+exec claude-token run-follower "$p" "\$@"
+EOF
+    chmod +x "$w"
+    say "installed $w"
+    case ":$PATH:" in *":$dir:"*) ;; *) say "add $dir to PATH before running claude-$p" ;; esac
+}
+cmd_add_follower() { # profile
+    local p="${1:-}"
+    use_follower_context "$p"
+    PAIR_MODE=follower
+    PAIR_SKIP_WRAPPER=1
+    cmd_pair
+    cmd_install_follower_wrapper "$p"
+    say "named follower ready: claude-$p"
+}
+cmd_run_follower() { # profile [claude args...]
+    local p="${1:-}"; shift || true
+    use_follower_context "$p"
+    [ -f "$CONFIG_FILE" ] || die "follower '$p' is not paired (run: claude-token add-follower $p)"
+    [ "${1:-}" != -- ] || shift
+    cmd_run "$@"
 }
 
 cmd_set_url()   { [ -n "${1:-}" ] || die "set-url: specify URL"; set_config url "$1"; say "vault URL = $1"; }
@@ -843,6 +929,8 @@ case "$1" in
     check)   cmd_check;;
     status)  cmd_status;;
     pair|setup) shift; while [ $# -gt 0 ]; do case "$1" in --user|-u) CODEX_USER="$2"; shift 2;; --owner|--no-wrapper) PAIR_MODE=owner; shift;; --follower) PAIR_MODE=follower; shift;; *) CODEX_USER="$1"; shift;; esac; done; cmd_pair;;
+    add-follower) shift; [ $# -eq 1 ] || die "add-follower: specify one profile name"; cmd_add_follower "$1";;
+    run-follower) shift; cmd_run_follower "$@";;
     login)   shift; cmd_login "$@";;
     run)     shift; cmd_run "$@";;
     go-live) shift; cmd_go_live "$@";;

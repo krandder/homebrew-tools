@@ -8,7 +8,7 @@ trap 'rm -rf "$TMP"' EXIT
 mkdir -p "$TMP/bin"
 cat > "$TMP/bin/uname" <<'SH'
 #!/usr/bin/env bash
-echo Linux
+echo "${FAKE_UNAME:-Linux}"
 SH
 cat > "$TMP/bin/claude-real" <<'SH'
 #!/usr/bin/env bash
@@ -18,6 +18,10 @@ if [ "${1:-}" = auth ] && [ "${2:-}" = login ]; then
 fi
 printf '%s\n' "${ANTHROPIC_AUTH_TOKEN-unset}" > "$TEST_OUTPUT"
 printf '%s\n' "$*" >> "$TEST_OUTPUT"
+printf '%s\n' "$HOME" >> "$TEST_OUTPUT"
+printf '%s\n' "${CLAUDE_CODE_OAUTH_TOKEN-unset}" >> "$TEST_OUTPUT"
+printf '%s\n' "${ANTHROPIC_API_KEY-unset}" >> "$TEST_OUTPUT"
+printf '%s\n' "${CLAUDE_CONFIG_DIR-unset}" >> "$TEST_OUTPUT"
 SH
 cat > "$TMP/bin/curl" <<'SH'
 #!/usr/bin/env bash
@@ -27,6 +31,11 @@ for arg in "$@"; do
 done
 [ -n "${CURL_RESPONSE:-}" ] && cat "$CURL_RESPONSE"
 exit "${CURL_STATUS:-0}"
+SH
+cat > "$TMP/bin/security" <<'SH'
+#!/usr/bin/env bash
+[ -z "${SECURITY_CALLED:-}" ] || printf called >> "$SECURITY_CALLED"
+exit 99
 SH
 cat > "$TMP/bin/sleep" <<'SH'
 #!/usr/bin/env bash
@@ -38,10 +47,12 @@ new_home() {
     HOME="$TMP/$1"
     export HOME
     mkdir -p "$HOME/.claude-token" "$HOME/.claude" "$HOME/shared/claude-tokens"
-    TEST_OUTPUT="$HOME/result" CURL_CALLED="$HOME/curl-called" CURL_BODY="$HOME/curl-body"
+    TEST_OUTPUT="$HOME/result" CURL_CALLED="$HOME/curl-called" CURL_BODY="$HOME/curl-body" SECURITY_CALLED="$HOME/security-called"
     CURL_STATUS=0 CURL_RESPONSE=""
     CLAUDE_LOGIN_STATUS=0 CLAUDE_LOGIN_CREDS=""
-    export TEST_OUTPUT CURL_CALLED CURL_BODY CURL_STATUS CURL_RESPONSE CLAUDE_LOGIN_STATUS CLAUDE_LOGIN_CREDS
+    FAKE_UNAME=Linux CLAUDE_TOKEN_WRAPPER_DIR="$HOME/bin"
+    unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN CLAUDE_CODE_OAUTH_TOKEN CLAUDE_CONFIG_DIR
+    export TEST_OUTPUT CURL_CALLED CURL_BODY SECURITY_CALLED CURL_STATUS CURL_RESPONSE CLAUDE_LOGIN_STATUS CLAUDE_LOGIN_CREDS FAKE_UNAME CLAUDE_TOKEN_WRAPPER_DIR
     printf 'user=adriana\nurl=https://vault.invalid\ntoken=test-token\n' > "$HOME/.claude-token/config"
     printf '%b' "${2:-}" >> "$HOME/.claude-token/config"
 }
@@ -206,6 +217,68 @@ printf '{"status":"approved","token":"paired-token","user":"adriana"}\n' > "$CUR
 run_token pair --user adriana >/dev/null
 grep -q '^mode=auto$' "$HOME/.claude-token/config"
 [ ! -e "$HOME/bin/claude" ]
+
+# Named followers are isolated from the machine-wide macOS Keychain, stale
+# auth environment, plain Claude command, and each other.
+new_home named-followers
+FAKE_UNAME=Darwin; export FAKE_UNAME
+for profile in kas juana; do
+    mkdir -p "$HOME/.claude-token/followers/$profile"
+    printf 'user=%s\nurl=https://vault.invalid\ntoken=%s-token\nmode=follower\n' "$profile" "$profile" > "$HOME/.claude-token/followers/$profile/config"
+done
+ANTHROPIC_API_KEY=stale-api-key ANTHROPIC_AUTH_TOKEN=stale-shell-token CLAUDE_CODE_OAUTH_TOKEN=stale-shell-token
+export ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN CLAUDE_CODE_OAUTH_TOKEN
+
+CURL_RESPONSE="$HOME/kas.json"; export CURL_RESPONSE
+write_shared kas-fresh-token 4102444800000 "$CURL_RESPONSE"
+run_token run-follower kas hello
+[ "$(sed -n '1p' "$TEST_OUTPUT")" = kas-fresh-token ]
+[ "$(sed -n '2p' "$TEST_OUTPUT")" = hello ]
+[ "$(sed -n '3p' "$TEST_OUTPUT")" = "$HOME/.claude-profiles/kas" ]
+[ "$(sed -n '4p' "$TEST_OUTPUT")" = unset ]
+[ "$(sed -n '5p' "$TEST_OUTPUT")" = unset ]
+[ "$(sed -n '6p' "$TEST_OUTPUT")" = "$HOME/.claude-profiles/kas/.claude" ]
+[ ! -e "$SECURITY_CALLED" ]
+
+CURL_RESPONSE="$HOME/juana.json"; export CURL_RESPONSE
+write_shared juana-fresh-token 4102444800000 "$CURL_RESPONSE"
+run_token run-follower juana hello
+[ "$(sed -n '1p' "$TEST_OUTPUT")" = juana-fresh-token ]
+[ "$(sed -n '3p' "$TEST_OUTPUT")" = "$HOME/.claude-profiles/juana" ]
+[ ! -e "$SECURITY_CALLED" ]
+
+rm -f "$TEST_OUTPUT"
+if run_token run-follower kas auth login >"$HOME/stdout" 2>"$HOME/stderr"; then
+    echo "expected named follower login to be refused" >&2
+    exit 1
+fi
+grep -q "cannot change login state" "$HOME/stderr"
+[ ! -e "$TEST_OUTPUT" ]
+[ ! -e "$SECURITY_CALLED" ]
+
+# Pairing a named follower installs only claude-NAME and never inspects native
+# credentials or replaces an existing plain Claude command.
+new_home named-pair
+FAKE_UNAME=Darwin; export FAKE_UNAME
+mkdir -p "$HOME/bin"
+printf 'keep-plain-claude\n' > "$HOME/bin/claude"
+before="$(shasum -a 256 "$HOME/bin/claude")"
+CURL_RESPONSE="$HOME/approved.json"; export CURL_RESPONSE
+printf '{"status":"approved","token":"paired-token","user":"kas"}\n' > "$CURL_RESPONSE"
+run_token add-follower kas >/dev/null
+[ "$before" = "$(shasum -a 256 "$HOME/bin/claude")" ]
+[ -x "$HOME/bin/claude-kas" ]
+grep -q 'run-follower "kas"' "$HOME/bin/claude-kas"
+grep -q '^mode=follower$' "$HOME/.claude-token/followers/kas/config"
+[ ! -e "$SECURITY_CALLED" ]
+WRAPPER_OUTPUT="$HOME/wrapper-output"; export WRAPPER_OUTPUT
+cat > "$TMP/bin/claude-token" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" > "$WRAPPER_OUTPUT"
+SH
+chmod +x "$TMP/bin/claude-token"
+PATH="$TMP/bin:$PATH" "$HOME/bin/claude-kas" hello
+[ "$(cat "$WRAPPER_OUTPUT")" = "run-follower kas hello" ]
 
 # Direct operator commands select the same canonical store as ai-vault-http,
 # while installations with only the legacy directory remain compatible.

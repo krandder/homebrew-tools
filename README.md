@@ -34,8 +34,9 @@ brew install claude-token
 claude-token                              print active account tokens (default)
 claude-token check                        validate creds without printing secrets
 claude-token status / set-url / set-token / set-mode
-claude-token pair --user NAME --owner     owner pairing; leaves plain claude untouched
-claude-token pair --user NAME             follower pairing; installs wrapper
+claude-token pair --user NAME             protective auto mode; preserves a local owner login
+claude-token pair --user NAME --owner     owner mode; leaves plain claude untouched
+claude-token pair --user NAME --follower  explicit follower mode; installs wrapper
 claude-token login                        native browser OAuth + best-effort sync
 claude-token sync [--profile P]           copy credentials; never changes local Claude
 claude-token run [claude args...]         follower launcher (freshen store, exec claude)

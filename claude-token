@@ -8,7 +8,7 @@
 #   claude-token                           print active account tokens (default)
 #   claude-token check                     validate creds without printing secrets
 #   claude-token status                    account, token age, sync health
-#   claude-token pair --user NAME [--owner]  pair; owner mode leaves plain claude untouched
+#   claude-token pair --user NAME [--owner|--follower]  pair; defaults to protective auto mode
 #   claude-token set-url <url>             configure the HTTPS vault endpoint
 #   claude-token set-token <token>         store the API token the operator issued
 #   claude-token set-mode <auto|owner|follower>  choose native-owner or vault-follower launches
@@ -33,7 +33,7 @@
 # refresh token. Legacy vault-managed handoff remains explicit and available.
 
 set -euo pipefail
-VERSION="2.5.0"
+VERSION="2.5.1"
 
 CLIENT_ID="9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 TOKEN_EP="https://platform.claude.com/v1/oauth/token"
@@ -577,7 +577,7 @@ cmd_status() {
 }
 
 cmd_pair() {  # [--user NAME] — magical onboarding: print a code, poll until approved, auto-configure
-    local user="${CODEX_USER:-}" mode="${PAIR_MODE:-follower}"
+    local user="${CODEX_USER:-}" mode="${PAIR_MODE:-auto}"
     while [ -z "$user" ]; do read -rp "Your username on the vault: " user; done
     mkdir -p "$VAULT_DIR_CLIENT"
     local url; url="${CLAUDE_VAULT_URL:-$(vault_url 2>/dev/null)}"
@@ -638,7 +638,7 @@ EOF
 }
 
 cmd_login() {
-    local user; user="$(config_user)"; [ -n "$user" ] || die "login: run 'claude-token setup --user <name>' first"
+    local user; user="$(config_user)"
     local bin; bin="$(resolve_claude_bin)"; [ -n "$bin" ] || die "login: claude binary not found"
     log_event login "$user" start "$bin"
     say "starting native Claude browser login..."
@@ -655,7 +655,11 @@ cmd_login() {
     oauth="$(read_oauth_json 2>/dev/null)" || { log_event login "$user" failed no-readable-creds; die "login completed, but no credentials were readable"; }
     rt="$(printf '%s' "$oauth" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("refreshToken",""))')"
     if [ -n "$rt" ] && [ "$rt" != "$SENTINEL_RT" ]; then
-        ( sync_profile "$user" ) || say "login succeeded; vault sync deferred (retry: claude-token sync --profile $user)"
+        if [ -n "$user" ]; then
+            ( sync_profile "$user" ) || say "login succeeded; vault sync deferred (retry: claude-token sync --profile $user)"
+        else
+            say "vault sync skipped; configure a user later with 'claude-token pair --user NAME --owner'"
+        fi
         say "native Claude login is active locally"
         log_event login "$user" ok "local-active"
     else

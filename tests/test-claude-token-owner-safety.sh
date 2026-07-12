@@ -28,6 +28,10 @@ done
 [ -n "${CURL_RESPONSE:-}" ] && cat "$CURL_RESPONSE"
 exit "${CURL_STATUS:-0}"
 SH
+cat > "$TMP/bin/sleep" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
 chmod +x "$TMP/bin/"*
 
 new_home() {
@@ -158,6 +162,26 @@ else
     [ "$?" -eq 7 ]
 fi
 [ ! -e "$CURL_CALLED" ]
+
+# Browser login remains a local recovery path before vault configuration.
+new_home login-unconfigured
+rm -f "$HOME/.claude-token/config"
+CLAUDE_LOGIN_CREDS="$HOME/new-creds.json"; export CLAUDE_LOGIN_CREDS
+write_owner_snapshot "$CLAUDE_LOGIN_CREDS" local-access local-refresh 4102444800000
+run_token login >"$HOME/stdout" 2>"$HOME/stderr"
+grep -q local-refresh "$HOME/.claude/.credentials.json"
+grep -q "vault sync skipped" "$HOME/stderr"
+[ ! -e "$CURL_CALLED" ]
+
+# Bare pairing uses auto mode, which protects a real local refresh token while
+# remaining follower-compatible when no local owner login exists.
+new_home pair-auto
+rm -f "$HOME/.claude-token/config"
+CURL_RESPONSE="$HOME/approved.json"; export CURL_RESPONSE
+printf '{"status":"approved","token":"paired-token","user":"adriana"}\n' > "$CURL_RESPONSE"
+run_token pair --user adriana >/dev/null
+grep -q '^mode=auto$' "$HOME/.claude-token/config"
+[ -x "$HOME/bin/claude" ]
 
 # The vault never serves an expired Claude access token.
 VAULT="$TMP/vault"

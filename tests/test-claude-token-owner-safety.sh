@@ -216,8 +216,13 @@ if CODEX_VAULT_USER=adriana CODEX_VAULT_DIR="$VAULT/state" CLAUDE_SHARED_DIR="$V
     echo "expected vault to reject stale access" >&2
     exit 1
 fi
+if CODEX_VAULT_USER=adriana CODEX_VAULT_DIR="$VAULT/state" CLAUDE_SHARED_DIR="$VAULT/shared" CLAUDE_PROFILES_DIR="$VAULT/profiles" "$ROOT/ai-vault" serve claude:adriana >/dev/null 2>&1; then
+    echo "expected vault to reject stale pulls" >&2
+    exit 1
+fi
 write_shared vault-fresh-token 4102444800000 "$VAULT/shared/adriana.json"
 [ "$(CODEX_VAULT_USER=adriana CODEX_VAULT_DIR="$VAULT/state" CLAUDE_SHARED_DIR="$VAULT/shared" CLAUDE_PROFILES_DIR="$VAULT/profiles" "$ROOT/ai-vault" access claude:adriana)" = vault-fresh-token ]
+CODEX_VAULT_USER=adriana CODEX_VAULT_DIR="$VAULT/state" CLAUDE_SHARED_DIR="$VAULT/shared" CLAUDE_PROFILES_DIR="$VAULT/profiles" "$ROOT/ai-vault" serve claude:adriana | grep -q vault-fresh-token
 
 vault_cmd() {
     CODEX_VAULT_USER=adriana CODEX_VAULT_DIR="$VAULT/state" CLAUDE_SHARED_DIR="$VAULT/shared" CLAUDE_PROFILES_DIR="$VAULT/profiles" "$ROOT/ai-vault" "$@"

@@ -230,6 +230,10 @@ cmd_serve() { # profile -> stdout follower token JSON
     sf="$(shared_file_for "$p")"
     can_pull "$p" || { audit "$p" pull denied "not authorized"; die "serve: '$(current_user)' is not authorized to pull '$p'"; }
     [ -f "$sf" ] || { audit "$p" pull failed "no published token"; die "serve: no published token for '$p' (owner must push first)"; }
+    if [ "$(kind_of "$p")" = claude ] && ! cmd_access "$p" >/dev/null 2>&1; then
+        audit "$p" pull failed "stale published token"
+        die "serve: no fresh published token for '$p' (owner must sync again)"
+    fi
     audit "$p" pull ok "by $(current_user)"
     cat "$sf"
 }

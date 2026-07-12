@@ -26,7 +26,8 @@ brew install claude-token
   refreshes owner-managed Claude credentials.
 - **Followers** run with a *sentinel* refresh token. Claude Code uses the fresh
   access bearer directly and **cannot rotate** the owner's token. Every launch
-  validates `expiresAt`; stale local and vault tokens are rejected.
+  validates `expiresAt`, and Farol refuses stale pulls; expired credentials are
+  never installed or used.
 - Creds are stored in the macOS **Keychain** (`Claude Code-credentials`) on
   Darwin and `~/.claude/.credentials.json` on Linux.
 

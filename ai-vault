@@ -1,17 +1,19 @@
 #!/usr/bin/env bash
 # ai-vault — leader-side token vault with per-user ACL and audit.
 #
-# Runs on the leader (farol). Holds the canonical refresh tokens, enforces who
-# may PUSH (the profile owner) and PULL (granted pullers / admins), refreshes +
-# publishes follower tokens, and keeps an append-only audit log.
+# Runs on farol. Enforces who may PUSH (the profile owner) and PULL (granted
+# pullers / admins), publishes follower tokens, and keeps an append-only audit
+# log. Claude owner snapshots are accepted without rotating their credentials;
+# legacy Codex profiles retain the vault-managed refresh path.
 #
 # Identity: $CODEX_VAULT_USER (set by the `shell` forced-command from the SSH
 # key, or by a trusted client). Falls back to $CODEX_USER, then "admin".
 #
 # Subcommands:
-#   ai-vault receive <profile>          read a token JSON on stdin, store as
-#                                          the canonical auth for <profile>,
-#                                          then refresh + publish. (owner/admin)
+#   ai-vault receive <profile>          validate and store token JSON from
+#                                          stdin, then legacy refresh+publish.
+#   ai-vault sync-receive <profile>     receive a Claude owner snapshot without
+#                                          refreshing or changing its authority.
 #   ai-vault serve <profile>            write the follower token JSON for
 #                                          <profile> to stdout. (puller/admin)
 #   ai-vault enroll <profile> <owner>   register a new profile. (admin)
@@ -106,11 +108,100 @@ require_admin() { is_admin || die "'$(current_user)' is not an admin (need: $*)"
 
 # ---- core ops ----
 cmd_receive() { # profile   (stdin = token JSON)
-    local p="$1" af tmp rc kind
+    local p="$1" af sf tmp rc kind
     can_push "$p" || { audit "$p" push denied "not owner"; die "receive: '$(current_user)' may not push '$p' (not the owner)"; }
     kind="$(kind_of "$p")"
-    af="$(auth_file_for "$p")"; mkdir -p "$(dirname "$af")"
+    af="$(auth_file_for "$p")"; sf="$(shared_file_for "$p")"; mkdir -p "$(dirname "$af")" "$(dirname "$sf")"
     tmp="$(mktemp)"; cat > "$tmp"            # capture pushed token from stdin
+
+    # Claude owner machines keep native refresh authority. Receive their fresh
+    # snapshot transactionally, but never rotate it on the vault.
+    if [ "$kind" = claude ] && [ "${CLAUDE_OWNER_SYNC:-0}" = 1 ]; then
+        set +e
+        python3 - "$tmp" "$af" "$sf" "$(name_of "$p")" <<'PY'
+import datetime, fcntl, json, os, sys, tempfile, time
+
+incoming_path, auth_path, shared_path, profile = sys.argv[1:5]
+sentinel = "__follower_no_refresh__"
+
+try:
+    incoming = json.load(open(incoming_path))
+except Exception as exc:
+    sys.exit("ai-vault: invalid token JSON: " + str(exc))
+oauth = incoming.get("claudeAiOauth", incoming) if isinstance(incoming, dict) else {}
+refresh = oauth.get("refreshToken", "")
+access = oauth.get("accessToken", "")
+try:
+    expires = int(float(oauth.get("expiresAt") or 0))
+except Exception:
+    expires = 0
+if not refresh or refresh == sentinel or refresh.startswith("vlt:"):
+    sys.exit("ai-vault: Claude sync requires a real owner refresh token")
+if not access or expires <= int((time.time() + 60) * 1000):
+    sys.exit("ai-vault: Claude sync requires a fresh access token")
+
+def atomic_json(path, value):
+    directory = os.path.dirname(path)
+    fd, temporary = tempfile.mkstemp(prefix=".token-", dir=directory)
+    try:
+        with os.fdopen(fd, "w") as handle:
+            json.dump(value, handle, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+lock_path = auth_path + ".lock"
+with open(lock_path, "a+") as lock:
+    os.chmod(lock_path, 0o600)
+    fcntl.flock(lock, fcntl.LOCK_EX)
+    existing_oauth = {}
+    if os.path.exists(auth_path):
+        try:
+            existing = json.load(open(auth_path))
+            existing_oauth = existing.get("claudeAiOauth", existing)
+        except Exception:
+            existing_oauth = {}
+    try:
+        current_expires = int(float(existing_oauth.get("expiresAt") or 0))
+    except Exception:
+        current_expires = 0
+    current_refresh = existing_oauth.get("refreshToken", "")
+    if expires < current_expires:
+        sys.exit("ai-vault: stale Claude credential snapshot rejected")
+    if expires == current_expires and current_refresh and refresh != current_refresh:
+        sys.exit("ai-vault: conflicting Claude credential rotation rejected")
+
+    stored = dict(incoming)
+    if "claudeAiOauth" not in stored:
+        stored = {"claudeAiOauth": dict(oauth)}
+    stored["claudeTokenSync"] = {
+        "refreshAuthority": "owner",
+        "receivedAt": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    }
+    atomic_json(auth_path, stored)
+    published = dict(oauth)
+    published["refreshToken"] = sentinel
+    atomic_json(shared_path, {
+        "claudeAiOauth": published,
+        "profile": profile,
+        "published_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "note": "owner-synced; vault did not refresh",
+    })
+PY
+        rc=$?
+        set -e
+        rm -f "$tmp"
+        [ "$rc" -eq 0 ] || { audit "$p" sync rejected "stale/invalid/conflicting"; return "$rc"; }
+        audit "$p" sync ok "by $(current_user); owner remains refresh authority"
+        say "synced '$p' from $(current_user); local owner remains refresh authority"
+        return 0
+    fi
+
     set +e
     python3 - "$tmp" "$af" <<'PY'
 import json,sys,os
@@ -146,14 +237,24 @@ cmd_serve() { # profile -> stdout follower token JSON
 # access: print ONLY the current access token (no refresh token) for a profile.
 # Used by transparent followers (ANTHROPIC_AUTH_TOKEN) so they never hold/refresh.
 cmd_access() { # id -> stdout: access token (plain text)
-    local p="$1" sf
+    local p="$1" sf kind
     can_pull "$p" || { audit "$p" access denied "not authorized"; die "access: '$(current_user)' is not authorized for '$p'"; }
     sf="$(shared_file_for "$p")"
+    kind="$(kind_of "$p")"
     [ -f "$sf" ] || die "access: no published token for '$p'"
-    python3 - "$sf" <<'PY'
-import json,sys
+    python3 - "$sf" "$kind" <<'PY'
+import json, sys, time
+
 d=json.load(open(sys.argv[1])); o=d.get("claudeAiOauth",d)
-sys.stdout.write(o.get("accessToken") or (d.get("tokens") or {}).get("access_token") or "")
+token=o.get("accessToken") or (d.get("tokens") or {}).get("access_token") or ""
+if sys.argv[2] == "claude":
+    try:
+        fresh=float(o.get("expiresAt") or 0)/1000 > time.time()+60
+    except Exception:
+        fresh=False
+    if not token or not fresh:
+        sys.exit("ai-vault: access token is missing or stale")
+sys.stdout.write(token)
 PY
 }
 
@@ -341,7 +442,7 @@ cmd_show_audit() {
 cmd_whoami() { echo "identity: $(current_user)   admin: $(is_admin && echo yes || echo no)"; }
 
 # SSH forced-command wrapper: binds the connection to <identity> and only allows
-# receive/serve. Put in authorized_keys as:
+# receive/sync-receive/serve. Put in authorized_keys as:
 #   command="ai-vault shell daniel",no-pty,no-port-forwarding,... ssh-ed25519 AAA... daniel@laptop
 cmd_shell() {
     local ident="$1"; shift
@@ -351,9 +452,9 @@ cmd_shell() {
     cmd="${cmd#ai-vault }"   # tolerate "ai-vault receive X" form
     [ -n "$cmd" ] || die "shell: no command (interactive logins are not permitted)"
     case "$cmd" in
-        receive\ *|serve\ *) exec ai-vault $cmd ;;
+        receive\ *|sync-receive\ *|serve\ *) exec ai-vault $cmd ;;
         whoami) cmd_whoami ;;
-        *) die "shell: disallowed command (only receive/serve): $cmd" ;;
+        *) die "shell: disallowed command (only receive/sync-receive/serve): $cmd" ;;
     esac
 }
 
@@ -364,6 +465,7 @@ usage() { sed -n '2,/^$/p' "$0" | sed 's/^# \?//' >&2; }
 cmd="$1"; shift || true
 case "$cmd" in
     receive)    cmd_receive "$@" ;;
+    sync-receive) CLAUDE_OWNER_SYNC=1 cmd_receive "$@" ;;
     serve)      cmd_serve "$@" ;;
     access)     cmd_access "$1" ;;
     enroll)      cmd_enroll "$@" ;;

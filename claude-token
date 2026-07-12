@@ -8,15 +8,17 @@
 #   claude-token                           print active account tokens (default)
 #   claude-token check                     validate creds without printing secrets
 #   claude-token status                    account, token age, sync health
-#   claude-token pair --user NAME          generate a vault key + print approve line
+#   claude-token pair --user NAME [--owner]  pair; owner mode leaves plain claude untouched
 #   claude-token set-url <url>             configure the HTTPS vault endpoint
 #   claude-token set-token <token>         store the API token the operator issued
-#   claude-token login                     browser OAuth -> push to leader -> follower
+#   claude-token set-mode <auto|owner|follower>  choose native-owner or vault-follower launches
+#   claude-token login                     native browser OAuth + best-effort non-destructive sync
+#   claude-token sync [--profile P]        copy local credentials to vault without changing them
 #   claude-token run [claude args...]      follower launcher: freshen store, exec claude
 #   claude-token install-wrapper           make plain `claude` run via `claude-token run`
 #   claude-token publish [--profile P|--all]  LEADER: refresh + publish follower token(s)
-#   claude-token pull   [--profile P]      FOLLOWER: pull a published token into the store
-#   claude-token push   [--profile P]      push local real token to leader (owner-gated)
+#   claude-token pull   [--profile P]      FOLLOWER: replace local store with published credentials
+#   claude-token push   [--profile P]      LEGACY HANDOFF: sync, then demote local credentials
 #   claude-token push-logs                 upload local redacted debug logs to the vault
 #   claude-token check | --diagnose | --version | --help
 #
@@ -25,13 +27,13 @@
 # expiresAt,scopes,subscriptionType,rateLimitTier} (flat internally; wrapped in
 # {"claudeAiOauth":...} when written to the macOS Keychain).
 #
-# Model: one leader owns the real refresh token and publishes fresh access
-# tokens (~hours TTL). Followers run with a sentinel refresh token so they can
-# never rotate/invalidate the leader. Refresh endpoint override for Claude is
-# not exposed, so followers re-pull on each launch (access token stays fresh).
+# Model: each owner machine keeps its normal Claude login and native refresh
+# path, then syncs fresh snapshots to the vault without changing local auth.
+# Followers receive freshness-validated access tokens and never hold a real
+# refresh token. Legacy vault-managed handoff remains explicit and available.
 
 set -euo pipefail
-VERSION="2.4.6"
+VERSION="2.5.0"
 
 CLIENT_ID="9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 TOKEN_EP="https://platform.claude.com/v1/oauth/token"
@@ -108,6 +110,11 @@ config_user() {
     if [ -n "${CODEX_USER:-}" ]; then echo "$CODEX_USER"
     elif [ -f "$CONFIG_FILE" ]; then awk -F= '/^user=/{print $2;exit}' "$CONFIG_FILE"; fi
 }
+config_mode() {
+    local mode="${CLAUDE_TOKEN_MODE:-}"
+    if [ -z "$mode" ] && [ -f "$CONFIG_FILE" ]; then mode="$(awk -F= '/^mode=/{print $2;exit}' "$CONFIG_FILE")"; fi
+    echo "${mode:-auto}"
+}
 set_config() {
     mkdir -p "$VAULT_DIR_CLIENT"
     python3 - "$CONFIG_FILE" "$1" "$2" <<'PY'
@@ -152,6 +159,16 @@ print(json.dumps(o))'
         done
         return 1
     fi
+}
+local_refresh_mode() {
+    local oauth rt
+    oauth="$(read_oauth_json 2>/dev/null)" || { echo missing; return; }
+    rt="$(printf '%s' "$oauth" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("refreshToken", ""))' 2>/dev/null)"
+    case "$rt" in
+        "$SENTINEL_RT"|vlt:*) echo follower ;;
+        "") echo missing ;;
+        *) echo owner ;;
+    esac
 }
 write_oauth_json() { # oauth_str  -> keychain (wrapped) or file (flat)
     local oauth="$1"
@@ -198,6 +215,14 @@ o=json.load(open(sys.argv[1])); o=o.get("claudeAiOauth",o)
 rt=o.get("refreshToken","")
 exp=(o.get("expiresAt") or 0)/1000
 print("yes" if (not rt or rt.startswith("vlt:") or rt=="__follower_no_refresh__" or exp < time.time()+300) else "no")
+PY
+}
+
+profile_refresh_authority() { # auth_file -> owner/vault
+    python3 - "$1" <<'PY'
+import json, sys
+d=json.load(open(sys.argv[1]))
+print((d.get("claudeTokenSync") or {}).get("refreshAuthority") or "vault")
 PY
 }
 
@@ -286,6 +311,22 @@ PY
 canonical_file() { echo "$CLAUDE_PROFILES_DIR/$1/.claude/credentials.json"; }
 shared_file()    { echo "$SHARED_DIR/$1.json"; }
 
+fresh_access_from_file() { # published-token JSON -> access token when fresh
+    python3 - "$1" <<'PY'
+import json, sys, time
+
+d = json.load(open(sys.argv[1]))
+o = d.get("claudeAiOauth", d)
+token = o.get("accessToken", "")
+try:
+    expires = float(o.get("expiresAt") or 0) / 1000
+except Exception:
+    expires = 0
+if token and expires > time.time() + 60:
+    sys.stdout.write(token)
+PY
+}
+
 publish_profile() { # profile
     local p="$1" af sf
     af="$(canonical_file "$p")"; sf="$(shared_file "$p")"
@@ -296,6 +337,8 @@ publish_profile() { # profile
     local needs_refresh
     needs_refresh="$(profile_needs_refresh "$af")"
     if [ "$needs_refresh" = "yes" ]; then
+        [ "$(profile_refresh_authority "$af")" != owner ] \
+            || die "publish: '$p' is owner-managed; the owner must sync fresh credentials"
         local rt resp lock rc
         rt="$(python3 -c 'import json,sys;o=json.load(open(sys.argv[1]));o=o.get("claudeAiOauth",o);print(o.get("refreshToken",""))' "$af")"
         [ -n "$rt" ] || die "publish: no refreshToken for '$p'"
@@ -398,28 +441,38 @@ PY
 
 # ---- FOLLOWER: pull / push ----
 pull_profile() { # profile -> local store
-    local p="$1" sf
+    local p="$1" sf tmp=""
     log_event pull "$p" start ""
     sf="$(shared_file "$p")"
-    if [ -f "$sf" ]; then
+    if [ -f "$sf" ] && [ -n "$(fresh_access_from_file "$sf" 2>/dev/null || true)" ]; then
         : # fast path: syncthing mesh
     elif have_http_vault; then
         say "pulling '$p' from $(vault_url) (HTTPS, ACL-gated)..."
         log_event pull "$p" http "$(vault_url)"
-        local tmp; tmp="$(mktemp)"; vault_http GET "/pull/claude/$p" > "$tmp" || { rm -f "$tmp"; die "pull: leader denied/unavailable for '$p'"; }
+        tmp="$(mktemp)"; vault_http GET "/pull/claude/$p" > "$tmp" || { rm -f "$tmp"; die "pull: vault denied/unavailable for '$p'"; }
         sf="$tmp"
     else
-        need_cmd ssh; local tmp; tmp="$(mktemp)"
+        need_cmd ssh; tmp="$(mktemp)"
         say "pulling '$p' from leader $LEADER_HOST (vault, ACL-gated)..."
         ssh_vault "ai-vault serve claude:$p" > "$tmp" || { rm -f "$tmp"; die "pull: leader denied/unavailable for '$p'"; }
         sf="$tmp"
     fi
+    set +e
     python3 - "$sf" <<'PY'
-import json,sys
+import json, sys, time
 d=json.load(open(sys.argv[1])); o=d.get("claudeAiOauth",d)
 if not o.get("accessToken"): sys.exit("pull: no accessToken in published token")
+try:
+    fresh=float(o.get("expiresAt") or 0)/1000 > time.time()+60
+except Exception:
+    fresh=False
+if not fresh: sys.exit("pull: published access token is stale")
 print(json.dumps(o))
 PY
+    local rc=$?
+    set -e
+    [ -z "$tmp" ] || rm -f "$tmp"
+    [ "$rc" -eq 0 ] || return "$rc"
     log_event pull "$p" ok "token-json"
 }
 
@@ -444,6 +497,25 @@ push_profile() { # profile -> leader (then revert local to sentinel)
     local fresh; fresh="$(pull_profile "$p" 2>/dev/null || true)"; [ -n "$fresh" ] && write_oauth_json "$fresh"
     say "reverted '$p' to follower (sentinel token)"
     log_event push "$p" ok "reverted-local-to-follower"
+}
+
+sync_profile() { # profile -> leader; never changes local credentials
+    local p="$1" oauth rt
+    log_event sync "$p" start ""
+    oauth="$(read_oauth_json)" || die "sync: no local Claude credentials found"
+    rt="$(printf '%s' "$oauth" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("refreshToken", ""))')"
+    [ -n "$rt" ] || die "sync: no refreshToken locally"
+    case "$rt" in "$SENTINEL_RT"|vlt:*) die "sync: local credentials are a follower token, not an owner login" ;; esac
+    if have_http_vault; then
+        printf '%s' "$oauth" | vault_http POST "/sync/claude/$p" /dev/stdin >/dev/null \
+            || { say "sync failed; local Claude credentials unchanged (retry: claude-token sync --profile $p)"; log_event sync "$p" failed "http-rejected"; return 1; }
+    else
+        need_cmd ssh
+        printf '%s\n' "$oauth" | ssh_vault "ai-vault sync-receive claude:$p" >/dev/null \
+            || { say "sync failed; local Claude credentials unchanged (retry: claude-token sync --profile $p)"; log_event sync "$p" failed "ssh-rejected"; return 1; }
+    fi
+    say "synced '$p' to the vault; local Claude credentials unchanged"
+    log_event sync "$p" ok "local-unchanged"
 }
 
 # ---- commands ----
@@ -489,12 +561,13 @@ print(f"ok: valid JSON, accessToken present, {mode}{ttl}")
 
 cmd_status() {
     say "machine: $(short_host)   leader: $LEADER_HOST"
+    echo "  mode: configured=$(config_mode)  local=$(local_refresh_mode)"
     local oauth email exp
     if oauth="$(read_oauth_json 2>/dev/null)"; then
         email="$(echo "$oauth" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("subscriptionType","?"))' 2>/dev/null)"
         exp="$(echo "$oauth" | python3 -c 'import json,sys,time;o=json.load(sys.stdin);e=o.get("expiresAt",0);print(round((e/1000-time.time())/3600,1),"h" if e else "?")' 2>/dev/null)"
         local rt; rt="$(echo "$oauth" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("refreshToken",""))')"
-        local state; [ "$rt" = "$SENTINEL_RT" ] && state="sentinel (follower)" || state="REAL (leader/standalone)"
+        local state; [ "$rt" = "$SENTINEL_RT" ] && state="sentinel (follower)" || state="REAL (owner/standalone)"
         echo "  active: plan=$email  access valid: $exp  rt=$state"
     else
         echo "  active: (no creds)"
@@ -504,12 +577,12 @@ cmd_status() {
 }
 
 cmd_pair() {  # [--user NAME] — magical onboarding: print a code, poll until approved, auto-configure
-    local user="${CODEX_USER:-}"
+    local user="${CODEX_USER:-}" mode="${PAIR_MODE:-follower}"
     while [ -z "$user" ]; do read -rp "Your username on the vault: " user; done
     mkdir -p "$VAULT_DIR_CLIENT"
     local url; url="${CLAUDE_VAULT_URL:-$(vault_url 2>/dev/null)}"
     [ -n "$url" ] || url="https://vault.ekelvin.com"
-    set_config url "$url"; set_config user "$user"
+    set_config url "$url"; set_config user "$user"; set_config mode "$mode"
     need_cmd curl
     # generate a short pairing code + a long secret
     local code secret sh
@@ -545,39 +618,46 @@ EOF
     done
     [ "$status" = "approved" ] || die "pair: timed out waiting for approval. Re-run when the operator is ready."
     set_config token "$token"
-    cmd_install_wrapper
-    # if there's a local refresh token (e.g. prior login), push it to the leader now
+    if [ "$mode" = owner ]; then
+        say "owner mode configured; plain 'claude' was not changed"
+    else
+        cmd_install_wrapper
+    fi
+    # If there is a local owner login, sync it without changing local Claude.
     local oauth rt
     oauth="$(read_oauth_json 2>/dev/null || true)"
     rt="$(printf '%s' "$oauth" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("refreshToken",""))' 2>/dev/null || true)"
     if [ -n "$rt" ] && [ "$rt" != "$SENTINEL_RT" ]; then
-        say "local token found — pushing to leader..."
-        printf '%s' "$oauth" | vault_http POST "/push/claude/$user" /dev/stdin >/dev/null || say "  (push deferred — leader will retry)"
+        say "local login found — syncing without changing it..."
+        ( sync_profile "$user" ) || say "sync deferred; retry with: claude-token sync --profile $user"
     else
-        say "no local token yet — run 'claude login' to login + push automatically."
+        say "no local owner login yet — run 'claude-token login' after pairing."
     fi
     echo >&2
-    say "paired as '$user'! 'claude' now runs via $url. Try: claude"
+    say "paired as '$user' in $mode mode."
 }
 
 cmd_login() {
     local user; user="$(config_user)"; [ -n "$user" ] || die "login: run 'claude-token setup --user <name>' first"
     local bin; bin="$(resolve_claude_bin)"; [ -n "$bin" ] || die "login: claude binary not found"
     log_event login "$user" start "$bin"
-    say "starting browser login..."
-    "$bin" login "$@" || "$bin" auth login "$@" || true
+    say "starting native Claude browser login..."
+    local rc=0
+    set +e
+    "$bin" auth login "$@"
+    rc=$?
+    set -e
+    if [ "$rc" -ne 0 ]; then
+        log_event login "$user" failed "claude_rc=$rc"
+        return "$rc"
+    fi
     local oauth rt
-    oauth="$(read_oauth_json 2>/dev/null)" || { say "login: no creds after login"; return 0; }
+    oauth="$(read_oauth_json 2>/dev/null)" || { log_event login "$user" failed no-readable-creds; die "login completed, but no credentials were readable"; }
     rt="$(printf '%s' "$oauth" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("refreshToken",""))')"
     if [ -n "$rt" ] && [ "$rt" != "$SENTINEL_RT" ]; then
-        say "pushing your Claude token to the leader as '$user'..."
-        if have_http_vault; then
-            printf '%s' "$oauth" | vault_http POST "/push/claude/$user" /dev/stdin >/dev/null || { log_event login "$user" push-deferred "http"; say "  (push deferred — leader will retry)"; }
-        else
-            need_cmd ssh; printf '%s\n' "$oauth" | ssh_vault "ai-vault receive claude:$user" || { log_event login "$user" push-deferred "ssh"; say "  (push deferred)"; }
-        fi
-        say "logged in + pushed to leader. 'claude' works (standalone); follower mode activates when the broker serves."
-        log_event login "$user" ok "pushed"
+        ( sync_profile "$user" ) || say "login succeeded; vault sync deferred (retry: claude-token sync --profile $user)"
+        say "native Claude login is active locally"
+        log_event login "$user" ok "local-active"
     else
         say "logged in (no refresh token to push)."
         log_event login "$user" ok "no-refresh-token"
@@ -587,32 +667,47 @@ cmd_login() {
 cmd_run() { # [claude args...]  — follower launcher; falls back to normal claude if no fresh broker token
     # `claude login` -> login (browser) + auto-push the refresh token to the leader
     [ "${1:-}" = "login" ] && { shift; cmd_login "$@"; return $?; }
+    if [ "${1:-}" = auth ] && [ "${2:-}" = login ]; then shift 2; cmd_login "$@"; return $?; fi
     local user; user="$(config_user)"
     local bin; bin="$(resolve_claude_bin)"; [ -n "$bin" ] || die "run: claude binary not found"
+    case "${1:-}" in auth|setup-token) exec "$bin" "$@" ;; esac
     # If no user configured, just run claude normally (standalone).
     [ -n "$user" ] || exec "$bin" "$@"
 
-    local sf="$SHARED_DIR/$user.json" access=""
-    # 1. syncthing shared file — only if the access token is still fresh
-    if [ -f "$sf" ]; then
-        access="$(python3 -c '
-import json,sys,base64,time
-d=json.load(open(sys.argv[1])); o=d.get("claudeAiOauth",d); t=o.get("accessToken","")
-try:
-    p=t.split(".")[1]; p+="="*(-len(p)%4); exp=json.loads(base64.b64decode(p)).get("exp",0)
-    sys.stdout.write(t if exp>time.time() else "")
-except: sys.stdout.write("")
-' "$sf" 2>/dev/null)"
+    # Owner machines always use Claude's native login and refresh path. Auto mode
+    # protects existing standalone installs that already hold a real refresh token.
+    local mode local_mode
+    mode="$(config_mode)"; [ -n "$mode" ] || mode=auto
+    local_mode="$(local_refresh_mode)"
+    case "$mode" in auto|owner|follower) ;; *) die "invalid mode '$mode' (expected auto, owner, or follower)" ;; esac
+    if [ "$mode" = owner ] || { [ "$mode" = auto ] && [ "$local_mode" = owner ]; }; then
+        log_event run "$user" native "mode=$mode local=$local_mode"
+        exec "$bin" "$@"
     fi
-    # 2. broker /access/ (HTTPS)
+
+    local sf="$SHARED_DIR/$user.json" access=""
+    # 1. Syncthing shared file, validated from its expiresAt metadata. Claude
+    # OAuth access tokens are opaque and cannot be decoded as JWTs.
+    if [ -f "$sf" ]; then
+        access="$(fresh_access_from_file "$sf" 2>/dev/null || true)"
+    fi
+    # 2. Pull the broker's JSON so this client can validate freshness itself.
     if [ -z "$access" ] && have_http_vault; then
-        access="$(vault_http GET "/access/claude/$user" 2>/dev/null || true)"
+        local tmp
+        tmp="$(mktemp)"
+        if vault_http GET "/pull/claude/$user" > "$tmp" 2>/dev/null; then
+            access="$(fresh_access_from_file "$tmp" 2>/dev/null || true)"
+        fi
+        rm -f "$tmp"
     fi
     # If we have a fresh broker/shared token -> follower mode (ANTHROPIC_AUTH_TOKEN).
     # Otherwise -> fall through to normal claude (uses the local keychain/login).
     if [ -n "$access" ]; then
         export ANTHROPIC_AUTH_TOKEN="$access"
         exec "$bin" "$@"
+    fi
+    if [ "$local_mode" = follower ] || [ "$mode" = follower ]; then
+        die "no fresh follower token for '$user'; local credentials were not changed"
     fi
     # Fallback: run claude normally (keychain OAuth mode — connectors work, standalone).
     exec "$bin" "$@"
@@ -632,6 +727,14 @@ EOF
 
 cmd_set_url()   { [ -n "${1:-}" ] || die "set-url: specify URL"; set_config url "$1"; say "vault URL = $1"; }
 cmd_set_token() { [ -n "${1:-}" ] || die "set-token: specify token"; set_config token "$1"; say "vault token stored"; }
+cmd_set_mode() {
+    case "${1:-}" in auto|owner|follower) set_config mode "$1"; say "mode = $1" ;; *) die "set-mode: expected auto, owner, or follower" ;; esac
+}
+cmd_sync() {
+    local p="${PROFILE:-$(config_user)}"
+    [ -n "$p" ] || die "sync: specify --profile <name> or configure a user"
+    sync_profile "$p"
+}
 
 # One-shot bootstrap to "go live" on this machine: push the local real refresh
 # token to the leader (making the leader the sole owner), then install the
@@ -644,6 +747,7 @@ cmd_go_live() {
     oauth="$(read_oauth_json 2>/dev/null)" || die "go-live: no local Claude creds — run 'claude login' first"
     rt="$(printf '%s' "$oauth" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("refreshToken",""))' 2>/dev/null)"
     [ -n "$rt" ] && [ "$rt" != "$SENTINEL_RT" ] || die "go-live: no real refresh token locally (already a follower?) — run 'claude login' first"
+    say "WARNING: go-live is a legacy handoff and will demote local Claude credentials"
     say "go-live: pushing your Claude token to the leader as '$user'..."
     push_profile "$user" || die "go-live: push failed (leader unreachable or rate-limited — retry later)"
     cmd_install_wrapper
@@ -652,6 +756,7 @@ cmd_go_live() {
 
 cmd_publish() {
     local p="${PROFILE:-}"
+    [ "$(config_mode)" != owner ] || die "publish is disabled in owner mode; use native Claude refresh and 'claude-token sync'"
     if [ "${ALL:-0}" = 1 ]; then
         for p in $(ls "$CLAUDE_PROFILES_DIR" 2>/dev/null); do ( publish_profile "$p" ) || say "  (skipped $p)"; done
     else
@@ -659,8 +764,24 @@ cmd_publish() {
         publish_profile "$p"
     fi
 }
-cmd_pull() { local p="${PROFILE:-$(config_user)}"; [ -n "$p" ] || die "pull: specify --profile <name>"; local o; o="$(pull_profile "$p")"; write_oauth_json "$o"; say "pulled '$p' into store"; }
-cmd_push() { local p="${PROFILE:-$(config_user)}"; [ -n "$p" ] || die "push: specify --profile <name>"; push_profile "$p"; }
+cmd_pull() {
+    local p="${PROFILE:-$(config_user)}" mode local_mode o
+    [ -n "$p" ] || die "pull: specify --profile <name>"
+    mode="$(config_mode)"; local_mode="$(local_refresh_mode)"
+    if [ "$mode" = owner ] || { [ "$mode" = auto ] && [ "$local_mode" = owner ]; }; then
+        die "pull is disabled for an owner login; local Claude credentials unchanged"
+    fi
+    o="$(pull_profile "$p")"
+    write_oauth_json "$o"
+    say "pulled fresh follower credentials for '$p' into the local store"
+}
+cmd_push() {
+    local p="${PROFILE:-$(config_user)}"
+    [ -n "$p" ] || die "push: specify --profile <name>"
+    say "WARNING: legacy push hands refresh ownership to the vault and demotes local Claude credentials"
+    say "Use 'claude-token sync --profile $p' to copy credentials without changing local Claude"
+    push_profile "$p"
+}
 cmd_push_logs() {
     local tmp response
     tmp="$(mktemp)"
@@ -706,19 +827,21 @@ case "$1" in
     publish) shift; while [ $# -gt 0 ]; do case "$1" in --profile|-p) PROFILE="$2"; shift 2;; --all|-a) ALL=1; shift;; *) die "unknown arg: $1";; esac; done; cmd_publish;;
     pull)    shift; while [ $# -gt 0 ]; do case "$1" in --profile|-p) PROFILE="$2"; shift 2;; *) PROFILE="$1"; shift;; esac; done; cmd_pull;;
     push)    shift; while [ $# -gt 0 ]; do case "$1" in --profile|-p) PROFILE="$2"; shift 2;; *) PROFILE="$1"; shift;; esac; done; cmd_push;;
+    sync)    shift; while [ $# -gt 0 ]; do case "$1" in --profile|-p) PROFILE="$2"; shift 2;; *) PROFILE="$1"; shift;; esac; done; cmd_sync;;
     push-logs|logs-push) shift; cmd_push_logs "$@";;
     check)   cmd_check;;
     status)  cmd_status;;
-    pair|setup) shift; while [ $# -gt 0 ]; do case "$1" in --user|-u) CODEX_USER="$2"; shift 2;; *) CODEX_USER="$1"; shift;; esac; done; cmd_pair;;
+    pair|setup) shift; while [ $# -gt 0 ]; do case "$1" in --user|-u) CODEX_USER="$2"; shift 2;; --owner|--no-wrapper) PAIR_MODE=owner; shift;; --follower) PAIR_MODE=follower; shift;; *) CODEX_USER="$1"; shift;; esac; done; cmd_pair;;
     login)   shift; cmd_login "$@";;
     run)     shift; cmd_run "$@";;
     go-live) shift; cmd_go_live "$@";;
     install-wrapper) cmd_install_wrapper;;
     set-url)   shift; cmd_set_url "$@";;
     set-token) shift; cmd_set_token "$@";;
+    set-mode)  shift; cmd_set_mode "$@";;
     --diagnose|--diagnostics|--debug) cmd_diagnose;;
     --version|-v) echo "claude-token $VERSION";;
-    --help|-h) sed -n '2,22p' "$0" | sed 's/^# \?//';;
+    --help|-h) sed -n '2,/^$/p' "$0" | sed 's/^# *//';;
     *) die "unknown command: $1 (see --help)";;
 esac
 exit 0

@@ -7,7 +7,7 @@ Personal Homebrew tap for useful CLI tools.
 ### `claude-token`
 
 Print and **sync Claude Code OAuth credentials across machines** using the same
-leader/follower vault as `codex-token`. Works for Claude Code's OAuth on
+owner/follower vault as `codex-token`. Works for Claude Code's OAuth on
 `platform.claude.com` (access tokens `sk-ant-oat…`, refresh tokens `sk-ant-ort…`).
 
 **Install:**
@@ -16,15 +16,16 @@ brew tap krandder/tools
 brew install claude-token
 ```
 
-#### How it works (same model as codex)
-- The **leader** owns the real Claude refresh token and refreshes it
-  (`platform.claude.com/v1/oauth/token`); access tokens last ~hours, so the
-  leader publishes frequently (cron ~every 2h).
+#### How it works
+- An **owner machine** keeps its normal Claude login and remains the sole
+  refresh authority. Plain `claude`, browser login, and native refresh do not
+  depend on the vault.
+- `claude-token sync` copies a fresh owner snapshot to Farol without modifying
+  local credentials. Farol rejects stale/conflicting snapshots and never
+  refreshes owner-managed Claude credentials.
 - **Followers** run with a *sentinel* refresh token. Claude Code uses the fresh
-  access bearer directly (verified: `claude -p` succeeds with a sentinel RT) and
-  **cannot rotate** the leader's token. Claude exposes no refresh-endpoint
-  override, so followers re-pull on each launch (`claude-token run`) to stay
-  fresh rather than refreshing locally.
+  access bearer directly and **cannot rotate** the owner's token. Every launch
+  validates `expiresAt`; stale local and vault tokens are rejected.
 - Creds are stored in the macOS **Keychain** (`Claude Code-credentials`) on
   Darwin and `~/.claude/.credentials.json` on Linux.
 
@@ -32,13 +33,24 @@ brew install claude-token
 ```
 claude-token                              print active account tokens (default)
 claude-token check                        validate creds without printing secrets
-claude-token status / pair --user / set-url / set-token / install-wrapper
-claude-token login                        browser OAuth -> push to leader -> follower
+claude-token status / set-url / set-token / set-mode
+claude-token pair --user NAME --owner     owner pairing; leaves plain claude untouched
+claude-token pair --user NAME             follower pairing; installs wrapper
+claude-token login                        native browser OAuth + best-effort sync
+claude-token sync [--profile P]           copy credentials; never changes local Claude
 claude-token run [claude args...]         follower launcher (freshen store, exec claude)
 claude-token publish [--profile P|--all]  LEADER: refresh + publish follower token
-claude-token pull [--profile P]           FOLLOWER: pull a published token into the store
-claude-token push [--profile P]           push local real token to leader (owner-gated)
+claude-token pull [--profile P]           FOLLOWER: replace local store with follower token
+claude-token push [--profile P]           LEGACY HANDOFF: sync, then demote local credentials
 claude-token check | --diagnose | --version
+```
+
+Owner-machine onboarding (Adriana/Juana):
+```bash
+claude-token pair --user NAME --owner
+claude-token login
+# Plain claude remains native. Re-run this safely whenever needed:
+claude-token sync --profile NAME
 ```
 
 Pairing/onboarding is identical to `codex-token` (pair → operator `ai-vault

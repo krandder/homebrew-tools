@@ -11,6 +11,7 @@ Bind to localhost only; the tunnel terminates TLS and Caddy routes by Host.
 Routes:
   GET  /healthz                 (no auth) liveness
   POST /push/<profile>          (owner)   body = token JSON -> receive+refresh+publish
+  POST /sync/<profile>          (owner)   body = Claude owner snapshot -> validate+publish, no refresh
   GET  /pull/<profile>          (puller)  -> follower token JSON
   POST /debug-logs/<tool>       (auth)    body = redacted debug bundle -> vault storage
   GET  /status                  (admin)   -> ACL listing
@@ -329,6 +330,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self._send(200, json.dumps(
                 {"access_token": access, "refresh_token": new_dummy,
                  "token_type": "Bearer", "expires_in": exp}))
+        if self.path.startswith("/sync/"):
+            pid = parse_id(self.path[len("/sync/"):])
+            if not pid:
+                return self._send(400, '{"error":"bad profile; use /sync/<kind>/<name>"}')
+            if pid[0] != "claude":
+                return self._send(400, '{"error":"owner sync is supported only for Claude profiles"}')
+            p = run_vault(user, ["sync-receive", pid[0] + ":" + pid[1]], body=body)
+            if p.returncode == 0:
+                server_event("sync", user, pid[0] + ":" + pid[1], "ok", p.stderr.strip().splitlines()[-1] if p.stderr.strip() else "")
+                return self._send(200, '{"ok":true}')
+            server_event("sync", user, pid[0] + ":" + pid[1], "failed", p.stderr.strip().splitlines()[-1] if p.stderr.strip() else "")
+            return self._send(403 if "owner" in p.stderr or "may not" in p.stderr else 409,
+                              '{"error":"' + (p.stderr.strip().splitlines()[-1] or 'failed') + '"}')
         if self.path.startswith("/push/"):
             pid = parse_id(self.path[len("/push/"):])
             if not pid:

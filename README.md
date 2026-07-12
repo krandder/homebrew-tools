@@ -19,7 +19,8 @@ brew install claude-token
 #### How it works
 - An **owner machine** keeps its normal Claude login and remains the sole
   refresh authority. Plain `claude`, browser login, and native refresh do not
-  depend on the vault.
+  depend on the vault. A real local refresh token always wins over configured
+  follower mode until an explicit legacy handoff demotes it.
 - `claude-token sync` copies a fresh owner snapshot to Farol without modifying
   local credentials. Farol rejects stale/conflicting snapshots and never
   refreshes owner-managed Claude credentials.

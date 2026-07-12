@@ -33,7 +33,7 @@
 # refresh token. Legacy vault-managed handoff remains explicit and available.
 
 set -euo pipefail
-VERSION="2.5.1"
+VERSION="2.5.2"
 
 CLIENT_ID="9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 TOKEN_EP="https://platform.claude.com/v1/oauth/token"
@@ -567,7 +567,12 @@ cmd_status() {
         email="$(echo "$oauth" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("subscriptionType","?"))' 2>/dev/null)"
         exp="$(echo "$oauth" | python3 -c 'import json,sys,time;o=json.load(sys.stdin);e=o.get("expiresAt",0);print(round((e/1000-time.time())/3600,1),"h" if e else "?")' 2>/dev/null)"
         local rt; rt="$(echo "$oauth" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("refreshToken",""))')"
-        local state; [ "$rt" = "$SENTINEL_RT" ] && state="sentinel (follower)" || state="REAL (owner/standalone)"
+        local state
+        case "$rt" in
+            "$SENTINEL_RT"|vlt:*) state="sentinel (follower)" ;;
+            "") state="missing" ;;
+            *) state="REAL (owner/standalone)" ;;
+        esac
         echo "  active: plan=$email  access valid: $exp  rt=$state"
     else
         echo "  active: (no creds)"
@@ -618,8 +623,9 @@ EOF
     done
     [ "$status" = "approved" ] || die "pair: timed out waiting for approval. Re-run when the operator is ready."
     set_config token "$token"
-    if [ "$mode" = owner ]; then
-        say "owner mode configured; plain 'claude' was not changed"
+    local local_mode; local_mode="$(local_refresh_mode)"
+    if [ "$mode" = owner ] || { [ "$mode" = auto ] && [ "$local_mode" = owner ]; }; then
+        say "native owner path selected; plain 'claude' was not changed"
     else
         cmd_install_wrapper
     fi
@@ -684,7 +690,7 @@ cmd_run() { # [claude args...]  — follower launcher; falls back to normal clau
     mode="$(config_mode)"; [ -n "$mode" ] || mode=auto
     local_mode="$(local_refresh_mode)"
     case "$mode" in auto|owner|follower) ;; *) die "invalid mode '$mode' (expected auto, owner, or follower)" ;; esac
-    if [ "$mode" = owner ] || { [ "$mode" = auto ] && [ "$local_mode" = owner ]; }; then
+    if [ "$mode" = owner ] || [ "$local_mode" = owner ]; then
         log_event run "$user" native "mode=$mode local=$local_mode"
         exec "$bin" "$@"
     fi
@@ -772,7 +778,8 @@ cmd_pull() {
     local p="${PROFILE:-$(config_user)}" mode local_mode o
     [ -n "$p" ] || die "pull: specify --profile <name>"
     mode="$(config_mode)"; local_mode="$(local_refresh_mode)"
-    if [ "$mode" = owner ] || { [ "$mode" = auto ] && [ "$local_mode" = owner ]; }; then
+    case "$mode" in auto|owner|follower) ;; *) die "invalid mode '$mode' (expected auto, owner, or follower)" ;; esac
+    if [ "$mode" = owner ] || [ "$local_mode" = owner ]; then
         die "pull is disabled for an owner login; local Claude credentials unchanged"
     fi
     o="$(pull_profile "$p")"

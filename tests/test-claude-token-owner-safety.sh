@@ -78,12 +78,28 @@ run_token run hello
 [ "$(sed -n '1p' "$TEST_OUTPUT")" = unset ]
 [ ! -e "$CURL_CALLED" ]
 
+# Credential reality wins even if follower mode was configured accidentally.
+new_home follower-with-owner 'mode=follower\n'
+write_creds real-refresh-token
+run_token run hello
+[ "$(sed -n '1p' "$TEST_OUTPUT")" = unset ]
+[ ! -e "$CURL_CALLED" ]
+
 # Pull cannot replace owner credentials, and stale follower pulls never write.
 new_home owner-pull 'mode=owner\n'
 write_creds owner-refresh
 before="$(shasum -a 256 "$HOME/.claude/.credentials.json")"
 if run_token pull --profile adriana >"$HOME/stdout" 2>"$HOME/stderr"; then
     echo "expected owner pull to be refused" >&2
+    exit 1
+fi
+[ "$before" = "$(shasum -a 256 "$HOME/.claude/.credentials.json")" ]
+
+new_home follower-owner-pull 'mode=follower\n'
+write_creds owner-refresh
+before="$(shasum -a 256 "$HOME/.claude/.credentials.json")"
+if run_token pull --profile adriana >"$HOME/stdout" 2>"$HOME/stderr"; then
+    echo "expected follower mode not to override owner credentials" >&2
     exit 1
 fi
 [ "$before" = "$(shasum -a 256 "$HOME/.claude/.credentials.json")" ]
@@ -182,6 +198,14 @@ printf '{"status":"approved","token":"paired-token","user":"adriana"}\n' > "$CUR
 run_token pair --user adriana >/dev/null
 grep -q '^mode=auto$' "$HOME/.claude-token/config"
 [ -x "$HOME/bin/claude" ]
+
+new_home pair-auto-owner
+write_creds real-refresh-token
+CURL_RESPONSE="$HOME/approved.json"; export CURL_RESPONSE
+printf '{"status":"approved","token":"paired-token","user":"adriana"}\n' > "$CURL_RESPONSE"
+run_token pair --user adriana >/dev/null
+grep -q '^mode=auto$' "$HOME/.claude-token/config"
+[ ! -e "$HOME/bin/claude" ]
 
 # The vault never serves an expired Claude access token.
 VAULT="$TMP/vault"

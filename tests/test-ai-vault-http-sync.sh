@@ -53,4 +53,21 @@ code="$(/usr/bin/curl -sS -o /dev/null -w '%{http_code}' -H "Authorization: Bear
     --data-binary '{}' "http://127.0.0.1:$PORT/sync/codex/adriana")"
 [ "$code" = 400 ]
 
-echo "ok: HTTP sync is additive and legacy push is unchanged"
+mkdir -p "$TMP/home/.claude-profiles/adriana/.claude"
+cat > "$TMP/home/.claude-profiles/adriana/.claude/credentials.json" <<'JSON'
+{"claudeAiOauth":{"accessToken":"access","refreshToken":"owner-refresh"},"claudeTokenSync":{"refreshAuthority":"owner"}}
+JSON
+HOME="$TMP/home" python3 - "$ROOT/ai-vault-http" <<'PY'
+import importlib.machinery, types, sys
+
+module = types.ModuleType("ai_vault_http")
+importlib.machinery.SourceFileLoader(module.__name__, sys.argv[1]).exec_module(module)
+try:
+    module.broker_refresh("adriana")
+except RuntimeError as exc:
+    assert "owner machine" in str(exc)
+else:
+    raise AssertionError("owner-managed refresh reached the broker")
+PY
+
+echo "ok: HTTP sync is additive, legacy push is unchanged, and owner refresh stays local"

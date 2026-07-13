@@ -102,7 +102,7 @@ def parse_id(rest):  # "codex/kas" -> ("codex", "kas") or None
     return parts[0], parts[1]
 
 
-# ---- Transparent OAuth refresh broker (single owner) ----
+# ---- Transparent OAuth refresh broker (legacy vault-managed profiles) ----
 # Claude Code on a follower refreshes NORMALLY (real refresh-on-expiry), but its
 # refresh is routed here by a local transparent proxy. We hold the canonical
 # refresh token, perform the rotation with Anthropic, store the rotated token,
@@ -120,6 +120,9 @@ def broker_refresh(account):
     import urllib.request, urllib.error, time
     af = os.path.expanduser(f"~/.claude-profiles/{account}/.claude/credentials.json")
     d = json.load(open(af))
+    if (d.get("claudeTokenSync") or {}).get("refreshAuthority") == "owner":
+        server_event("broker-refresh", account, "claude:" + account, "blocked", "owner-refresh-authority")
+        raise RuntimeError("owner-managed credentials may only refresh on the owner machine")
     o = d.get("claudeAiOauth", d)
     rt = o.get("refreshToken", "")
     if not rt or rt.startswith("vlt:"):

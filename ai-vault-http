@@ -324,6 +324,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if grant != "refresh_token":
                 return self._send(400, '{"error":"unsupported_grant_type"}')
             account = dummy.split(":", 2)[1] if dummy.startswith("vlt:") else user
+            if not valid_profile(account):
+                return self._send(400, '{"error":"invalid account"}')
+            auth = run_vault(user, ["authorize-pull", "claude:" + account])
+            if auth.returncode != 0:
+                server_event("broker-refresh", user, "claude:" + account, "denied", "not-authorized")
+                return self._send(403, '{"error":"forbidden"}')
             try:
                 access, exp = broker_refresh(account)
             except Exception as e:

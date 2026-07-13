@@ -17,6 +17,10 @@ cat > "$TMP/bin/ai-vault" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" > "$AI_VAULT_ARGS"
 cat > "$AI_VAULT_BODY"
+if [ "$*" = "authorize-pull claude:juana" ]; then
+    echo denied >&2
+    exit 1
+fi
 echo ok >&2
 SH
 chmod +x "$TMP/bin/ai-vault"
@@ -53,6 +57,12 @@ code="$(/usr/bin/curl -sS -o /dev/null -w '%{http_code}' -H "Authorization: Bear
     --data-binary '{}' "http://127.0.0.1:$PORT/sync/codex/adriana")"
 [ "$code" = 400 ]
 
+code="$(/usr/bin/curl -sS -o /dev/null -w '%{http_code}' -H "Authorization: Bearer test-vault-token" \
+    --data-binary 'grant_type=refresh_token&refresh_token=vlt:juana:probe' \
+    "http://127.0.0.1:$PORT/v1/oauth/token")"
+[ "$code" = 403 ]
+[ "$(cat "$TMP/args")" = "authorize-pull claude:juana" ]
+
 mkdir -p "$TMP/home/.claude-profiles/adriana/.claude"
 cat > "$TMP/home/.claude-profiles/adriana/.claude/credentials.json" <<'JSON'
 {"claudeAiOauth":{"accessToken":"access","refreshToken":"owner-refresh"},"claudeTokenSync":{"refreshAuthority":"owner"}}
@@ -70,4 +80,4 @@ else:
     raise AssertionError("owner-managed refresh reached the broker")
 PY
 
-echo "ok: HTTP sync is additive, legacy push is unchanged, and owner refresh stays local"
+echo "ok: HTTP sync is additive, broker refresh is ACL-gated, and owner refresh stays local"

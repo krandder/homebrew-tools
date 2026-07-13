@@ -23,4 +23,10 @@ for profile in ("codex:kas", "claude:kas"):
     assert d["profiles"][profile]["pullers"] == ["kas", "helper"]
 PY
 
-echo "ok: repeated pairing preserves existing ACLs"
+CODEX_VAULT_USER=helper CODEX_VAULT_DIR="$TMP/vault" "$ROOT/ai-vault" authorize-pull claude:kas
+if CODEX_VAULT_USER=stranger CODEX_VAULT_DIR="$TMP/vault" "$ROOT/ai-vault" authorize-pull claude:kas 2>/dev/null; then
+    echo "expected unrelated identity to be denied" >&2
+    exit 1
+fi
+
+echo "ok: repeated pairing preserves existing ACLs and pull authorization"

@@ -460,6 +460,9 @@ cmd_show_audit() {
 }
 
 cmd_whoami() { echo "identity: $(current_user)   admin: $(is_admin && echo yes || echo no)"; }
+cmd_authorize_pull() {
+    can_pull "$1" || die "authorize-pull: '$(current_user)' is not authorized for '$1'"
+}
 
 # SSH forced-command wrapper: binds the connection to <identity> and only allows
 # receive/sync-receive/serve. Put in authorized_keys as:
@@ -488,6 +491,7 @@ case "$cmd" in
     sync-receive) CLAUDE_OWNER_SYNC=1 cmd_receive "$@" ;;
     serve)      cmd_serve "$@" ;;
     access)     cmd_access "$1" ;;
+    authorize-pull) cmd_authorize_pull "$1" ;;
     enroll)      cmd_enroll "$@" ;;
     onboard)     cmd_onboard "$1" ;;
     pair-create) cmd_pair_create "$@" ;;

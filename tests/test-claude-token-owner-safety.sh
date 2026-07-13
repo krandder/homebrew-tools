@@ -299,6 +299,14 @@ chmod +x "$TMP/bin/claude-token"
 PATH="$TMP/bin:$PATH" "$HOME/bin/claude-kas" hello
 [ "$(cat "$WRAPPER_OUTPUT")" = "run-follower kas hello" ]
 
+# An existing pairing can repair a stale wrapper without pairing again.
+printf 'legacy wrapper\n' > "$HOME/bin/claude-kas"
+rm -f "$CURL_CALLED"
+PATH="$TMP/bin:$PATH" run_token install-follower-wrapper kas >/dev/null
+grep -q 'run-follower "kas"' "$HOME/bin/claude-kas"
+[ -e "$HOME/bin/claude-kas.pre-claude-token" ]
+[ ! -e "$CURL_CALLED" ]
+
 # Direct operator commands select the same canonical store as ai-vault-http,
 # while installations with only the legacy directory remain compatible.
 DEFAULT_HOME="$TMP/default-vault-home"

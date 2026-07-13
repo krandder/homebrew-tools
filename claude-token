@@ -15,6 +15,7 @@
 #   claude-token login                     native browser OAuth + best-effort non-destructive sync
 #   claude-token sync [--profile P]        copy local credentials to vault without changing them
 #   claude-token add-follower NAME         pair + install isolated `claude-NAME`
+#   claude-token install-follower-wrapper NAME  repair `claude-NAME` without re-pairing
 #   claude-token run-follower NAME [...]   run an isolated named follower
 #   claude-token run [claude args...]      follower launcher: freshen store, exec claude
 #   claude-token install-wrapper           make plain `claude` run via `claude-token run`
@@ -35,7 +36,7 @@
 # refresh token. Legacy vault-managed handoff remains explicit and available.
 
 set -euo pipefail
-VERSION="2.5.5"
+VERSION="2.5.6"
 CLAUDE_TOKEN_REAL_HOME="${CLAUDE_TOKEN_REAL_HOME:-$HOME}"
 
 CLIENT_ID="9d1c250a-e61b-44d9-88ed-5944d1962f5e"
@@ -848,6 +849,12 @@ cmd_add_follower() { # profile
     cmd_install_follower_wrapper "$p"
     say "named follower ready: claude-$p"
 }
+cmd_reinstall_follower_wrapper() { # profile
+    local p="${1:-}"
+    use_follower_context "$p"
+    [ -f "$CONFIG_FILE" ] || die "follower '$p' is not paired (run: claude-token add-follower $p)"
+    cmd_install_follower_wrapper "$p"
+}
 cmd_run_follower() { # profile [claude args...]
     local p="${1:-}"; shift || true
     use_follower_context "$p"
@@ -965,6 +972,7 @@ case "$1" in
     status)  cmd_status;;
     pair|setup) shift; while [ $# -gt 0 ]; do case "$1" in --user|-u) CODEX_USER="$2"; shift 2;; --owner|--no-wrapper) PAIR_MODE=owner; shift;; --follower) PAIR_MODE=follower; shift;; *) CODEX_USER="$1"; shift;; esac; done; cmd_pair;;
     add-follower) shift; [ $# -eq 1 ] || die "add-follower: specify one profile name"; cmd_add_follower "$1";;
+    install-follower-wrapper) shift; [ $# -eq 1 ] || die "install-follower-wrapper: specify one profile name"; cmd_reinstall_follower_wrapper "$1";;
     run-follower) shift; cmd_run_follower "$@";;
     login)   shift; cmd_login "$@";;
     run)     shift; cmd_run "$@";;

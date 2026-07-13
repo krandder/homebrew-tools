@@ -89,6 +89,17 @@ run_token run hello
 [ "$(sed -n '1p' "$TEST_OUTPUT")" = unset ]
 [ ! -e "$CURL_CALLED" ]
 
+# Check distinguishes a locally recoverable owner from an unusable stale follower.
+printf '{"claudeAiOauth":{"accessToken":"stale","refreshToken":"real-refresh-token","expiresAt":1}}\n' > "$HOME/.claude/.credentials.json"
+run_token check > "$HOME/check"
+grep -q "needs native refresh" "$HOME/check"
+printf '{"claudeAiOauth":{"accessToken":"stale","refreshToken":"__follower_no_refresh__","expiresAt":1}}\n' > "$HOME/.claude/.credentials.json"
+if run_token check > "$HOME/check"; then
+    echo "expected stale follower check to fail" >&2
+    exit 1
+fi
+grep -q "owner must sync fresh credentials" "$HOME/check"
+
 # Credential reality wins even if follower mode was configured accidentally.
 new_home follower-with-owner 'mode=follower\n'
 write_creds real-refresh-token

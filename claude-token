@@ -35,7 +35,7 @@
 # refresh token. Legacy vault-managed handoff remains explicit and available.
 
 set -euo pipefail
-VERSION="2.5.4"
+VERSION="2.5.5"
 CLAUDE_TOKEN_REAL_HOME="${CLAUDE_TOKEN_REAL_HOME:-$HOME}"
 
 CLIENT_ID="9d1c250a-e61b-44d9-88ed-5944d1962f5e"
@@ -598,13 +598,19 @@ if missing:
     sys.exit(1)
 
 exp = oauth.get("expiresAt") or 0
-ttl = ""
 try:
-    hours = (float(exp) / 1000 - time.time()) / 3600
-    ttl = f", expires in {hours:.1f}h" if exp else ""
+    seconds = float(exp) / 1000 - time.time()
 except Exception:
-    pass
-mode = "sentinel refreshToken (follower)" if refresh == sentinel else "refreshToken present"
+    seconds = -1
+follower = refresh == sentinel or refresh.startswith("vlt:")
+if seconds <= 60:
+    if follower:
+        print("stale: follower access token expired; the owner must sync fresh credentials to Farol")
+        sys.exit(1)
+    print("ok: owner refreshToken present; access token needs native refresh (run plain claude)")
+    sys.exit(0)
+ttl = f", expires in {seconds / 3600:.1f}h"
+mode = "sentinel refreshToken (follower)" if follower else "owner refreshToken present"
 print(f"ok: valid JSON, accessToken present, {mode}{ttl}")
 ' "$SENTINEL_RT"
 }

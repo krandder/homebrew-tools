@@ -226,6 +226,8 @@ for profile in kas juana; do
     mkdir -p "$HOME/.claude-token/followers/$profile"
     printf 'user=%s\nurl=https://vault.invalid\ntoken=%s-token\nmode=follower\n' "$profile" "$profile" > "$HOME/.claude-token/followers/$profile/config"
 done
+mkdir -p "$HOME/.claude-profiles/kas/.claude"
+printf '{"theme":"dark","hasCompletedOnboarding":false}\n' > "$HOME/.claude-profiles/kas/.claude/.claude.json"
 ANTHROPIC_API_KEY=stale-api-key ANTHROPIC_AUTH_TOKEN=stale-shell-token CLAUDE_CODE_OAUTH_TOKEN=stale-shell-token
 export ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN CLAUDE_CODE_OAUTH_TOKEN
 
@@ -238,6 +240,12 @@ run_token run-follower kas hello
 [ "$(sed -n '4p' "$TEST_OUTPUT")" = unset ]
 [ "$(sed -n '5p' "$TEST_OUTPUT")" = unset ]
 [ "$(sed -n '6p' "$TEST_OUTPUT")" = "$HOME/.claude-profiles/kas/.claude" ]
+python3 - "$HOME/.claude-profiles/kas/.claude/.claude.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["hasCompletedOnboarding"] is True
+assert d["theme"] == "dark"
+PY
 [ ! -e "$SECURITY_CALLED" ]
 
 CURL_RESPONSE="$HOME/juana.json"; export CURL_RESPONSE

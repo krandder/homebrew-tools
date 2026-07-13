@@ -35,7 +35,7 @@
 # refresh token. Legacy vault-managed handoff remains explicit and available.
 
 set -euo pipefail
-VERSION="2.5.3"
+VERSION="2.5.4"
 CLAUDE_TOKEN_REAL_HOME="${CLAUDE_TOKEN_REAL_HOME:-$HOME}"
 
 CLIENT_ID="9d1c250a-e61b-44d9-88ed-5944d1962f5e"
@@ -150,6 +150,34 @@ use_follower_context() { # profile -> isolated config/runtime globals
     unset CLAUDE_VAULT_TOKEN CODEX_VAULT_TOKEN
     configured_leader="$(awk -F= '/^leader=/{print $2;exit}' "$CONFIG_FILE" 2>/dev/null || true)"
     [ -z "$configured_leader" ] || LEADER_HOST="$configured_leader"
+}
+complete_follower_onboarding() {
+    local state="$CLAUDE_PROFILE_HOME/.claude/.claude.json"
+    python3 - "$state" <<'PY'
+import json, os, sys, tempfile
+
+path = sys.argv[1]
+try:
+    with open(path) as fh:
+        state = json.load(fh)
+except FileNotFoundError:
+    state = {}
+if not isinstance(state, dict):
+    raise SystemExit("claude-token: invalid named follower state")
+if state.get("hasCompletedOnboarding") is True:
+    raise SystemExit(0)
+state["hasCompletedOnboarding"] = True
+fd, tmp = tempfile.mkstemp(prefix=".claude-state-", dir=os.path.dirname(path))
+try:
+    with os.fdopen(fd, "w") as fh:
+        json.dump(state, fh)
+        fh.write("\n")
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, path)
+finally:
+    if os.path.exists(tmp):
+        os.unlink(tmp)
+PY
 }
 resolve_claude_bin() {
     local cands="${CLAUDE_REAL_BIN:-}:$HOME/bin/claude.real:$HOME/.local/bin/claude:/opt/homebrew/bin/claude:/usr/local/bin/claude:$(command -v claude 2>/dev/null)" d
@@ -752,6 +780,7 @@ cmd_run() { # [claude args...]  — follower launcher; falls back to normal clau
         if [ "$isolated" = 1 ]; then
             unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN CLAUDE_CODE_OAUTH_TOKEN
             mkdir -p "$CLAUDE_PROFILE_HOME/.claude"
+            complete_follower_onboarding
             export HOME="$CLAUDE_PROFILE_HOME"
             export CLAUDE_CONFIG_DIR="$CLAUDE_PROFILE_HOME/.claude"
         fi

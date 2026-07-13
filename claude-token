@@ -37,7 +37,7 @@
 # refresh token. Legacy vault-managed handoff remains explicit and available.
 
 set -euo pipefail
-VERSION="2.5.7"
+VERSION="2.5.8"
 CLAUDE_TOKEN_REAL_HOME="${CLAUDE_TOKEN_REAL_HOME:-$HOME}"
 
 CLIENT_ID="9d1c250a-e61b-44d9-88ed-5944d1962f5e"
@@ -173,6 +173,62 @@ fd, tmp = tempfile.mkstemp(prefix=".claude-state-", dir=os.path.dirname(path))
 try:
     with os.fdopen(fd, "w") as fh:
         json.dump(state, fh)
+        fh.write("\n")
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, path)
+finally:
+    if os.path.exists(tmp):
+        os.unlink(tmp)
+PY
+}
+configure_follower_permissions() { # profile
+    local profile="$1" answer="${CLAUDE_TOKEN_FULL_PERMISSIONS:-}" mode
+    if [ -z "$answer" ]; then
+        [ -t 0 ] || return 0
+        printf "Give claude-%s full permissions (equivalent to --dangerously-skip-permissions)? [y/N] " "$profile" >&2
+        IFS= read -r answer
+    fi
+    case "$answer" in y|Y|yes|YES) mode=full ;; *) mode=normal ;; esac
+    local settings="$CLAUDE_PROFILE_HOME/.claude/settings.json"
+    [ "$mode" = full ] || [ -f "$settings" ] || return 0
+    mkdir -p "$(dirname "$settings")"
+    python3 - "$settings" "$mode" <<'PY'
+import json, os, sys, tempfile
+
+path, mode = sys.argv[1:]
+try:
+    with open(path) as fh:
+        settings = json.load(fh)
+except FileNotFoundError:
+    settings = {}
+if not isinstance(settings, dict):
+    raise SystemExit("claude-token: invalid named follower settings")
+permissions = settings.get("permissions", {})
+if not isinstance(permissions, dict):
+    raise SystemExit("claude-token: invalid named follower permissions")
+wanted = {
+    "defaultMode": "bypassPermissions",
+    "bypassPermissionsModeAccepted": True,
+    "skipDangerousModePermissionPrompt": True,
+}
+before = json.dumps(settings, sort_keys=True)
+if mode == "full":
+    settings.setdefault("permissions", {}).update(wanted)
+    settings["bypassPermissionsModeAccepted"] = True
+    settings["skipDangerousModePermissionPrompt"] = True
+else:
+    if permissions.get("defaultMode") == "bypassPermissions":
+        permissions.pop("defaultMode")
+    permissions.pop("bypassPermissionsModeAccepted", None)
+    permissions.pop("skipDangerousModePermissionPrompt", None)
+    settings.pop("bypassPermissionsModeAccepted", None)
+    settings.pop("skipDangerousModePermissionPrompt", None)
+if json.dumps(settings, sort_keys=True) == before:
+    raise SystemExit(0)
+fd, tmp = tempfile.mkstemp(prefix=".claude-settings-", dir=os.path.dirname(path))
+try:
+    with os.fdopen(fd, "w") as fh:
+        json.dump(settings, fh, indent=2)
         fh.write("\n")
     os.chmod(tmp, 0o600)
     os.replace(tmp, path)
@@ -862,6 +918,7 @@ cmd_add_follower() { # profile
     PAIR_MODE=follower
     PAIR_SKIP_WRAPPER=1
     cmd_pair
+    configure_follower_permissions "$p"
     cmd_install_follower_wrapper "$p"
     say "named follower ready: claude-$p"
 }
@@ -869,6 +926,7 @@ cmd_reinstall_follower_wrapper() { # profile
     local p="${1:-}"
     use_follower_context "$p"
     [ -f "$CONFIG_FILE" ] || die "follower '$p' is not paired (run: claude-token add-follower $p)"
+    configure_follower_permissions "$p"
     cmd_install_follower_wrapper "$p"
 }
 cmd_repair_follower_wrappers() {

@@ -239,6 +239,7 @@ for profile in kas juana; do
 done
 mkdir -p "$HOME/.claude-profiles/kas/.claude"
 printf '{"theme":"dark","hasCompletedOnboarding":false}\n' > "$HOME/.claude-profiles/kas/.claude/.claude.json"
+printf '{"theme":"dark","permissions":{"allow":["Read"]}}\n' > "$HOME/.claude-profiles/kas/.claude/settings.json"
 ANTHROPIC_API_KEY=stale-api-key ANTHROPIC_AUTH_TOKEN=stale-shell-token CLAUDE_CODE_OAUTH_TOKEN=stale-shell-token
 export ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN CLAUDE_CODE_OAUTH_TOKEN
 
@@ -256,6 +257,13 @@ import json, sys
 d = json.load(open(sys.argv[1]))
 assert d["hasCompletedOnboarding"] is True
 assert d["theme"] == "dark"
+PY
+python3 - "$HOME/.claude-profiles/kas/.claude/settings.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["theme"] == "dark"
+assert d["permissions"]["allow"] == ["Read"]
+assert "defaultMode" not in d["permissions"]
 PY
 [ ! -e "$SECURITY_CALLED" ]
 
@@ -284,11 +292,24 @@ printf 'keep-plain-claude\n' > "$HOME/bin/claude"
 before="$(shasum -a 256 "$HOME/bin/claude")"
 CURL_RESPONSE="$HOME/approved.json"; export CURL_RESPONSE
 printf '{"status":"approved","token":"paired-token","user":"kas"}\n' > "$CURL_RESPONSE"
-run_token add-follower kas >/dev/null
+mkdir -p "$HOME/.claude-profiles/kas/.claude"
+printf '{"theme":"dark","permissions":{"allow":["Read"]}}\n' > "$HOME/.claude-profiles/kas/.claude/settings.json"
+CLAUDE_TOKEN_FULL_PERMISSIONS=yes run_token add-follower kas >/dev/null
 [ "$before" = "$(shasum -a 256 "$HOME/bin/claude")" ]
 [ -x "$HOME/bin/claude-kas" ]
 grep -q 'run-follower "kas"' "$HOME/bin/claude-kas"
 grep -q '^mode=follower$' "$HOME/.claude-token/followers/kas/config"
+python3 - "$HOME/.claude-profiles/kas/.claude/settings.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["theme"] == "dark"
+assert d["permissions"]["allow"] == ["Read"]
+assert d["permissions"]["defaultMode"] == "bypassPermissions"
+assert d["permissions"]["bypassPermissionsModeAccepted"] is True
+assert d["permissions"]["skipDangerousModePermissionPrompt"] is True
+assert d["bypassPermissionsModeAccepted"] is True
+assert d["skipDangerousModePermissionPrompt"] is True
+PY
 [ ! -e "$SECURITY_CALLED" ]
 WRAPPER_OUTPUT="$HOME/wrapper-output"; export WRAPPER_OUTPUT
 cat > "$TMP/bin/claude-token" <<'SH'
@@ -302,10 +323,18 @@ PATH="$TMP/bin:$PATH" "$HOME/bin/claude-kas" hello
 # An existing pairing can repair a stale wrapper without pairing again.
 printf 'legacy wrapper\n' > "$HOME/bin/claude-kas"
 rm -f "$CURL_CALLED"
-PATH="$TMP/bin:$PATH" run_token install-follower-wrapper kas >/dev/null
+CLAUDE_TOKEN_FULL_PERMISSIONS=no PATH="$TMP/bin:$PATH" run_token install-follower-wrapper kas >/dev/null
 grep -q 'run-follower "kas"' "$HOME/bin/claude-kas"
 [ -e "$HOME/bin/claude-kas.pre-claude-token" ]
 [ ! -e "$CURL_CALLED" ]
+python3 - "$HOME/.claude-profiles/kas/.claude/settings.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["theme"] == "dark"
+assert d["permissions"]["allow"] == ["Read"]
+assert "defaultMode" not in d["permissions"]
+assert "bypassPermissionsModeAccepted" not in d
+PY
 
 mkdir -p "$HOME/legacy-bin"
 printf 'path-preferred legacy wrapper\n' > "$HOME/legacy-bin/claude-kas"

@@ -307,6 +307,19 @@ grep -q 'run-follower "kas"' "$HOME/bin/claude-kas"
 [ -e "$HOME/bin/claude-kas.pre-claude-token" ]
 [ ! -e "$CURL_CALLED" ]
 
+mkdir -p "$HOME/legacy-bin"
+printf 'path-preferred legacy wrapper\n' > "$HOME/legacy-bin/claude-kas"
+chmod +x "$HOME/legacy-bin/claude-kas"
+CLAUDE_TOKEN_WRAPPER_DIR="" PATH="$HOME/legacy-bin:$PATH" run_token install-follower-wrapper kas >/dev/null
+grep -q 'run-follower "kas"' "$HOME/legacy-bin/claude-kas"
+[ -e "$HOME/legacy-bin/claude-kas.pre-claude-token" ]
+
+printf 'stale generated wrapper\n' > "$HOME/bin/claude-kas"
+rm -f "$CURL_CALLED"
+run_token repair-follower-wrappers >/dev/null
+grep -q 'run-follower "kas"' "$HOME/bin/claude-kas"
+[ ! -e "$CURL_CALLED" ]
+
 # Direct operator commands select the same canonical store as ai-vault-http,
 # while installations with only the legacy directory remain compatible.
 DEFAULT_HOME="$TMP/default-vault-home"

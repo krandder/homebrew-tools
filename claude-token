@@ -37,13 +37,13 @@
 # refresh token. Legacy vault-managed handoff remains explicit and available.
 
 set -euo pipefail
-VERSION="2.5.14"
+VERSION="2.5.15"
 CLAUDE_TOKEN_REAL_HOME="${CLAUDE_TOKEN_REAL_HOME:-$HOME}"
 
 CLIENT_ID="9d1c250a-e61b-44d9-88ed-5944d1962f5e"
-TOKEN_EP="https://platform.claude.com/v1/oauth/token"
+TOKEN_EP="${CLAUDE_TOKEN_EP:-https://platform.claude.com/v1/oauth/token}"
 DEFAULT_SCOPE="user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload"
-PROFILE_EP="https://api.anthropic.com/api/oauth/profile"
+PROFILE_EP="${CLAUDE_PROFILE_EP:-https://api.anthropic.com/api/oauth/profile}"
 SENTINEL_RT="__follower_no_refresh__"
 BLACKHOLE_URL="http://127.0.0.1:9/oauth/token"
 
@@ -365,6 +365,7 @@ publish_profile() { # profile
     needs_refresh="$(profile_needs_refresh "$af")"
     if [ "$needs_refresh" = "yes" ]; then
         [ "$(profile_refresh_authority "$af")" != owner ] \
+            || [ "${CLAUDE_TOKEN_VAULT_AUTHORITY:-no}" = yes ] \
             || die "publish: '$p' is owner-managed; the owner must sync fresh credentials"
         local rt resp lock rc
         rt="$(python3 -c 'import json,sys;o=json.load(open(sys.argv[1]));o=o.get("claudeAiOauth",o);print(o.get("refreshToken",""))' "$af")"
@@ -393,13 +394,15 @@ publish_profile() { # profile
         profile_status="$(printf '%s' "$resp" | python3 -c 'import json,sys; print((json.load(sys.stdin).get("_profile_fetch") or {}).get("status","unknown"))' 2>/dev/null || echo unknown)"
         log_event profile "$p" "$profile_status" "api/oauth/profile"
         set +e
-        python3 - "$af" "$sf" "$p" "$resp" "$SENTINEL_RT" "$LEADER_HOST" <<'PY'
+        python3 - "$af" "$sf" "$p" "$resp" "$SENTINEL_RT" "$LEADER_HOST" "${CLAUDE_TOKEN_VAULT_AUTHORITY:-no}" <<'PY'
 import json,sys,os,time,datetime
-af,sf,profile,resp,sentinel,leader=sys.argv[1:7]
+af,sf,profile,resp,sentinel,leader,vault_authority=sys.argv[1:8]
 r=json.loads(resp); ts=int(time.time()*1000)
 d=json.load(open(af)); o=d.get("claudeAiOauth",d)
 o["accessToken"]=r["access_token"]; o["refreshToken"]=r["refresh_token"]
 o["expiresAt"]=ts+int(r.get("expires_in",28800))*1000
+if vault_authority == "yes":
+    d.setdefault("claudeTokenSync", {})["refreshAuthority"] = "vault"
 if r.get("scope"):
     o["scopes"]=[s for s in str(r.get("scope")).split(" ") if s]
 
@@ -946,6 +949,10 @@ PY
 
 cmd_maintain() {
     local p mode local_mode status=ok config
+    if [ "${CLAUDE_TOKEN_VAULT_AUTHORITY:-no}" = yes ]; then
+        ALL=1 CLAUDE_TOKEN_MODE=auto cmd_publish
+        return
+    fi
     p="$(config_user)"
     if [ -z "$p" ]; then
         config="$(find "${CLAUDE_FOLLOWERS_DIR:-$CLAUDE_TOKEN_REAL_HOME/.claude-token/followers}" -mindepth 2 -maxdepth 2 -name config 2>/dev/null | sort | head -1)"

@@ -497,6 +497,17 @@ if HOME="$VAULT" CLAUDE_PROFILES_DIR="$VAULT/profiles" CLAUDE_SHARED_DIR="$VAULT
 fi
 grep -q "owner-managed" "$VAULT/publish-err"
 
+# An explicitly designated central vault may pass the owner guard and refresh.
+if CLAUDE_TOKEN_VAULT_AUTHORITY=yes CLAUDE_TOKEN_EP=http://127.0.0.1:9 HOME="$VAULT" CLAUDE_PROFILES_DIR="$VAULT/profiles" CLAUDE_SHARED_DIR="$VAULT/shared" CLAUDE_REAL_BIN="$TMP/bin/claude-real" "$ROOT/claude-token" publish --profile owner-a >"$VAULT/takeover-out" 2>"$VAULT/takeover-err"; then
+    echo "expected the fake refresh endpoint to fail" >&2
+    exit 1
+fi
+grep -q "refresh failed" "$VAULT/takeover-err"
+if grep -q "owner-managed" "$VAULT/takeover-err"; then
+    echo "vault authority did not pass the owner guard" >&2
+    exit 1
+fi
+
 # Explicit owner mode refuses publish even for an unmarked local credential.
 new_home owner-publish 'mode=owner\n'
 mkdir -p "$HOME/.claude-profiles/owner-a/.claude"

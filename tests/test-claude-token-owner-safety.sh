@@ -40,6 +40,10 @@ else
     cat > "$CRONTAB_FILE"
 fi
 SH
+cat > "$TMP/bin/launchctl" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
 cat > "$TMP/bin/security" <<'SH'
 #!/usr/bin/env bash
 [ -z "${SECURITY_CALLED:-}" ] || printf called >> "$SECURITY_CALLED"
@@ -58,9 +62,9 @@ new_home() {
     TEST_OUTPUT="$HOME/result" CURL_CALLED="$HOME/curl-called" CURL_BODY="$HOME/curl-body" SECURITY_CALLED="$HOME/security-called" CRONTAB_FILE="$HOME/crontab"
     CURL_STATUS=0 CURL_RESPONSE=""
     CLAUDE_LOGIN_STATUS=0 CLAUDE_LOGIN_CREDS=""
-    FAKE_UNAME=Linux CLAUDE_TOKEN_WRAPPER_DIR="$HOME/bin"
+    FAKE_UNAME=Linux CLAUDE_TOKEN_WRAPPER_DIR="$HOME/bin" CLAUDE_TOKEN_MAINTENANCE_DIR="$HOME/LaunchAgents"
     unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN CLAUDE_CODE_OAUTH_TOKEN CLAUDE_CONFIG_DIR
-    export TEST_OUTPUT CURL_CALLED CURL_BODY SECURITY_CALLED CRONTAB_FILE CURL_STATUS CURL_RESPONSE CLAUDE_LOGIN_STATUS CLAUDE_LOGIN_CREDS FAKE_UNAME CLAUDE_TOKEN_WRAPPER_DIR
+    export TEST_OUTPUT CURL_CALLED CURL_BODY SECURITY_CALLED CRONTAB_FILE CURL_STATUS CURL_RESPONSE CLAUDE_LOGIN_STATUS CLAUDE_LOGIN_CREDS FAKE_UNAME CLAUDE_TOKEN_WRAPPER_DIR CLAUDE_TOKEN_MAINTENANCE_DIR
     printf 'user=adriana\nurl=https://vault.invalid\ntoken=test-token\n' > "$HOME/.claude-token/config"
     printf '%b' "${2:-}" >> "$HOME/.claude-token/config"
 }
@@ -303,7 +307,7 @@ python3 - "$CURL_BODY" <<'PY'
 import json, sys
 d = json.load(open(sys.argv[1]))
 assert d["tool"] == "claude-token"
-assert d["version"] == "2.5.12"
+assert d["version"] == "2.5.13"
 assert d["profile"] == "adriana"
 assert d["mode"] == "owner"
 assert d["status"] == "synced"

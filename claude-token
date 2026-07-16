@@ -37,7 +37,7 @@
 # refresh token. Legacy vault-managed handoff remains explicit and available.
 
 set -euo pipefail
-VERSION="2.5.12"
+VERSION="2.5.13"
 CLAUDE_TOKEN_REAL_HOME="${CLAUDE_TOKEN_REAL_HOME:-$HOME}"
 
 CLIENT_ID="9d1c250a-e61b-44d9-88ed-5944d1962f5e"
@@ -947,16 +947,37 @@ cmd_maintain() {
 }
 
 cmd_install_maintenance() {
-    local bin dir minute line current
-    need_cmd crontab
+    local bin dir minute line current plist_dir plist label domain
     bin="$(command -v claude-token 2>/dev/null || true)"
     [ -n "$bin" ] || bin="$0"
     dir="$(dirname "$bin")"
+    if is_mac; then
+        need_cmd launchctl
+        plist_dir="${CLAUDE_TOKEN_MAINTENANCE_DIR:-$CLAUDE_TOKEN_REAL_HOME/Library/LaunchAgents}"
+        plist="$plist_dir/com.krandder.claude-token-maintain.plist"
+        label="com.krandder.claude-token-maintain"
+        domain="gui/$(id -u)"
+        mkdir -p "$plist_dir" "$CLAUDE_TOKEN_REAL_HOME/.claude-token/logs"
+        python3 - "$plist" "$label" "$bin" "$dir:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin" "$CLAUDE_TOKEN_REAL_HOME/.claude-token/logs/maintenance.log" <<'PY'
+import os, plistlib, sys
+path, label, binary, path_env, log = sys.argv[1:]
+data = {"Label": label, "ProgramArguments": [binary, "maintain"],
+        "EnvironmentVariables": {"PATH": path_env}, "RunAtLoad": True,
+        "StartInterval": 7200, "StandardOutPath": log, "StandardErrorPath": log}
+with open(path, "wb") as fh: plistlib.dump(data, fh)
+os.chmod(path, 0o644)
+PY
+        launchctl bootout "$domain/$label" >/dev/null 2>&1 || true
+        launchctl bootstrap "$domain" "$plist"
+        say "automatic sync/heartbeat installed with launchd (every 2 hours)"
+        return
+    fi
+    need_cmd crontab
     minute="$(printf '%s' "$(short_host)" | cksum | awk '{print $1 % 60}')"
     line="$minute */2 * * * PATH=$dir:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin $bin maintain >/dev/null 2>&1 # claude-token-maintain"
     current="$(crontab -l 2>/dev/null | grep -v '# claude-token-maintain$' || true)"
     { [ -z "$current" ] || printf '%s\n' "$current"; printf '%s\n' "$line"; } | crontab -
-    say "automatic sync/heartbeat installed (every 2 hours)"
+    say "automatic sync/heartbeat installed with cron (every 2 hours)"
 }
 
 cmd_setup_owner() { # profile

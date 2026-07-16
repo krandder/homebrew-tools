@@ -307,7 +307,7 @@ python3 - "$CURL_BODY" <<'PY'
 import json, sys
 d = json.load(open(sys.argv[1]))
 assert d["tool"] == "claude-token"
-assert d["version"] == "2.5.13"
+assert d["version"] == "2.5.14"
 assert d["profile"] == "owner-a"
 assert d["mode"] == "owner"
 assert d["status"] == "synced"
@@ -399,6 +399,19 @@ rm -f "$CURL_CALLED"
 run_token repair-follower-wrappers >/dev/null
 grep -q 'run-follower "operator"' "$HOME/bin/claude-operator"
 [ ! -e "$CURL_CALLED" ]
+
+# The install-time full-permissions choice belongs to the named follower and
+# is applied on every launch without a profile-specific Claude HOME.
+new_home named-full-permissions
+mkdir -p "$HOME/.claude-token/followers/operator"
+printf 'user=operator\nurl=https://vault.invalid\ntoken=operator-token\nmode=follower\n' > "$HOME/.claude-token/followers/operator/config"
+CLAUDE_TOKEN_FULL_PERMISSIONS=yes run_token install-follower-wrapper operator >/dev/null
+grep -q '^full_permissions=yes$' "$HOME/.claude-token/followers/operator/config"
+CURL_RESPONSE="$HOME/operator.json"; export CURL_RESPONSE
+write_shared operator-fresh-token 4102444800000 "$CURL_RESPONSE"
+run_token run-follower operator hello
+[ "$(sed -n '2p' "$TEST_OUTPUT")" = "--dangerously-skip-permissions hello" ]
+[ "$(sed -n '3p' "$TEST_OUTPUT")" = "$HOME" ]
 
 # Direct operator commands select the same canonical store as ai-vault-http,
 # while installations with only the legacy directory remain compatible.

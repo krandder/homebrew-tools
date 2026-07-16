@@ -53,10 +53,14 @@ claude-token check | --diagnose | --version
 
 Owner-machine onboarding (Owner A/Owner B):
 ```bash
-claude-token setup-owner NAME
+curl -fsSL https://raw.githubusercontent.com/krandder/homebrew-tools/main/setup-claude-token | bash -s -- NAME
 # After pairing approval and browser login, use plain Claude normally:
 claude
 ```
+
+The bootstrap is the true one-shot path: it installs or upgrades Homebrew as
+needed, then continues in the same process through pairing, browser login,
+initial sync, and background maintenance.
 
 `setup-owner` installs a two-hour background maintenance entry. It safely syncs
 the current owner credentials without changing them and sends a small heartbeat

@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+profile="${1:-}"
+case "$profile" in ""|*[!A-Za-z0-9._-]*) echo "usage: setup-claude-token PROFILE" >&2; exit 2;; esac
+
+formula=krandder/tools/claude-token
+brew update
+if brew list --versions "$formula" >/dev/null 2>&1; then
+    brew upgrade "$formula"
+else
+    brew install "$formula"
+fi
+exec claude-token setup-owner "$profile"

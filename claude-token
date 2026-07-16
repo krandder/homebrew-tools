@@ -23,7 +23,7 @@
 #   claude-token publish [--profile P|--all]  LEADER: refresh + publish follower token(s)
 #   claude-token pull   [--profile P]      FOLLOWER: replace local store with published credentials
 #   claude-token push   [--profile P]      LEGACY HANDOFF: sync, then demote local credentials
-#   claude-token push-logs                 upload local redacted debug logs to the vault
+#   claude-token setup-owner NAME          one-command owner login + automatic sync
 #   claude-token check | --diagnose | --version | --help
 #
 # Claude store: macOS Keychain ("Claude Code-credentials") on Darwin;
@@ -37,7 +37,7 @@
 # refresh token. Legacy vault-managed handoff remains explicit and available.
 
 set -euo pipefail
-VERSION="2.5.11"
+VERSION="2.5.12"
 CLAUDE_TOKEN_REAL_HOME="${CLAUDE_TOKEN_REAL_HOME:-$HOME}"
 
 CLIENT_ID="9d1c250a-e61b-44d9-88ed-5944d1962f5e"
@@ -104,12 +104,13 @@ ssh_vault() {
     else ssh "$LEADER_HOST" "$@"; fi
 }
 vault_http() { # method path [data_file]
-    local method="$1" path="$2" data="${3:-}" url tok
+    local method="$1" path="$2" data="${3:-}" url tok host
     url="$(vault_url)"; tok="$(vault_token)"
+    host="$(short_host | tr -cd 'A-Za-z0-9._-')"
     [ -n "$url" ] || die "no vault URL (run 'claude-token set-url <url>')"
     [ -n "$tok" ] || die "no vault token (ask operator, then 'claude-token set-token <token>')"
-    if [ -n "$data" ]; then curl -fsS -X "$method" "$url$path" -H "Authorization: Bearer $tok" --data-binary @"$data";
-    else curl -fsS -X "$method" "$url$path" -H "Authorization: Bearer $tok"; fi
+    if [ -n "$data" ]; then curl -fsS -X "$method" "$url$path" -H "Authorization: Bearer $tok" -H "X-Claude-Token-Version: $VERSION" -H "X-Claude-Token-Host: $host" --data-binary @"$data";
+    else curl -fsS -X "$method" "$url$path" -H "Authorization: Bearer $tok" -H "X-Claude-Token-Version: $VERSION" -H "X-Claude-Token-Host: $host"; fi
 }
 config_user() {
     if [ -n "${CODEX_USER:-}" ]; then echo "$CODEX_USER"
@@ -807,6 +808,7 @@ cmd_install_follower_wrapper() { # profile
     fi
     write_follower_wrapper "$p" "$w"
     remove_shadowing_aliases "$p"
+    cmd_install_maintenance
     case ":$PATH:" in *":$dir:"*) ;; *) say "add $dir to PATH before running claude-$p" ;; esac
 }
 write_follower_wrapper() { # profile path
@@ -911,6 +913,68 @@ cmd_sync() {
     sync_profile "$p"
 }
 
+cmd_heartbeat() { # [status]
+    local tmp status="${1:-ok}"
+    tmp="$(mktemp)"
+    python3 - "$VERSION" "$(short_host)" "$(config_user 2>/dev/null || true)" "$(config_mode)" "$status" > "$tmp" <<'PY'
+import datetime, json, sys
+version, host, user, mode, status = sys.argv[1:]
+print(json.dumps({"ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                  "tool": "claude-token", "version": version, "host": host,
+                  "profile": user, "mode": mode, "status": status}))
+PY
+    vault_http POST "/heartbeat/claude-token" "$tmp" >/dev/null
+    rm -f "$tmp"
+    log_event heartbeat "$(config_user 2>/dev/null || true)" ok "$status"
+}
+
+cmd_maintain() {
+    local p mode local_mode status=ok config
+    p="$(config_user)"
+    if [ -z "$p" ]; then
+        config="$(find "${CLAUDE_FOLLOWERS_DIR:-$CLAUDE_TOKEN_REAL_HOME/.claude-token/followers}" -mindepth 2 -maxdepth 2 -name config 2>/dev/null | sort | head -1)"
+        [ -n "$config" ] || die "maintain: no configured profile"
+        p="$(basename "$(dirname "$config")")"
+        use_follower_context "$p"
+    fi
+    mode="$(config_mode)"; local_mode="$(local_refresh_mode)"
+    if [ "$mode" = owner ] || [ "$local_mode" = owner ]; then
+        if sync_profile "$p" >/dev/null 2>&1; then status=synced; else status=sync-failed; fi
+    else
+        status=follower
+    fi
+    cmd_heartbeat "$status"
+}
+
+cmd_install_maintenance() {
+    local bin dir minute line current
+    need_cmd crontab
+    bin="$(command -v claude-token 2>/dev/null || true)"
+    [ -n "$bin" ] || bin="$0"
+    dir="$(dirname "$bin")"
+    minute="$(printf '%s' "$(short_host)" | cksum | awk '{print $1 % 60}')"
+    line="$minute */2 * * * PATH=$dir:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin $bin maintain >/dev/null 2>&1 # claude-token-maintain"
+    current="$(crontab -l 2>/dev/null | grep -v '# claude-token-maintain$' || true)"
+    { [ -z "$current" ] || printf '%s\n' "$current"; printf '%s\n' "$line"; } | crontab -
+    say "automatic sync/heartbeat installed (every 2 hours)"
+}
+
+cmd_setup_owner() { # profile
+    local p="${1:-}"
+    validate_profile_name "$p"
+    CODEX_USER="$p"
+    if [ -z "$(vault_token 2>/dev/null || true)" ]; then
+        PAIR_MODE=owner cmd_pair
+    else
+        set_config user "$p"
+        set_config mode owner
+    fi
+    cmd_login
+    cmd_install_maintenance
+    cmd_heartbeat setup-complete
+    say "setup complete; use normal 'claude' from now on"
+}
+
 # One-shot bootstrap to "go live" on this machine: push the local real refresh
 # token to the leader (making the leader the sole owner), then install the
 # wrapper so plain `claude` runs transparently via the broker. After this, the
@@ -1004,6 +1068,10 @@ case "$1" in
     pull)    shift; while [ $# -gt 0 ]; do case "$1" in --profile|-p) PROFILE="$2"; shift 2;; *) PROFILE="$1"; shift;; esac; done; cmd_pull;;
     push)    shift; while [ $# -gt 0 ]; do case "$1" in --profile|-p) PROFILE="$2"; shift 2;; *) PROFILE="$1"; shift;; esac; done; cmd_push;;
     sync)    shift; while [ $# -gt 0 ]; do case "$1" in --profile|-p) PROFILE="$2"; shift 2;; *) PROFILE="$1"; shift;; esac; done; cmd_sync;;
+    heartbeat) shift; cmd_heartbeat "${1:-manual}";;
+    maintain) shift; cmd_maintain;;
+    install-maintenance) shift; [ $# -eq 0 ] || die "install-maintenance: no arguments expected"; cmd_install_maintenance;;
+    setup-owner) shift; [ $# -eq 1 ] || die "setup-owner: specify one profile name"; cmd_setup_owner "$1";;
     push-logs|logs-push) shift; cmd_push_logs "$@";;
     check)   cmd_check;;
     status)  cmd_status;;

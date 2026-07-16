@@ -27,10 +27,18 @@ cat > "$TMP/bin/curl" <<'SH'
 #!/usr/bin/env bash
 printf called >> "$CURL_CALLED"
 for arg in "$@"; do
-    [ "$arg" = @/dev/stdin ] && cat > "$CURL_BODY"
+    case "$arg" in @/dev/stdin) cat > "$CURL_BODY";; @*) cat "${arg#@}" > "$CURL_BODY";; esac
 done
 [ -n "${CURL_RESPONSE:-}" ] && cat "$CURL_RESPONSE"
 exit "${CURL_STATUS:-0}"
+SH
+cat > "$TMP/bin/crontab" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = -l ]; then
+    [ -f "$CRONTAB_FILE" ] && cat "$CRONTAB_FILE"
+else
+    cat > "$CRONTAB_FILE"
+fi
 SH
 cat > "$TMP/bin/security" <<'SH'
 #!/usr/bin/env bash
@@ -47,12 +55,12 @@ new_home() {
     HOME="$TMP/$1"
     export HOME
     mkdir -p "$HOME/.claude-token" "$HOME/.claude" "$HOME/shared/claude-tokens"
-    TEST_OUTPUT="$HOME/result" CURL_CALLED="$HOME/curl-called" CURL_BODY="$HOME/curl-body" SECURITY_CALLED="$HOME/security-called"
+    TEST_OUTPUT="$HOME/result" CURL_CALLED="$HOME/curl-called" CURL_BODY="$HOME/curl-body" SECURITY_CALLED="$HOME/security-called" CRONTAB_FILE="$HOME/crontab"
     CURL_STATUS=0 CURL_RESPONSE=""
     CLAUDE_LOGIN_STATUS=0 CLAUDE_LOGIN_CREDS=""
     FAKE_UNAME=Linux CLAUDE_TOKEN_WRAPPER_DIR="$HOME/bin"
     unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN CLAUDE_CODE_OAUTH_TOKEN CLAUDE_CONFIG_DIR
-    export TEST_OUTPUT CURL_CALLED CURL_BODY SECURITY_CALLED CURL_STATUS CURL_RESPONSE CLAUDE_LOGIN_STATUS CLAUDE_LOGIN_CREDS FAKE_UNAME CLAUDE_TOKEN_WRAPPER_DIR
+    export TEST_OUTPUT CURL_CALLED CURL_BODY SECURITY_CALLED CRONTAB_FILE CURL_STATUS CURL_RESPONSE CLAUDE_LOGIN_STATUS CLAUDE_LOGIN_CREDS FAKE_UNAME CLAUDE_TOKEN_WRAPPER_DIR
     printf 'user=adriana\nurl=https://vault.invalid\ntoken=test-token\n' > "$HOME/.claude-token/config"
     printf '%b' "${2:-}" >> "$HOME/.claude-token/config"
 }
@@ -282,6 +290,28 @@ fi
 grep -q "cannot change login state" "$HOME/stderr"
 [ ! -e "$TEST_OUTPUT" ]
 [ ! -e "$SECURITY_CALLED" ]
+
+# One installed maintenance entry safely syncs owner credentials and reports
+# the exact client version/host without changing the local refresh token.
+new_home maintenance 'mode=owner\n'
+write_creds real-refresh-token
+run_token install-maintenance >/dev/null
+grep -q 'claude-token-maintain$' "$CRONTAB_FILE"
+grep -q ' maintain ' "$CRONTAB_FILE"
+run_token maintain
+python3 - "$CURL_BODY" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["tool"] == "claude-token"
+assert d["version"] == "2.5.12"
+assert d["profile"] == "adriana"
+assert d["mode"] == "owner"
+assert d["status"] == "synced"
+PY
+python3 - "$HOME/.claude/.credentials.json" <<'PY'
+import json, sys
+assert json.load(open(sys.argv[1]))["claudeAiOauth"]["refreshToken"] == "real-refresh-token"
+PY
 
 # Pairing a named follower installs only claude-NAME and never inspects native
 # credentials or replaces an existing plain Claude command.

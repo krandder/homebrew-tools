@@ -41,6 +41,7 @@ claude-token pair --user NAME --owner     owner mode; leaves plain claude untouc
 claude-token pair --user NAME --follower  explicit follower mode; installs wrapper
 claude-token login                        native browser OAuth + best-effort sync
 claude-token sync [--profile P]           copy credentials; never changes local Claude
+claude-token setup-owner NAME             pair, login, sync, and install maintenance
 claude-token add-follower NAME            pair + install claude-NAME
 claude-token run-follower NAME [...]      run a named follower in normal HOME
 claude-token run [claude args...]         follower launcher (freshen store, exec claude)
@@ -52,11 +53,15 @@ claude-token check | --diagnose | --version
 
 Owner-machine onboarding (Adriana/Juana):
 ```bash
-claude-token pair --user NAME --owner
-claude-token login
-# Plain claude remains native. Re-run this safely whenever needed:
-claude-token sync --profile NAME
+claude-token setup-owner NAME
+# After pairing approval and browser login, use plain Claude normally:
+claude
 ```
+
+`setup-owner` installs a two-hour background maintenance entry. It safely syncs
+the current owner credentials without changing them and sends a small heartbeat
+containing client version, host, profile, role, and sync status. Direct future
+`claude auth login` and native refreshes therefore reach the vault automatically.
 
 Multiple follower identities can coexist without replacing plain `claude` or
 reading/writing its macOS Keychain entry:

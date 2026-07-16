@@ -37,7 +37,7 @@
 # refresh token. Legacy vault-managed handoff remains explicit and available.
 
 set -euo pipefail
-VERSION="2.5.8"
+VERSION="2.5.9"
 CLAUDE_TOKEN_REAL_HOME="${CLAUDE_TOKEN_REAL_HOME:-$HOME}"
 
 CLIENT_ID="9d1c250a-e61b-44d9-88ed-5944d1962f5e"
@@ -882,11 +882,15 @@ named_wrapper_dir() {
 cmd_install_follower_wrapper() { # profile
     local p="$1" dir w existing
     validate_profile_name "$p"
-    existing="$(command -v "claude-$p" 2>/dev/null || true)"
-    if [ -n "$existing" ] && [ -w "$(dirname "$existing")" ]; then
-        w="$existing"; dir="$(dirname "$w")"
-    else
+    if [ -n "${CLAUDE_TOKEN_WRAPPER_DIR:-}" ]; then
         dir="$(named_wrapper_dir)"; mkdir -p "$dir"; w="$dir/claude-$p"
+    else
+        existing="$(command -v "claude-$p" 2>/dev/null || true)"
+        if [ -n "$existing" ] && [ -w "$(dirname "$existing")" ]; then
+            w="$existing"; dir="$(dirname "$w")"
+        else
+            dir="$(named_wrapper_dir)"; mkdir -p "$dir"; w="$dir/claude-$p"
+        fi
     fi
     write_follower_wrapper "$p" "$w"
     case ":$PATH:" in *":$dir:"*) ;; *) say "add $dir to PATH before running claude-$p" ;; esac
@@ -923,9 +927,18 @@ cmd_add_follower() { # profile
     say "named follower ready: claude-$p"
 }
 cmd_reinstall_follower_wrapper() { # profile
-    local p="${1:-}"
+    local p="${1:-}" main_config="$CONFIG_FILE" follower_config
+    validate_profile_name "$p"
+    follower_config="${CLAUDE_FOLLOWERS_DIR:-$CLAUDE_TOKEN_REAL_HOME/.claude-token/followers}/$p/config"
+    if [ ! -f "$follower_config" ]; then
+        [ -f "$main_config" ] || die "no vault configuration (run: claude-token add-follower $p)"
+        mkdir -p "$(dirname "$follower_config")"
+        cp "$main_config" "$follower_config"
+        chmod 600 "$follower_config"
+    fi
     use_follower_context "$p"
-    [ -f "$CONFIG_FILE" ] || die "follower '$p' is not paired (run: claude-token add-follower $p)"
+    set_config user "$p"
+    set_config mode follower
     configure_follower_permissions "$p"
     cmd_install_follower_wrapper "$p"
 }

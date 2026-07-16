@@ -320,7 +320,24 @@ chmod +x "$TMP/bin/claude-token"
 PATH="$TMP/bin:$PATH" "$HOME/bin/claude-kas" hello
 [ "$(cat "$WRAPPER_OUTPUT")" = "run-follower kas hello" ]
 
+# An authorized main config can install a named follower without re-pairing.
+new_home install-from-current
+printf 'user=kas\nurl=https://vault.invalid\ntoken=current-token\n' > "$HOME/.claude-token/config"
+rm -f "$CURL_CALLED"
+CLAUDE_TOKEN_FULL_PERMISSIONS=no run_token install-follower-wrapper kas >/dev/null
+[ -x "$HOME/bin/claude-kas" ]
+grep -q 'run-follower "kas"' "$HOME/bin/claude-kas"
+grep -q '^user=kas$' "$HOME/.claude-token/followers/kas/config"
+grep -q '^token=current-token$' "$HOME/.claude-token/followers/kas/config"
+grep -q '^mode=follower$' "$HOME/.claude-token/followers/kas/config"
+[ ! -e "$CURL_CALLED" ]
+
 # An existing pairing can repair a stale wrapper without pairing again.
+new_home named-pair-repair
+mkdir -p "$HOME/.claude-token/followers/kas"
+printf 'user=kas\nurl=https://vault.invalid\ntoken=kas-token\nmode=follower\n' > "$HOME/.claude-token/followers/kas/config"
+mkdir -p "$HOME/bin" "$HOME/.claude-profiles/kas/.claude"
+printf '{"theme":"dark","permissions":{"allow":["Read"]}}\n' > "$HOME/.claude-profiles/kas/.claude/settings.json"
 printf 'legacy wrapper\n' > "$HOME/bin/claude-kas"
 rm -f "$CURL_CALLED"
 CLAUDE_TOKEN_FULL_PERMISSIONS=no PATH="$TMP/bin:$PATH" run_token install-follower-wrapper kas >/dev/null

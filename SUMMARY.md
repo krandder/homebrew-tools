@@ -28,7 +28,7 @@ token for one account invalidate each other on refresh (`refresh_token_reused`).
    emits a short pairing code → operator `codex-vault pair-approve <code>` →
    follower auto-completes (enroll + token + pull + wrappers). No token copy-paste.
 6. **Claude parity:** `claude-<user>` launchers, `claude login` auto-pushes,
-   `claude-run --user`. `claude-adriana` now works on the mac (shares `~/.claude`
+   `claude-run --user`. `claude-owner-a` now works on the mac (shares `~/.claude`
    conversations with the default login; only the auth account differs).
 7. **Keep-fresh cron** on farol (`codex-token publish --all` + `claude-token publish --all`, every 6h).
 
@@ -56,23 +56,23 @@ token for one account invalidate each other on refresh (`refresh_token_reused`).
   **reverted** — sharing `~/.claude` across accounts was the desired behavior.
 
 ## Current state
-- **farol (leader):** Codex `kas`/`adriana`/`arthur` live; `daniel`/`jobson` dead
-  (need relogin). Claude `adriana` revived (working); `kas` enrolled. ACL admin = `kas`.
-- **mac (follower/operator):** Codex via Syncthing mesh (`kas`/`adriana`/`arthur`,
-  sentinel RT). `claude-adriana` working (shared `~/.claude`). `codex-token` 2.6.0.
+- **farol (leader):** Codex `operator`/`owner-a`/`owner-c` live; `stale-a`/`stale-b` dead
+  (need relogin). Claude `owner-a` revived (working); `operator` enrolled. ACL admin = `operator`.
+- **mac (follower/operator):** Codex via Syncthing mesh (`operator`/`owner-a`/`owner-c`,
+  sentinel RT). `claude-owner-a` working (shared `~/.claude`). `codex-token` 2.6.0.
 - **`vault.ekelvin.com`** live (healthz, `/status`, `/pull`, `/push`, `/pair`).
 - Tap on GitHub `main`; codex-token formula pinned to commit SHA.
 
 ## Next possible steps
 - **Adopt commit-SHA URL pinning** for the other formulae (`codex-vault`,
   `codex-vault-http`, `claude-token`) — kills the raw-cache lag everywhere.
-- **Revive dead accounts:** relogin Codex `daniel`/`jobson` (and any stale Claude)
+- **Revive dead accounts:** relogin Codex `stale-a`/`stale-b` (and any stale Claude)
   via `codex-<p> login` / `claude-login --user <u>` → push to vault.
 - **Token revocation:** `codex-vault revoke-token <user>` + `list-tokens` (today
   tokens can only be removed by editing `tokens.json`).
 - **Encryption-at-rest** for the leader's refresh tokens (age / OS keyring).
 - **Refresh `codex-vault --help`** (stale — doesn't list `token`/`approve`/`onboard`/`pair-*`).
-- **mac Claude follower for `kas`** (so the operator can run `claude-kas` too).
+- **mac Claude follower for `operator`** (so the operator can run `claude-operator` too).
 - **farol reachability:** fix the stale direct IP or standardize on Tailscale/`vault.ekelvin.com`.
 - **Optional:** unified `codex-vault auths` / `/auths` status; richer pairing
   (pubkey-encrypted token delivery); per-account claude data dir as an *opt-in* flag.

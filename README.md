@@ -51,7 +51,7 @@ claude-token push [--profile P]           LEGACY HANDOFF: sync, then demote loca
 claude-token check | --diagnose | --version
 ```
 
-Owner-machine onboarding (Adriana/Juana):
+Owner-machine onboarding (Owner A/Owner B):
 ```bash
 claude-token setup-owner NAME
 # After pairing approval and browser login, use plain Claude normally:
@@ -67,9 +67,9 @@ Multiple follower identities can coexist without replacing plain `claude` or
 reading/writing its macOS Keychain entry:
 
 ```bash
-claude-token add-follower kas
+claude-token add-follower operator
 # After the operator approves the displayed pairing code:
-claude-kas
+claude-operator
 ```
 
 Each named follower keeps only its vault configuration under
@@ -82,7 +82,7 @@ that profile's owner machine.
 
 Pairing/onboarding is identical to `codex-token` (pair → operator `ai-vault
 approve`/`enroll … claude` + `token` → `set-url`/`set-token` → `login`). Profile
-ids in the vault are composite `<kind>:<name>` (e.g. `claude:kas`, `codex:kas`),
+ids in the vault are composite `<kind>:<name>` (e.g. `claude:operator`, `codex:operator`),
 so the same name can exist for both tools.
 
 ---

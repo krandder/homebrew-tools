@@ -145,7 +145,7 @@ all_profiles() {
     for d in "$PROFILES_DIR"/*/; do
         [ -d "$d" ] || continue
         name="$(basename "$d")"
-        [ -L "$PROFILES_DIR/$name" ] && continue   # skip alias symlinks (e.g. kelvin -> kas)
+        [ -L "$PROFILES_DIR/$name" ] && continue   # skip alias symlinks (e.g. legacy -> primary)
         echo "$name"
     done
 }
@@ -640,7 +640,7 @@ EOF
 # install-claude-launcher <user> -> ~/bin/claude-<user> (run claude as claude:<user>)
 cmd_install_claude_launcher() {
     local user="$1"
-    [ -n "$user" ] || die "install-claude-launcher: specify a user (e.g. adriana)"
+    [ -n "$user" ] || die "install-claude-launcher: specify a user (e.g. owner-a)"
     mkdir -p "$HOME/bin"
     local w="$HOME/bin/claude-$user"
     cat > "$w" <<EOF

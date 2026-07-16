@@ -7,7 +7,7 @@ set -euo pipefail
 SRC="${AGENT_BROWSER_SRC:-$HOME/Library/Application Support/Google/Chrome}"
 DST="${AGENT_BROWSER_DATA_DIR:-$HOME/.agent-chrome}"
 PROFILE="${AGENT_BROWSER_PROFILE:-Profile 2}"
-LABEL="com.kas.agent-browser"
+LABEL="com.operator.agent-browser"
 
 if [ ! -d "$SRC/$PROFILE" ]; then
   echo "source profile not found: $SRC/$PROFILE" >&2

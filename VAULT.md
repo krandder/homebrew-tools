@@ -32,7 +32,7 @@ account across several machines/people impossible without constant re-logins.
 | `claude-token` (2.0.0) | claude creds extractor + `publish`/`pull`/`push` | farol + clients |
 | `ai-as` (not in tap) | operator-only multi-account launcher (`codex-<profile>`/`claude-<profile>`) | operator machines |
 
-Profiles are tool-aware and composite: `<kind>:<name>` (e.g. `codex:kas`, `claude:adriana`).
+Profiles are tool-aware and composite: `<kind>:<name>` (e.g. `codex:operator`, `claude:owner-a`).
 
 ## Infrastructure (deployed)
 - **Leader:** `farol` (Debian, always-on). `codex-vault-http` runs as a rootless
@@ -60,16 +60,16 @@ Profiles are tool-aware and composite: `<kind>:<name>` (e.g. `codex:kas`, `claud
 
 ## Current state / inventory
 - **farol (leader):**
-  - Codex: `kas`, `adriana`, `arthur` live (real RT, published); `daniel`, `jobson` **dead** (`refresh_token_reused`).
-  - Claude: `kas`, `adriana` enrolled; **adriana's refresh token is dead** (`claude-token publish` → refresh failed), so no Claude follower token is published.
-  - ACL admin/operator = `kas`.
+  - Codex: `operator`, `owner-a`, `owner-c` live (real RT, published); `stale-a`, `stale-b` **dead** (`refresh_token_reused`).
+  - Claude: `operator`, `owner-a` enrolled; **owner-a's refresh token is dead** (`claude-token publish` → refresh failed), so no Claude follower token is published.
+  - ACL admin/operator = `operator`.
 - **mac (follower/operator):**
-  - Codex via Syncthing mesh: `kas`, `adriana`, `arthur` healthy (sentinel RT, ~9d tokens). `codex`/`codex-kas`/`codex-adriana`/`codex-arthur` launchers work.
-  - Claude: **not configured** (no `claude-<user>` launcher, no `~/.codex-token/config`, single Keychain account = `kelvin@futarchy.fi`).
+  - Codex via Syncthing mesh: `operator`, `owner-a`, `owner-c` healthy (sentinel RT, ~9d tokens). `codex`/`codex-operator`/`codex-owner-a`/`codex-owner-c` launchers work.
+  - Claude: **not configured** (no `claude-<user>` launcher, no `~/.codex-token/config`, single Keychain account = `user@example.com`).
 - **Tap:** pushed to GitHub `main` (codex-token 2.3.0 / codex-vault 1.3.0 / codex-vault-http 1.1.0).
 
 ## Blockers / unresolved
-1. **Dead refresh tokens** — Codex `daniel`/`jobson`, Claude `adriana` (and any
+1. **Dead refresh tokens** — Codex `stale-a`/`stale-b`, Claude `owner-a` (and any
    other stale Claude logins). *Unblocker:* a fresh `codex login` / `claude login`
    as that user on any machine, then push to the vault. Cannot be automated
    around a revoked token.
@@ -88,7 +88,7 @@ Profiles are tool-aware and composite: `<kind>:<name>` (e.g. `codex:kas`, `claud
    fail the SHA check right after a push (self-heals in a few minutes).
 
 ## Likely next steps
-- **Revive dead accounts:** relogin Codex `daniel`/`jobson` and Claude `adriana`,
+- **Revive dead accounts:** relogin Codex `stale-a`/`stale-b` and Claude `owner-a`,
   push to vault.
 - **Finish Claude client parity:** add `claude-run --user`, `claude-<user>`
   symlinks, and wire `claude login` → push (so Claude onboarding matches Codex).
@@ -97,7 +97,7 @@ Profiles are tool-aware and composite: `<kind>:<name>` (e.g. `codex:kas`, `claud
 - **Encryption-at-rest** for refresh tokens (age / OS keyring).
 - **Standardize farol reachability:** fix dynamic DNS or commit to Tailscale/`vault.ekelvin.com`.
 - **Refresh `codex-vault --help`** to document the full command set.
-- *Optional:* mac Claude follower setup (so the operator can run `claude-kas`);
+- *Optional:* mac Claude follower setup (so the operator can run `claude-operator`);
   a `codex-vault auths`/`/auths` unified status; pin formula URLs to commit SHAs
   to avoid the raw-cache lag.
 

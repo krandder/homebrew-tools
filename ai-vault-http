@@ -96,7 +96,7 @@ def server_event(event, user="", profile="", status="", detail=""):
     except Exception as e:
         sys.stderr.write("server_event failed: %s\n" % e)
 
-def parse_id(rest):  # "codex/kas" -> ("codex", "kas") or None
+def parse_id(rest):  # "codex/operator" -> ("codex", "operator") or None
     parts = rest.split("/", 1)
     if len(parts) != 2 or parts[0] not in ("codex", "claude") or not valid_profile(parts[1]):
         return None

@@ -17,7 +17,7 @@ cat > "$TMP/bin/ai-vault" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" > "$AI_VAULT_ARGS"
 cat > "$AI_VAULT_BODY"
-if [ "$*" = "authorize-pull claude:juana" ]; then
+if [ "$*" = "authorize-pull claude:owner-b" ]; then
     echo denied >&2
     exit 1
 fi
@@ -27,7 +27,7 @@ chmod +x "$TMP/bin/ai-vault"
 
 python3 - "$TMP/vault/tokens.json" <<'PY'
 import hashlib, json, sys
-json.dump({hashlib.sha256(b"test-vault-token").hexdigest(): "adriana"}, open(sys.argv[1], "w"))
+json.dump({hashlib.sha256(b"test-vault-token").hexdigest(): "owner-a"}, open(sys.argv[1], "w"))
 PY
 
 AI_VAULT_ARGS="$TMP/args" AI_VAULT_BODY="$TMP/body" \
@@ -46,25 +46,25 @@ post() {
         --data-binary '{"credential":"fixture"}' "http://127.0.0.1:$PORT$1" >/dev/null
 }
 
-post /sync/claude/adriana
-[ "$(cat "$TMP/args")" = "sync-receive claude:adriana" ]
+post /sync/claude/owner-a
+[ "$(cat "$TMP/args")" = "sync-receive claude:owner-a" ]
 grep -q '"credential":"fixture"' "$TMP/body"
 
-post /push/claude/adriana
-[ "$(cat "$TMP/args")" = "receive claude:adriana" ]
+post /push/claude/owner-a
+[ "$(cat "$TMP/args")" = "receive claude:owner-a" ]
 
 code="$(/usr/bin/curl -sS -o /dev/null -w '%{http_code}' -H "Authorization: Bearer test-vault-token" \
-    --data-binary '{}' "http://127.0.0.1:$PORT/sync/codex/adriana")"
+    --data-binary '{}' "http://127.0.0.1:$PORT/sync/codex/owner-a")"
 [ "$code" = 400 ]
 
 code="$(/usr/bin/curl -sS -o /dev/null -w '%{http_code}' -H "Authorization: Bearer test-vault-token" \
-    --data-binary 'grant_type=refresh_token&refresh_token=vlt:juana:probe' \
+    --data-binary 'grant_type=refresh_token&refresh_token=vlt:owner-b:probe' \
     "http://127.0.0.1:$PORT/v1/oauth/token")"
 [ "$code" = 403 ]
-[ "$(cat "$TMP/args")" = "authorize-pull claude:juana" ]
+[ "$(cat "$TMP/args")" = "authorize-pull claude:owner-b" ]
 
-mkdir -p "$TMP/home/.claude-profiles/adriana/.claude"
-cat > "$TMP/home/.claude-profiles/adriana/.claude/credentials.json" <<'JSON'
+mkdir -p "$TMP/home/.claude-profiles/owner-a/.claude"
+cat > "$TMP/home/.claude-profiles/owner-a/.claude/credentials.json" <<'JSON'
 {"claudeAiOauth":{"accessToken":"access","refreshToken":"owner-refresh"},"claudeTokenSync":{"refreshAuthority":"owner"}}
 JSON
 HOME="$TMP/home" python3 - "$ROOT/ai-vault-http" <<'PY'
@@ -73,7 +73,7 @@ import importlib.machinery, types, sys
 module = types.ModuleType("ai_vault_http")
 importlib.machinery.SourceFileLoader(module.__name__, sys.argv[1]).exec_module(module)
 try:
-    module.broker_refresh("adriana")
+    module.broker_refresh("owner-a")
 except RuntimeError as exc:
     assert "owner machine" in str(exc)
 else:

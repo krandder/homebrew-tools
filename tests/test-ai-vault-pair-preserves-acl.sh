@@ -6,25 +6,25 @@ TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
 mkdir -p "$TMP/vault"
-printf '%s\n' '{"operator":"admin","admins":["admin"],"profiles":{"codex:kas":{"owner":"kas","pullers":["kas","helper"],"kind":"codex"},"claude:kas":{"owner":"kas","pullers":["kas","helper"],"kind":"claude"}}}' > "$TMP/vault/acl.json"
+printf '%s\n' '{"operator":"admin","admins":["admin"],"profiles":{"codex:operator":{"owner":"operator","pullers":["operator","helper"],"kind":"codex"},"claude:operator":{"owner":"operator","pullers":["operator","helper"],"kind":"claude"}}}' > "$TMP/vault/acl.json"
 
 vault() {
     CODEX_VAULT_USER=admin CODEX_VAULT_DIR="$TMP/vault" "$ROOT/ai-vault" "$@"
 }
 
-vault pair-create kas PAIR123 hash >/dev/null
+vault pair-create operator PAIR123 hash >/dev/null
 vault pair-approve PAIR123 >/dev/null 2>&1
 
 python3 - "$TMP/vault/acl.json" <<'PY'
 import json, sys
 d = json.load(open(sys.argv[1]))
-for profile in ("codex:kas", "claude:kas"):
-    assert d["profiles"][profile]["owner"] == "kas"
-    assert d["profiles"][profile]["pullers"] == ["kas", "helper"]
+for profile in ("codex:operator", "claude:operator"):
+    assert d["profiles"][profile]["owner"] == "operator"
+    assert d["profiles"][profile]["pullers"] == ["operator", "helper"]
 PY
 
-CODEX_VAULT_USER=helper CODEX_VAULT_DIR="$TMP/vault" "$ROOT/ai-vault" authorize-pull claude:kas
-if CODEX_VAULT_USER=stranger CODEX_VAULT_DIR="$TMP/vault" "$ROOT/ai-vault" authorize-pull claude:kas 2>/dev/null; then
+CODEX_VAULT_USER=helper CODEX_VAULT_DIR="$TMP/vault" "$ROOT/ai-vault" authorize-pull claude:operator
+if CODEX_VAULT_USER=stranger CODEX_VAULT_DIR="$TMP/vault" "$ROOT/ai-vault" authorize-pull claude:operator 2>/dev/null; then
     echo "expected unrelated identity to be denied" >&2
     exit 1
 fi

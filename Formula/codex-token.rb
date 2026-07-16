@@ -1,9 +1,10 @@
 class CodexToken < Formula
   desc "Print and sync OpenAI Codex CLI credentials across machines (leader/follower)"
   homepage "https://github.com/krandder/homebrew-tools"
-  url "https://raw.githubusercontent.com/krandder/homebrew-tools/f0fbe0ddf5d6755199cd8269d1bd05836f949cfc/codex-token"
+  url "https://raw.githubusercontent.com/krandder/homebrew-tools/04401e3d6d45c7f43ddf1fa7a4c4acdae77b91ce/codex-token"
   version "2.6.0"
-  sha256 "bd5b7902b55f22ade55ee4a7987482f9103eb0215578eb808ed17b733727b55d"
+  revision 1
+  sha256 "1877ae1ea6dfc4336ff88dc03fcfd34a6b1ea75a295f2d75d279eb75c15d8b24"
 
   def install
     bin.install "codex-token"

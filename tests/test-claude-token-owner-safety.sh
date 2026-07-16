@@ -323,6 +323,7 @@ PATH="$TMP/bin:$PATH" "$HOME/bin/claude-kas" hello
 # An authorized main config can install a named follower without re-pairing.
 new_home install-from-current
 printf 'user=kas\nurl=https://vault.invalid\ntoken=current-token\n' > "$HOME/.claude-token/config"
+printf 'export KEEP=this\nalias claude-kas='\''HOME=/tmp claude'\''\n' > "$HOME/.zshrc"
 rm -f "$CURL_CALLED"
 CLAUDE_TOKEN_FULL_PERMISSIONS=no run_token install-follower-wrapper kas >/dev/null
 [ -x "$HOME/bin/claude-kas" ]
@@ -330,6 +331,9 @@ grep -q 'run-follower "kas"' "$HOME/bin/claude-kas"
 grep -q '^user=kas$' "$HOME/.claude-token/followers/kas/config"
 grep -q '^token=current-token$' "$HOME/.claude-token/followers/kas/config"
 grep -q '^mode=follower$' "$HOME/.claude-token/followers/kas/config"
+grep -q '^export KEEP=this$' "$HOME/.zshrc"
+! grep -q 'alias claude-kas=' "$HOME/.zshrc"
+ls "$HOME"/.zshrc.pre-claude-token.* >/dev/null
 [ ! -e "$CURL_CALLED" ]
 
 # An existing pairing can repair a stale wrapper without pairing again.

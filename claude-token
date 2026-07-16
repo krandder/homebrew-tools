@@ -37,7 +37,7 @@
 # refresh token. Legacy vault-managed handoff remains explicit and available.
 
 set -euo pipefail
-VERSION="2.5.9"
+VERSION="2.5.10"
 CLAUDE_TOKEN_REAL_HOME="${CLAUDE_TOKEN_REAL_HOME:-$HOME}"
 
 CLIENT_ID="9d1c250a-e61b-44d9-88ed-5944d1962f5e"
@@ -893,6 +893,7 @@ cmd_install_follower_wrapper() { # profile
         fi
     fi
     write_follower_wrapper "$p" "$w"
+    remove_shadowing_aliases "$p"
     case ":$PATH:" in *":$dir:"*) ;; *) say "add $dir to PATH before running claude-$p" ;; esac
 }
 write_follower_wrapper() { # profile path
@@ -915,6 +916,26 @@ exec claude-token run-follower "$p" "\$@"
 EOF
     chmod +x "$w"
     say "installed $w"
+}
+remove_shadowing_aliases() { # profile
+    local p="$1" rc backup
+    for rc in "$CLAUDE_TOKEN_REAL_HOME/.zshrc" "$CLAUDE_TOKEN_REAL_HOME/.bashrc" "$CLAUDE_TOKEN_REAL_HOME/.bash_profile"; do
+        [ -f "$rc" ] || continue
+        backup="$(python3 - "$rc" "claude-$p" <<'PY'
+import os, re, shutil, sys, time
+path, name = sys.argv[1:]
+lines = open(path).readlines()
+kept = [line for line in lines if not re.match(r"^\s*alias\s+" + re.escape(name) + r"=", line)]
+if kept != lines:
+    backup = f"{path}.pre-claude-token.{int(time.time())}"
+    shutil.copy2(path, backup)
+    with open(path, "w") as fh:
+        fh.writelines(kept)
+    print(backup)
+PY
+        )"
+        [ -z "$backup" ] || say "removed shadowing alias from $rc (backup: $backup)"
+    done
 }
 cmd_add_follower() { # profile
     local p="${1:-}"

@@ -17,7 +17,7 @@
 #   claude-token add-follower NAME         pair + install isolated `claude-NAME`
 #   claude-token install-follower-wrapper NAME  repair `claude-NAME` without re-pairing
 #   claude-token repair-follower-wrappers  repair all already-paired named wrappers
-#   claude-token run-follower NAME [...]   run an isolated named follower
+#   claude-token run-follower NAME [...]   run a named follower in normal HOME
 #   claude-token run [claude args...]      follower launcher: freshen store, exec claude
 #   claude-token install-wrapper           make plain `claude` run via `claude-token run`
 #   claude-token publish [--profile P|--all]  LEADER: refresh + publish follower token(s)
@@ -37,7 +37,7 @@
 # refresh token. Legacy vault-managed handoff remains explicit and available.
 
 set -euo pipefail
-VERSION="2.5.10"
+VERSION="2.5.11"
 CLAUDE_TOKEN_REAL_HOME="${CLAUDE_TOKEN_REAL_HOME:-$HOME}"
 
 CLIENT_ID="9d1c250a-e61b-44d9-88ed-5944d1962f5e"
@@ -148,94 +148,9 @@ use_follower_context() { # profile -> isolated config/runtime globals
     LOG_FILE="$LOG_DIR/events.jsonl"
     CLAUDE_TOKEN_MODE=follower
     CLAUDE_TOKEN_ISOLATED_FOLLOWER=1
-    CLAUDE_PROFILE_HOME="$CLAUDE_TOKEN_REAL_HOME/.claude-profiles/$p"
     unset CLAUDE_VAULT_TOKEN CODEX_VAULT_TOKEN
     configured_leader="$(awk -F= '/^leader=/{print $2;exit}' "$CONFIG_FILE" 2>/dev/null || true)"
     [ -z "$configured_leader" ] || LEADER_HOST="$configured_leader"
-}
-complete_follower_onboarding() {
-    local state="$CLAUDE_PROFILE_HOME/.claude/.claude.json"
-    python3 - "$state" <<'PY'
-import json, os, sys, tempfile
-
-path = sys.argv[1]
-try:
-    with open(path) as fh:
-        state = json.load(fh)
-except FileNotFoundError:
-    state = {}
-if not isinstance(state, dict):
-    raise SystemExit("claude-token: invalid named follower state")
-if state.get("hasCompletedOnboarding") is True:
-    raise SystemExit(0)
-state["hasCompletedOnboarding"] = True
-fd, tmp = tempfile.mkstemp(prefix=".claude-state-", dir=os.path.dirname(path))
-try:
-    with os.fdopen(fd, "w") as fh:
-        json.dump(state, fh)
-        fh.write("\n")
-    os.chmod(tmp, 0o600)
-    os.replace(tmp, path)
-finally:
-    if os.path.exists(tmp):
-        os.unlink(tmp)
-PY
-}
-configure_follower_permissions() { # profile
-    local profile="$1" answer="${CLAUDE_TOKEN_FULL_PERMISSIONS:-}" mode
-    if [ -z "$answer" ]; then
-        [ -t 0 ] || return 0
-        printf "Give claude-%s full permissions (equivalent to --dangerously-skip-permissions)? [y/N] " "$profile" >&2
-        IFS= read -r answer
-    fi
-    case "$answer" in y|Y|yes|YES) mode=full ;; *) mode=normal ;; esac
-    local settings="$CLAUDE_PROFILE_HOME/.claude/settings.json"
-    [ "$mode" = full ] || [ -f "$settings" ] || return 0
-    mkdir -p "$(dirname "$settings")"
-    python3 - "$settings" "$mode" <<'PY'
-import json, os, sys, tempfile
-
-path, mode = sys.argv[1:]
-try:
-    with open(path) as fh:
-        settings = json.load(fh)
-except FileNotFoundError:
-    settings = {}
-if not isinstance(settings, dict):
-    raise SystemExit("claude-token: invalid named follower settings")
-permissions = settings.get("permissions", {})
-if not isinstance(permissions, dict):
-    raise SystemExit("claude-token: invalid named follower permissions")
-wanted = {
-    "defaultMode": "bypassPermissions",
-    "bypassPermissionsModeAccepted": True,
-    "skipDangerousModePermissionPrompt": True,
-}
-before = json.dumps(settings, sort_keys=True)
-if mode == "full":
-    settings.setdefault("permissions", {}).update(wanted)
-    settings["bypassPermissionsModeAccepted"] = True
-    settings["skipDangerousModePermissionPrompt"] = True
-else:
-    if permissions.get("defaultMode") == "bypassPermissions":
-        permissions.pop("defaultMode")
-    permissions.pop("bypassPermissionsModeAccepted", None)
-    permissions.pop("skipDangerousModePermissionPrompt", None)
-    settings.pop("bypassPermissionsModeAccepted", None)
-    settings.pop("skipDangerousModePermissionPrompt", None)
-if json.dumps(settings, sort_keys=True) == before:
-    raise SystemExit(0)
-fd, tmp = tempfile.mkstemp(prefix=".claude-settings-", dir=os.path.dirname(path))
-try:
-    with os.fdopen(fd, "w") as fh:
-        json.dump(settings, fh, indent=2)
-        fh.write("\n")
-    os.chmod(tmp, 0o600)
-    os.replace(tmp, path)
-finally:
-    if os.path.exists(tmp):
-        os.unlink(tmp)
-PY
 }
 resolve_claude_bin() {
     local cands="${CLAUDE_REAL_BIN:-}:$HOME/bin/claude.real:$HOME/.local/bin/claude:/opt/homebrew/bin/claude:/usr/local/bin/claude:$(command -v claude 2>/dev/null)" d
@@ -838,17 +753,15 @@ cmd_run() { # [claude args...]  — follower launcher; falls back to normal clau
         fi
         rm -f "$tmp"
     fi
-    # If we have a fresh broker/shared token -> follower mode (ANTHROPIC_AUTH_TOKEN).
+    # If we have a fresh broker/shared token, keep Claude in the caller's normal
+    # HOME and select only the account through environment credentials.
     # Otherwise -> fall through to normal claude (uses the local keychain/login).
     if [ -n "$access" ]; then
         if [ "$isolated" = 1 ]; then
             unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN CLAUDE_CODE_OAUTH_TOKEN
-            mkdir -p "$CLAUDE_PROFILE_HOME/.claude"
-            complete_follower_onboarding
-            export HOME="$CLAUDE_PROFILE_HOME"
-            export CLAUDE_CONFIG_DIR="$CLAUDE_PROFILE_HOME/.claude"
         fi
         export ANTHROPIC_AUTH_TOKEN="$access"
+        export CLAUDE_CODE_OAUTH_TOKEN="$access"
         exec "$bin" "$@"
     fi
     if [ "$local_mode" = follower ] || [ "$mode" = follower ]; then
@@ -943,7 +856,6 @@ cmd_add_follower() { # profile
     PAIR_MODE=follower
     PAIR_SKIP_WRAPPER=1
     cmd_pair
-    configure_follower_permissions "$p"
     cmd_install_follower_wrapper "$p"
     say "named follower ready: claude-$p"
 }
@@ -960,7 +872,6 @@ cmd_reinstall_follower_wrapper() { # profile
     use_follower_context "$p"
     set_config user "$p"
     set_config mode follower
-    configure_follower_permissions "$p"
     cmd_install_follower_wrapper "$p"
 }
 cmd_repair_follower_wrappers() {

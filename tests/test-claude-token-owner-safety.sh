@@ -229,8 +229,8 @@ run_token pair --user adriana >/dev/null
 grep -q '^mode=auto$' "$HOME/.claude-token/config"
 [ ! -e "$HOME/bin/claude" ]
 
-# Named followers are isolated from the machine-wide macOS Keychain, stale
-# auth environment, plain Claude command, and each other.
+# Named followers share normal Claude HOME/state while account selection stays
+# isolated in claude-token's follower config and fresh environment token.
 new_home named-followers
 FAKE_UNAME=Darwin; export FAKE_UNAME
 for profile in kas juana; do
@@ -248,14 +248,14 @@ write_shared kas-fresh-token 4102444800000 "$CURL_RESPONSE"
 run_token run-follower kas hello
 [ "$(sed -n '1p' "$TEST_OUTPUT")" = kas-fresh-token ]
 [ "$(sed -n '2p' "$TEST_OUTPUT")" = hello ]
-[ "$(sed -n '3p' "$TEST_OUTPUT")" = "$HOME/.claude-profiles/kas" ]
-[ "$(sed -n '4p' "$TEST_OUTPUT")" = unset ]
+[ "$(sed -n '3p' "$TEST_OUTPUT")" = "$HOME" ]
+[ "$(sed -n '4p' "$TEST_OUTPUT")" = kas-fresh-token ]
 [ "$(sed -n '5p' "$TEST_OUTPUT")" = unset ]
-[ "$(sed -n '6p' "$TEST_OUTPUT")" = "$HOME/.claude-profiles/kas/.claude" ]
+[ "$(sed -n '6p' "$TEST_OUTPUT")" = unset ]
 python3 - "$HOME/.claude-profiles/kas/.claude/.claude.json" <<'PY'
 import json, sys
 d = json.load(open(sys.argv[1]))
-assert d["hasCompletedOnboarding"] is True
+assert d["hasCompletedOnboarding"] is False
 assert d["theme"] == "dark"
 PY
 python3 - "$HOME/.claude-profiles/kas/.claude/settings.json" <<'PY'
@@ -271,7 +271,7 @@ CURL_RESPONSE="$HOME/juana.json"; export CURL_RESPONSE
 write_shared juana-fresh-token 4102444800000 "$CURL_RESPONSE"
 run_token run-follower juana hello
 [ "$(sed -n '1p' "$TEST_OUTPUT")" = juana-fresh-token ]
-[ "$(sed -n '3p' "$TEST_OUTPUT")" = "$HOME/.claude-profiles/juana" ]
+[ "$(sed -n '3p' "$TEST_OUTPUT")" = "$HOME" ]
 [ ! -e "$SECURITY_CALLED" ]
 
 rm -f "$TEST_OUTPUT"
@@ -294,7 +294,7 @@ CURL_RESPONSE="$HOME/approved.json"; export CURL_RESPONSE
 printf '{"status":"approved","token":"paired-token","user":"kas"}\n' > "$CURL_RESPONSE"
 mkdir -p "$HOME/.claude-profiles/kas/.claude"
 printf '{"theme":"dark","permissions":{"allow":["Read"]}}\n' > "$HOME/.claude-profiles/kas/.claude/settings.json"
-CLAUDE_TOKEN_FULL_PERMISSIONS=yes run_token add-follower kas >/dev/null
+run_token add-follower kas >/dev/null
 [ "$before" = "$(shasum -a 256 "$HOME/bin/claude")" ]
 [ -x "$HOME/bin/claude-kas" ]
 grep -q 'run-follower "kas"' "$HOME/bin/claude-kas"
@@ -304,11 +304,7 @@ import json, sys
 d = json.load(open(sys.argv[1]))
 assert d["theme"] == "dark"
 assert d["permissions"]["allow"] == ["Read"]
-assert d["permissions"]["defaultMode"] == "bypassPermissions"
-assert d["permissions"]["bypassPermissionsModeAccepted"] is True
-assert d["permissions"]["skipDangerousModePermissionPrompt"] is True
-assert d["bypassPermissionsModeAccepted"] is True
-assert d["skipDangerousModePermissionPrompt"] is True
+assert d["permissions"] == {"allow": ["Read"]}
 PY
 [ ! -e "$SECURITY_CALLED" ]
 WRAPPER_OUTPUT="$HOME/wrapper-output"; export WRAPPER_OUTPUT

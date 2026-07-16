@@ -3,7 +3,7 @@ class ClaudeToken < Formula
   homepage "https://github.com/krandder/homebrew-tools"
   url "https://raw.githubusercontent.com/krandder/homebrew-tools/main/claude-token"
   version "2.5.15"
-  sha256 "961c47e947abd8fc2e00904da6dd9434ad13b852833c8c60f43c7bba38a766f5"
+  sha256 "39d664e11b5f0730c2419bb2e0154ef893038bab9fca1d0975ce890bf4024823"
 
   def install
     bin.install "claude-token"

@@ -307,7 +307,7 @@ python3 - "$CURL_BODY" <<'PY'
 import json, sys
 d = json.load(open(sys.argv[1]))
 assert d["tool"] == "claude-token"
-assert d["version"] == "2.5.14"
+assert d["version"] == "2.5.15"
 assert d["profile"] == "owner-a"
 assert d["mode"] == "owner"
 assert d["status"] == "synced"

@@ -141,6 +141,9 @@ def broker_refresh(account):
     return o["accessToken"], ttl
 
 
+class Handler(http.server.BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
     def _send(self, code, body="", ctype="application/json"):
         if isinstance(body, str):
             body = body.encode()

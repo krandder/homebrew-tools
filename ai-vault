@@ -41,6 +41,8 @@ PROFILES_DIR="${CODEX_PROFILES_DIR:-$HOME/.codex-profiles}"
 CLAUDE_PROFILES_DIR="${CLAUDE_PROFILES_DIR:-$HOME/.claude-profiles}"
 SHARED_DIR="${CODEX_SHARED_DIR:-$HOME/shared/codex-tokens}"
 CLAUDE_SHARED_DIR="${CLAUDE_SHARED_DIR:-$HOME/shared/claude-tokens}"
+KIMI_PROFILES_DIR="${KIMI_PROFILES_DIR:-$HOME/.kimi-profiles}"
+KIMI_SHARED_DIR="${KIMI_SHARED_DIR:-$HOME/shared/kimi-tokens}"
 CLIENT_ID="app_EMoamEEZ73f0CkXaXp7hrann"
 
 die() { echo "ai-vault: error: $*" >&2; exit 1; }
@@ -63,6 +65,7 @@ auth_file_for() {
     local k n; k="$(kind_of "$1")"; n="$(name_of "$1")"
     case "$k" in
         claude) echo "$CLAUDE_PROFILES_DIR/$n/.claude/credentials.json" ;;
+        kimi)   echo "$KIMI_PROFILES_DIR/$n/credentials.json" ;;
         *)      echo "$PROFILES_DIR/$n/.codex/auth.json" ;;
     esac
 }
@@ -70,10 +73,11 @@ shared_file_for() {
     local k n; k="$(kind_of "$1")"; n="$(name_of "$1")"
     case "$k" in
         claude) echo "$CLAUDE_SHARED_DIR/$n.json" ;;
+        kimi)   echo "$KIMI_SHARED_DIR/$n.json" ;;
         *)      echo "$SHARED_DIR/$n.json" ;;
     esac
 }
-publish_tool_for() { case "$(kind_of "$1")" in claude) echo claude-token ;; *) echo codex-token ;; esac; }
+publish_tool_for() { echo "ai-token $(kind_of "$1")"; }
 
 # ---- ACL predicates ----
 is_admin() { python3 - "$ACL_FILE" "$(current_user)" <<'PY'
@@ -208,6 +212,54 @@ PY
         return 0
     fi
 
+    # Kimi owner machines keep native refresh authority. Store their snapshot
+    # as canonical; followers get a sentinel-RT copy. The vault never rotates
+    # an owner-managed kimi token either.
+    if [ "$kind" = kimi ] && [ "${KIMI_OWNER_SYNC:-0}" = 1 ]; then
+        set +e
+        python3 - "$tmp" "$af" "$sf" "$(name_of "$p")" <<'PYK'
+import datetime, json, os, sys, time
+
+incoming_path, auth_path, shared_path, profile = sys.argv[1:5]
+sentinel = "__follower_no_refresh__"
+
+def atomic_json(path, data):
+    d = os.path.dirname(path) or "."
+    os.makedirs(d, exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w") as fh:
+        json.dump(data, fh, indent=2)
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, path)
+
+try:
+    creds = json.load(open(incoming_path))
+except Exception as exc:
+    sys.exit("ai-vault: invalid token JSON: " + str(exc))
+rt = creds.get("refresh_token", "")
+if not rt or rt == sentinel:
+    sys.exit("ai-vault: kimi sync requires a real owner refresh token")
+if not creds.get("access_token"):
+    sys.exit("ai-vault: kimi sync requires an access token")
+creds.setdefault("kimiTokenSync", {})["refreshAuthority"] = "owner"
+creds["synced_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+atomic_json(auth_path, creds)
+published = dict(creds)
+published["refresh_token"] = sentinel
+published["profile"] = profile
+published["published_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+published["note"] = "owner-synced; vault did not refresh"
+atomic_json(shared_path, published)
+PYK
+        rc=$?
+        set -e
+        rm -f "$tmp"
+        [ "$rc" -eq 0 ] || { audit "$p" sync rejected "invalid"; return "$rc"; }
+        audit "$p" sync ok "by $(current_user); kimi owner remains refresh authority"
+        say "synced '$p' from $(current_user); kimi owner remains refresh authority"
+        return 0
+    fi
+
     set +e
     python3 - "$tmp" "$af" <<'PY'
 import json,sys,os
@@ -217,7 +269,8 @@ except Exception as e: sys.exit("ai-vault: invalid token JSON: "+str(e))
 # accept codex ({tokens:{refresh_token}}) or claude ({refreshToken} / {claudeAiOauth:{refreshToken}})
 def rt(o):
     return ((o.get("tokens") or {}).get("refresh_token") or o.get("refreshToken")
-            or (o.get("claudeAiOauth") or {}).get("refreshToken") or "")
+            or (o.get("claudeAiOauth") or {}).get("refreshToken")
+            or o.get("refresh_token") or "")
 if not rt(data): sys.exit("ai-vault: token has no refresh_token")
 json.dump(data,open(af,"w"),indent=2); os.chmod(af,0o600)
 PY
@@ -235,6 +288,16 @@ cmd_serve() { # profile -> stdout follower token JSON
     local p="$1" sf
     sf="$(shared_file_for "$p")"
     can_pull "$p" || { audit "$p" pull denied "not authorized"; die "serve: '$(current_user)' is not authorized to pull '$p'"; }
+    if [ "$(kind_of "$p")" = kimi ]; then
+        # refresh-on-serve: ai-token owns all kimi logic (shared -> canonical -> owner store)
+        if out="$("$(command -v ai-token || echo "$HOME/.local/bin/ai-token")" kimi serve "$(name_of "$p")" 2>/dev/null)"; then
+            audit "$p" pull ok "by $(current_user) (kimi, refresh-on-serve)"
+            printf '%s\n' "$out"
+            return 0
+        fi
+        audit "$p" pull failed "stale kimi token"
+        die "serve: no fresh kimi token for '$p' (owner must sync/publish)"
+    fi
     [ -f "$sf" ] || { audit "$p" pull failed "no published token"; die "serve: no published token for '$p' (owner must push first)"; }
     if [ "$(kind_of "$p")" = claude ] && ! cmd_access "$p" >/dev/null 2>&1; then
         audit "$p" pull failed "stale published token"
@@ -249,6 +312,15 @@ cmd_serve() { # profile -> stdout follower token JSON
 cmd_access() { # id -> stdout: access token (plain text)
     local p="$1" sf kind
     can_pull "$p" || { audit "$p" access denied "not authorized"; die "access: '$(current_user)' is not authorized for '$p'"; }
+    if [ "$(kind_of "$p")" = kimi ]; then
+        if out="$("$(command -v ai-token || echo "$HOME/.local/bin/ai-token")" kimi serve-access "$(name_of "$p")" 2>/dev/null)" && [ -n "$out" ]; then
+            audit "$p" access ok "by $(current_user) (kimi)"
+            printf '%s\n' "$out"
+            return 0
+        fi
+        audit "$p" access failed "stale kimi token"
+        die "access: no fresh kimi token for '$p'"
+    fi
     sf="$(shared_file_for "$p")"
     kind="$(kind_of "$p")"
     [ -f "$sf" ] || die "access: no published token for '$p'"
@@ -271,7 +343,7 @@ PY
 cmd_enroll() { # kind name [owner]
     require_admin enroll
     local kind="$1" p="$2" owner="${3:-$2}"
-    case "$kind" in codex|claude) ;; *) die "enroll: first arg must be kind (codex|claude)" ;; esac
+    case "$kind" in codex|claude|kimi) ;; *) die "enroll: first arg must be kind (codex|claude|kimi)" ;; esac
     local id="$kind:$p"
     python3 - "$ACL_FILE" "$id" "$owner" "$kind" <<'PY'
 import json,sys
@@ -311,6 +383,7 @@ cmd_approve() { # user pubkey-line   (enrolls codex:<user> + claude:<user>, inst
     [ -n "$line" ] || die "approve: pass the pubkey line printed by '*-token pair' (as one quoted arg)"
     cmd_enroll codex "$user" "$user" >/dev/null || true
     cmd_enroll claude "$user" "$user" >/dev/null || true
+    cmd_enroll kimi "$user" "$user" >/dev/null || true
     local entry
     case "$line" in
         *ai-vault\ shell\ "$user"*) entry="$line" ;;
@@ -320,7 +393,7 @@ cmd_approve() { # user pubkey-line   (enrolls codex:<user> + claude:<user>, inst
     mkdir -p "$(dirname "$authkeys")"; touch "$authkeys"
     grep -qF "$entry" "$authkeys" 2>/dev/null || printf '%s\n' "$entry" >> "$authkeys"
     audit "$user" approve ok "by $(current_user)"
-    say "approved '$user' (codex+claude enrolled + forced-command key installed in $authkeys)"
+    say "approved '$user' (codex+claude+kimi enrolled + forced-command key installed in $authkeys)"
 }
 
 # onboard <user>: HTTPS onboarding in one command — enroll codex+claude and
@@ -331,8 +404,9 @@ cmd_onboard() {
     [ -n "$user" ] || die "onboard: specify a user handle (e.g. fred)"
     cmd_enroll codex "$user" "$user" >/dev/null 2>&1 || true
     cmd_enroll claude "$user" "$user" >/dev/null 2>&1 || true
+    cmd_enroll kimi "$user" "$user" >/dev/null 2>&1 || true
     audit "$user" onboard ok "by $(current_user)"
-    say "onboarded '$user' (codex:$user + claude:$user). One-time API token — send it securely; it is shown once:" >&2
+    say "onboarded '$user' (codex:$user + claude:$user + kimi:$user). One-time API token — send it securely; it is shown once:" >&2
     cmd_token "$user"
 }
 
@@ -398,6 +472,7 @@ PY
     [ -n "$user" ] || die "pair-approve: unknown or expired code '$code'"
     ensure_pair_profile codex "$user"
     ensure_pair_profile claude "$user"
+    ensure_pair_profile kimi "$user"
     token="$(cmd_token "$user")"
     python3 - "$PAIRING_FILE" "$code" "$token" <<'PY'
 import json,sys,os
@@ -406,7 +481,7 @@ d=json.load(open(f)); d[code]["status"]="approved"; d[code]["token"]=token
 json.dump(d,open(f,"w"),indent=2); os.chmod(f,0o600)
 PY
     audit "$user" pair-approve ok "code=$code"
-    say "approved pairing code '$code' for user '$user' (codex+claude enrolled); the follower will auto-complete." >&2
+    say "approved pairing code '$code' for user '$user' (codex+claude+kimi enrolled); the follower will auto-complete." >&2
 }
 
 cmd_grant() { # profile user
@@ -488,7 +563,12 @@ usage() { sed -n '2,/^$/p' "$0" | sed 's/^# \?//' >&2; }
 cmd="$1"; shift || true
 case "$cmd" in
     receive)    cmd_receive "$@" ;;
-    sync-receive) CLAUDE_OWNER_SYNC=1 cmd_receive "$@" ;;
+    sync-receive)
+        case "$(kind_of "$2")" in
+            claude) CLAUDE_OWNER_SYNC=1 ;;
+            kimi)   KIMI_OWNER_SYNC=1 ;;
+        esac
+        cmd_receive "$@" ;;
     serve)      cmd_serve "$@" ;;
     access)     cmd_access "$1" ;;
     authorize-pull) cmd_authorize_pull "$1" ;;

@@ -5,6 +5,8 @@ class ClaudeToken < Formula
   version "2.5.15"
   sha256 "39d664e11b5f0730c2419bb2e0154ef893038bab9fca1d0975ce890bf4024823"
 
+  deprecate! date: "2026-07-18", because: "replaced by ai-token (one generic credential-sync tool: ai-token claude|codex|kimi)"
+
   def install
     bin.install "claude-token"
   end

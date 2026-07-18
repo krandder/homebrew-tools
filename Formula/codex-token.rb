@@ -6,6 +6,8 @@ class CodexToken < Formula
   revision 1
   sha256 "1877ae1ea6dfc4336ff88dc03fcfd34a6b1ea75a295f2d75d279eb75c15d8b24"
 
+  deprecate! date: "2026-07-18", because: "replaced by ai-token (one generic credential-sync tool: ai-token claude|codex|kimi)"
+
   def install
     bin.install "codex-token"
   end

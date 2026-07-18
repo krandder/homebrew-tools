@@ -98,7 +98,7 @@ def server_event(event, user="", profile="", status="", detail=""):
 
 def parse_id(rest):  # "codex/operator" -> ("codex", "operator") or None
     parts = rest.split("/", 1)
-    if len(parts) != 2 or parts[0] not in ("codex", "claude") or not valid_profile(parts[1]):
+    if len(parts) != 2 or parts[0] not in ("codex", "claude", "kimi") or not valid_profile(parts[1]):
         return None
     return parts[0], parts[1]
 
@@ -363,8 +363,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             pid = parse_id(self.path[len("/sync/"):])
             if not pid:
                 return self._send(400, '{"error":"bad profile; use /sync/<kind>/<name>"}')
-            if pid[0] != "claude":
-                return self._send(400, '{"error":"owner sync is supported only for Claude profiles"}')
+            if pid[0] not in ("claude", "kimi"):
+                return self._send(400, '{"error":"owner sync is supported only for Claude and Kimi profiles"}')
             p = run_vault(user, ["sync-receive", pid[0] + ":" + pid[1]], body=body)
             if p.returncode == 0:
                 server_event("sync", user, pid[0] + ":" + pid[1], "ok", p.stderr.strip().splitlines()[-1] if p.stderr.strip() else "")

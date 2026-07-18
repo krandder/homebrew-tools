@@ -4,7 +4,27 @@ Personal Homebrew tap for useful CLI tools.
 
 ## Available Formulae
 
-### `claude-token`
+### `ai-token` (replaces `claude-token` and `codex-token`)
+
+One credential-sync tool for AI CLIs — **claude, codex, and kimi** — via the
+same owner/follower vault. Backends are registry entries in a single script;
+the old tools are shims (`claude-token` → `ai-token claude`, etc.).
+
+**Install:**
+```bash
+brew tap krandder/tools
+brew install ai-token
+```
+
+```bash
+ai-token <claude|codex|kimi> <command> [args]
+```
+
+See [AI-TOKEN.md](AI-TOKEN.md) for the backend registry, the kimi backend
+design (15-min tokens, refresh-on-serve, keepfresh), decisions, and test
+evidence.
+
+### `claude-token` — **DEPRECATED**, use `ai-token`
 
 Print and **sync Claude Code OAuth credentials across machines** using the same
 owner/follower vault as `codex-token`. Works for Claude Code's OAuth on
@@ -126,7 +146,7 @@ claude-token --version
 
 ---
 
-### `codex-token`
+### `codex-token` — **DEPRECATED**, use `ai-token`
 
 Print and **sync OpenAI Codex CLI credentials across machines** using a leader/follower model, so several people/machines can share Codex accounts without their refresh tokens invalidating one another.
 

@@ -3,7 +3,7 @@ class AiVaultHttp < Formula
   homepage "https://github.com/krandder/homebrew-tools"
   url "https://raw.githubusercontent.com/krandder/homebrew-tools/main/ai-vault-http"
   version "1.2.0"
-  sha256 "ceb94fc174591670187fdadc0751eb3cb200d0bee3890501b67feecfeca48b16"
+  sha256 "ef3d8e70196b44b3de084822d3b77d8267d4bf6c4590f413b9e4c4dab9d1e6bf"
   depends_on "ai-vault"
   def install
     bin.install "ai-vault-http"

@@ -1151,11 +1151,43 @@ if token and expires > time.time() + 60:
 PY
 }
 
+claude_needs_relogin_marker() { # canonical_file -> yes/no
+    python3 - "$1" <<'PY' 2>/dev/null
+import json,sys
+try:
+    d=json.load(open(sys.argv[1]))
+    print("yes" if (d.get("claudeTokenSync") or {}).get("needsRelogin") else "no")
+except Exception:
+    print("no")
+PY
+}
+claude_mark_needs_relogin() { # canonical_file reason
+    python3 - "$1" "$2" <<'PY'
+import json,sys,os,datetime
+f,reason=sys.argv[1],sys.argv[2]
+d=json.load(open(f))
+sync=d.setdefault("claudeTokenSync",{})
+sync["needsRelogin"]=True
+sync["needsReloginSince"]=datetime.datetime.now(datetime.timezone.utc).isoformat()
+sync["needsReloginReason"]=reason
+tmp=f+".tmp"; json.dump(d,open(tmp,"w"),indent=2); os.chmod(tmp,0o600); os.replace(tmp,f)
+PY
+}
+claude_alert_relogin() { # profile detail — durable operator alert (best effort)
+    command -v fleet-msg >/dev/null 2>&1 || return 0
+    fleet-msg send --to kelvin --from ai-token --kind task \
+        --body "claude:$1 needs re-login: $2. Fix: fresh native login on the owner machine, then 'ai-token claude sync --profile $1'. The vault skips it until then." >/dev/null 2>&1 || true
+}
+
 claude_publish_profile() { # profile
     local p="$1" af sf
     af="$(claude_canonical_file "$p")"; sf="$(claude_shared_file "$p")"
     log_event publish "$p" start "canonical=$af shared=$sf"
     [ -f "$af" ] || die "publish: missing canonical creds at $af"
+    if [ "$(claude_needs_relogin_marker "$af")" = yes ]; then
+        log_event publish "$p" skipped "needs-relogin"
+        die "publish: '$p' is marked needs_relogin; waiting for the owner to sync fresh credentials"
+    fi
     # Check if the existing access token is still valid; only refresh if needed.
     mkdir -p "$CLAUDE_SHARED_DIR" "$(dirname "$af")"
     local needs_refresh
@@ -1179,13 +1211,27 @@ claude_publish_profile() { # profile
             return $?
         fi
         set +e
-        resp="$(refresh_claude "$af")"
+        resp="$(refresh_claude "$af" 2>&1)"
         rc=$?
         set -e
         if [ "$rc" -ne 0 ]; then
             rm -f "$lock"
-            log_event refresh "$p" failed "token-endpoint"
-            die "publish: refresh failed for '$p'"
+            case "$resp" in
+                *invalid_grant*)
+                    # Permanent: the RT is dead server-side. Mark + skip + alert;
+                    # only a fresh owner login (synced) revives this profile.
+                    claude_mark_needs_relogin "$af" "invalid_grant"
+                    claude_alert_relogin "$p" "refresh token rejected (invalid_grant)"
+                    log_event refresh "$p" needs-relogin "invalid_grant"
+                    die "publish: '$p' needs re-login (invalid_grant); marked needs_relogin and skipped until the owner syncs fresh credentials"
+                    ;;
+                *)
+                    # Transient (429/5xx/network): no state change; the next
+                    # maintain cycle retries (threshold keeps it ~once/5.5h).
+                    log_event refresh "$p" failed "transient"
+                    die "publish: refresh failed for '$p' (transient)"
+                    ;;
+            esac
         fi
         local profile_status
         profile_status="$(printf '%s' "$resp" | python3 -c 'import json,sys; print((json.load(sys.stdin).get("_profile_fetch") or {}).get("status","unknown"))' 2>/dev/null || echo unknown)"
@@ -1196,6 +1242,10 @@ import json,sys,os,time,datetime
 af,sf,profile,resp,sentinel,leader,vault_authority=sys.argv[1:8]
 r=json.loads(resp); ts=int(time.time()*1000)
 d=json.load(open(af)); o=d.get("claudeAiOauth",d)
+sync=d.get("claudeTokenSync")
+if isinstance(sync,dict):
+    for k in ("needsRelogin","needsReloginSince","needsReloginReason"):
+        sync.pop(k,None)
 o["accessToken"]=r["access_token"]; o["refreshToken"]=r["refresh_token"]
 o["expiresAt"]=ts+int(r.get("expires_in",28800))*1000
 if vault_authority == "yes":
@@ -1411,7 +1461,12 @@ claude_cmd_status() {
         echo "  active: (no creds)"
     fi
     local p
-    for p in $(ls "$CLAUDE_PROFILES_DIR" 2>/dev/null); do echo "  profile: $p"; done
+    local p m
+    for p in $(ls "$CLAUDE_PROFILES_DIR" 2>/dev/null); do
+        m=""
+        [ "$(claude_needs_relogin_marker "$(claude_canonical_file "$p")")" = yes ] && m="  *** NEEDS RE-LOGIN (owner must sync fresh creds) ***"
+        echo "  profile: $p$m"
+    done
 }
 
 claude_cmd_pair() {  # [--user NAME] — magical onboarding: print a code, poll until approved, auto-configure

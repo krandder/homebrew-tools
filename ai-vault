@@ -261,9 +261,9 @@ PYK
     fi
 
     set +e
-    python3 - "$tmp" "$af" <<'PY'
+    python3 - "$tmp" "$af" "$(kind_of "$p")" <<'PY'
 import json,sys,os
-tmp,af=sys.argv[1],sys.argv[2]
+tmp,af,kind=sys.argv[1],sys.argv[2],sys.argv[3]
 try: data=json.load(open(tmp))
 except Exception as e: sys.exit("ai-vault: invalid token JSON: "+str(e))
 # accept codex ({tokens:{refresh_token}}) or claude ({refreshToken} / {claudeAiOauth:{refreshToken}})
@@ -272,6 +272,11 @@ def rt(o):
             or (o.get("claudeAiOauth") or {}).get("refreshToken")
             or o.get("refresh_token") or "")
 if not rt(data): sys.exit("ai-vault: token has no refresh_token")
+sync = data.setdefault("claudeTokenSync", {}) if kind == "claude" else None
+if sync is not None:
+    sync.setdefault("refreshAuthority", "vault")   # plain push = vault owns refresh
+    for k in ("needsRelogin","needsReloginSince","needsReloginReason"):
+        sync.pop(k, None)                            # fresh creds = revived
 json.dump(data,open(af,"w"),indent=2); os.chmod(af,0o600)
 PY
     rc=$?

@@ -36,7 +36,7 @@
 # refreshes an owner-managed token (takeover is an explicit manual publish).
 
 set -euo pipefail
-VERSION="3.0.0"
+VERSION="3.0.1"
 AI_TOKEN_REAL_HOME="${AI_TOKEN_REAL_HOME:-$HOME}"
 
 # ---- tool selection (arg or shim name) ----

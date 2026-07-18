@@ -790,7 +790,7 @@ codex_status_profile() {
     role="$(codex_role_of "$p")"
     email="$(codex_email_of "$af")"; [ -n "$email" ] || email="?"
     exp="$(codex_access_exp "$af")"
-    if [ "$exp" -gt 0 ]; then exp="valid $(codex_fmt_remaining "$exp")"; else exp="age unknown"; fi
+    if [ "$exp" -le 0 ]; then exp="age unknown"; elif [ "$exp" -le "$(date +%s)" ]; then exp="expired"; else exp="valid $(codex_fmt_remaining "$exp")"; fi
     if [ "$(codex_tokens_get "$af" refresh_token)" = "$SENTINEL_RT" ]; then rt_state="sentinel"; else rt_state="REAL"; fi
     printf '  %-12s %-8s %-28s token %s  rt=%s\n' "$p" "$role" "$email" "$exp" "$rt_state"
 }

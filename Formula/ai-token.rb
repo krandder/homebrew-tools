@@ -3,7 +3,7 @@ class AiToken < Formula
   homepage "https://github.com/krandder/homebrew-tools"
   url "https://raw.githubusercontent.com/krandder/homebrew-tools/main/ai-token"
   version "3.0.1"
-  sha256 "d58633a9cfa23eaf879d62821f460ed702742414b3b2a419155a267f470190f5"
+  sha256 "331315fd8b903df8c81ab95f903a2af8e267f01d3ee317ef5db648bd858c81b8"
 
   def install
     bin.install "ai-token"

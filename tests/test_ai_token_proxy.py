@@ -102,13 +102,17 @@ class ProxyTest(unittest.TestCase):
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
             )
             try:
-                for _ in range(100):
+                deadline = time.monotonic() + 10
+                while time.monotonic() < deadline:
                     with socket.socket() as probe:
                         if probe.connect_ex(("127.0.0.1", proxy_port)) == 0:
                             break
+                    if proxy.poll() is not None:
+                        stdout, stderr = proxy.communicate(timeout=1)
+                        self.fail(f"proxy exited before listening: {stdout}\n{stderr}")
                     time.sleep(0.02)
                 else:
-                    self.fail("proxy did not listen")
+                    self.fail("proxy did not listen within 10 seconds")
 
                 connection = http.client.HTTPConnection("127.0.0.1", proxy_port, timeout=5)
                 connection.request(

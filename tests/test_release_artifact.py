@@ -25,6 +25,7 @@ PAYLOAD = (
     "Formula/codex-token.rb",
     "tools/build-release",
     "tools/install-release",
+    "tools/verify-tdd-history",
     "tools/run-live-canary",
     "tools/report-canary-failure",
     "tools/verify-live-soak",

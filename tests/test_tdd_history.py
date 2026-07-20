@@ -18,7 +18,7 @@ class TddHistoryTest(unittest.TestCase):
         subprocess.run(["git", "config", "user.name", "Fixture"], cwd=self.repo, check=True)
         (self.repo / "tests").mkdir()
         (self.repo / "ai-token").write_text("old\n")
-        (self.repo / "tests" / "check.py").write_text(
+        (self.repo / "tests" / "test_check.py").write_text(
             "import pathlib\n"
             "assert pathlib.Path('ai-token').read_text() == 'old\\n'\n"
         )
@@ -37,7 +37,7 @@ class TddHistoryTest(unittest.TestCase):
 
     def verify(self):
         return subprocess.run(
-            [VERIFIER, "--base", self.base, "--head", self.rev(), "--", sys.executable, "tests/check.py"],
+            [VERIFIER, "--base", self.base, "--head", self.rev(), "--", sys.executable, "tests/test_check.py"],
             cwd=self.repo,
             text=True,
             capture_output=True,
@@ -45,7 +45,7 @@ class TddHistoryTest(unittest.TestCase):
         )
 
     def test_accepts_a_failing_test_only_commit_before_the_green_change(self):
-        (self.repo / "tests" / "check.py").write_text(
+        (self.repo / "tests" / "test_check.py").write_text(
             "import pathlib\n"
             "assert pathlib.Path('ai-token').read_text() == 'new\\n'\n"
         )
@@ -60,7 +60,7 @@ class TddHistoryTest(unittest.TestCase):
 
     def test_rejects_production_change_without_an_earlier_test_only_commit(self):
         (self.repo / "ai-token").write_text("new\n")
-        (self.repo / "tests" / "check.py").write_text(
+        (self.repo / "tests" / "test_check.py").write_text(
             "import pathlib\n"
             "assert pathlib.Path('ai-token').read_text() == 'new\\n'\n"
         )
@@ -72,7 +72,7 @@ class TddHistoryTest(unittest.TestCase):
         self.assertIn("no preceding test-only red commit", result.stderr)
 
     def test_rejects_a_candidate_red_commit_whose_suite_was_green(self):
-        (self.repo / "tests" / "check.py").write_text(
+        (self.repo / "tests" / "test_check.py").write_text(
             "import pathlib\n"
             "assert pathlib.Path('ai-token').read_text() == 'old\\n'\n"
             "assert True\n"

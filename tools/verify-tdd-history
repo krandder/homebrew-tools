@@ -1,0 +1,116 @@
+#!/usr/bin/env python3
+"""Require a genuinely red test-only commit before production changes in a PR."""
+
+import argparse
+import pathlib
+import subprocess
+import sys
+import tempfile
+
+
+PRODUCTION = (
+    ".github/workflows/",
+    "Formula/",
+    "deploy/",
+    "tools/",
+    "ai-token",
+    "ai-vault",
+    "ai-vault-http",
+    "claude-token",
+    "codex-token",
+    "setup-claude-token",
+)
+
+
+def fail(message):
+    print(f"verify-tdd-history: {message}", file=sys.stderr)
+    raise SystemExit(1)
+
+
+def git(*arguments, cwd=None):
+    try:
+        return subprocess.check_output(
+            ["git", *arguments], cwd=cwd, text=True, stderr=subprocess.STDOUT
+        ).strip()
+    except subprocess.CalledProcessError as error:
+        fail(error.output.strip() or f"git {' '.join(arguments)} failed")
+
+
+def paths_at(commit):
+    output = git("diff-tree", "--no-commit-id", "--name-only", "-r", commit)
+    return [path for path in output.splitlines() if path]
+
+
+def is_production(path):
+    return any(path == prefix or path.startswith(prefix) for prefix in PRODUCTION)
+
+
+def is_test(path):
+    name = pathlib.PurePosixPath(path).name
+    return path.startswith("tests/") and name.startswith("test") and name.endswith((".py", ".sh"))
+
+
+def prove_red(commit, command):
+    with tempfile.TemporaryDirectory(prefix="verify-tdd-red-") as temporary:
+        worktree = pathlib.Path(temporary) / "red"
+        result = subprocess.run(
+            ["git", "worktree", "add", "--detach", str(worktree), commit],
+            text=True, capture_output=True,
+        )
+        if result.returncode != 0:
+            fail(result.stderr.strip() or "could not create red-commit worktree")
+        try:
+            try:
+                red = subprocess.run(
+                    command, cwd=worktree, text=True, capture_output=True, timeout=600,
+                )
+            except subprocess.TimeoutExpired:
+                fail("candidate red commit timed out instead of failing deterministically")
+        finally:
+            subprocess.run(
+                ["git", "worktree", "remove", "--force", str(worktree)],
+                text=True, capture_output=True,
+            )
+        if red.returncode == 0:
+            fail(f"candidate red commit unexpectedly passed: {commit}")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="verify PR red-before-green commit history")
+    parser.add_argument("--base", required=True)
+    parser.add_argument("--head", required=True)
+    parser.add_argument("command", nargs=argparse.REMAINDER)
+    args = parser.parse_args()
+    command = args.command[1:] if args.command[:1] == ["--"] else args.command
+    if not command:
+        fail("a red-suite command is required after --")
+    base = git("rev-parse", "--verify", f"{args.base}^{{commit}}")
+    head = git("rev-parse", "--verify", f"{args.head}^{{commit}}")
+    if subprocess.run(
+        ["git", "merge-base", "--is-ancestor", base, head], capture_output=True
+    ).returncode != 0:
+        fail("base is not an ancestor of head")
+    commits = git("rev-list", "--reverse", "--no-merges", f"{base}..{head}").splitlines()
+    candidate = None
+    production = None
+    for commit in commits:
+        paths = paths_at(commit)
+        changes_production = any(is_production(path) for path in paths)
+        changes_tests = any(is_test(path) for path in paths)
+        if changes_production:
+            production = commit
+            break
+        subject = git("show", "-s", "--format=%s", commit)
+        if changes_tests and subject.startswith("test:"):
+            candidate = commit
+    if production is None:
+        print("verify-tdd-history: no production change; red proof not required")
+        return
+    if candidate is None:
+        fail(f"production commit has no preceding test-only red commit: {production}")
+    prove_red(candidate, command)
+    print(f"verify-tdd-history: verified red-before-green ({candidate} -> {production})")
+
+
+if __name__ == "__main__":
+    main()

@@ -27,6 +27,12 @@ post-deploy commit convergence and detects modified, extra, or symlinked
 installed payloads. `test_ci_contract.py` pins the hard release gate, daily
 schedule, and 30-day artifact retention policy.
 
+`test_ai_token_live_canary.py` proves the live runner cannot touch an ordinary
+profile, start without `--live`, inherit a nested/profile-scoped home, execute
+an unverified release, leak command output into evidence, or use the shared
+Claude login keychain for a macOS follower. Leader and follower commands are
+exercised only through fake installed releases and disposable homes.
+
 Every bug fix starts with a deterministic failing test and ends with that test
 in this directory. A flake, retry-to-green result, or unexplained skip fails the
 suite.

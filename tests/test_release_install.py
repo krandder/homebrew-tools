@@ -64,6 +64,7 @@ class ReleaseInstallTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         first_target = (self.install_root / "current").resolve()
         self.assertEqual(first_target.name, f"{first_commit[:12]}-{first_digest[:12]}")
+        self.assertEqual(json.loads((first_target / "MANIFEST.json").read_text())["commit"], first_commit)
         self.assertEqual(stat.S_IMODE((first_target / "ai-token").stat().st_mode), 0o755)
 
         second, second_commit, second_digest = self.make_release(2)

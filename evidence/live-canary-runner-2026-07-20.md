@@ -27,8 +27,10 @@ payload and enforces these boundaries before invoking `ai-token`:
   interpreter startup;
 - leader execution publishes only the designated profile; follower execution
   pulls then checks only from the dedicated home;
-- macOS follower execution fails before any command because Claude's current
-  keychain service is process-wide and therefore not a disposable store;
+- schema-1 macOS follower execution fails before any command because Claude's
+  current keychain service is process-wide; schema 2 permits the follower only
+  when the kernel account name and password-database home exactly match the
+  designated `ai-token-canary*` OS account;
 - subprocess output is discarded, and atomic mode-0600 evidence records only
   step names and return codes; and
 - a failed verification or lifecycle step stops the sequence immediately.

@@ -1,10 +1,14 @@
+import importlib.machinery
+import importlib.util
 import json
 import os
 import pathlib
 import stat
 import subprocess
 import tempfile
+import types
 import unittest
+from unittest import mock
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -218,6 +222,53 @@ class LiveCanaryTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("dedicated OS account/keychain", result.stderr)
         self.assertEqual(self.recorded_calls(), [])
+
+    def test_macos_follower_requires_and_accepts_the_exact_dedicated_os_user(self):
+        self.write_config("follower", schema=2, os_user="ai-token-canary")
+        loader = importlib.machinery.SourceFileLoader("live_canary_runner", str(RUNNER))
+        spec = importlib.util.spec_from_loader(loader.name, loader)
+        runner = importlib.util.module_from_spec(spec)
+        loader.exec_module(runner)
+
+        with (
+            mock.patch.object(runner.platform, "system", return_value="Darwin"),
+            mock.patch.object(runner.os, "getuid", return_value=502),
+            mock.patch.object(
+                runner.pwd,
+                "getpwuid",
+                return_value=types.SimpleNamespace(
+                    pw_name="ai-token-canary",
+                    pw_dir=str(self.home),
+                ),
+            ),
+        ):
+            loaded = runner.load_config(self.config)
+        self.assertEqual(loaded["os_user"], "ai-token-canary")
+
+        for actual_user, actual_home in (
+            ("kas", self.home),
+            ("ai-token-canary", self.root / "wrong-home"),
+        ):
+            with self.subTest(actual_user=actual_user, actual_home=actual_home):
+                with (
+                    mock.patch.object(runner.platform, "system", return_value="Darwin"),
+                    mock.patch.object(runner.os, "getuid", return_value=502),
+                    mock.patch.object(
+                        runner.pwd,
+                        "getpwuid",
+                        return_value=types.SimpleNamespace(
+                            pw_name=actual_user,
+                            pw_dir=str(actual_home),
+                        ),
+                    ),
+                ):
+                    with self.assertRaises(SystemExit):
+                        runner.load_config(self.config)
+
+        self.write_config("follower", schema=2, os_user="kas")
+        with mock.patch.object(runner.platform, "system", return_value="Darwin"):
+            with self.assertRaises(SystemExit):
+                runner.load_config(self.config)
 
     def test_failure_evidence_discards_command_output_and_stops(self):
         self.write_config("follower")

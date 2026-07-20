@@ -195,6 +195,14 @@ step evidence. It will not use the process-wide Claude login keychain for a
 macOS follower; that role requires a dedicated OS account/keychain. No live
 canary is authorized until the profile and host-specific homes are designated.
 
+The release also includes `verify-live-soak`, the executable M6 accounting
+gate. It requires 30 complete UTC days by default, an explicit set of required
+host/role pairs, one converged profile and release commit, exact successful
+leader/follower step sequences, and mode-0600 non-symlink evidence. Any failed
+record in the window fails the gate even if a later retry succeeds. This proves
+the eventual soak only after real scheduled evidence exists; it does not start
+or simulate the live 30-day clock.
+
 ## Post-characterization implementation language
 
 The recommended migration target is typed Python 3 using the standard library

@@ -33,6 +33,12 @@ an unverified release, leak command output into evidence, or use the shared
 Claude login keychain for a macOS follower. Leader and follower commands are
 exercised only through fake installed releases and disposable homes.
 
+`test_ai_token_soak_evidence.py` pins the 30-day exit gate: every required
+host/role must have a successful record on every UTC day, all records must use
+the expected profile and commit, and a failed duplicate can never be hidden by
+a later success. Malformed, symlinked, permissively readable, or fabricated
+evidence fails closed.
+
 Every bug fix starts with a deterministic failing test and ends with that test
 in this directory. A flake, retry-to-green result, or unexplained skip fails the
 suite.

@@ -30,7 +30,8 @@ four shell integration suites.
   content-addressed installation/verification/rollback.
 - M5 has a guarded live runner but only hermetic execution evidence.
 - M6 now has an executable consecutive-day and cross-host convergence gate,
-  but no real scheduled evidence days.
+  plus independent unexpected-writer continuity checks, but no real scheduled
+  evidence days.
 
 ## Not yet proven
 
@@ -39,7 +40,8 @@ four shell integration suites.
 - The Mac follower path needs a dedicated OS account/keychain; a directory-only
   disposable home cannot isolate Claude's process-wide keychain service.
 - No declarative fleet timer, first-failure alert, cross-host evidence
-  collection, or unexpected-writer measurement is deployed.
+  collection, or unexpected-writer measurement is deployed; the release-side
+  measurement and nonzero failure contract are now ready for that wiring.
 - The physical staging, canary, limited rollout, rollback, final restore drill,
   and 30 consecutive green days have not happened.
 

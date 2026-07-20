@@ -31,6 +31,8 @@ RECORD_KEYS = {
     "release",
     "status",
     "steps",
+    "state_before",
+    "state_after",
 }
 
 
@@ -55,7 +57,7 @@ def read_record(path):
         record = json.loads(path.read_text())
     except (OSError, json.JSONDecodeError) as error:
         fail(f"invalid evidence {path.name}: {error}")
-    if not isinstance(record, dict) or set(record) != RECORD_KEYS or record["schema"] != 1:
+    if not isinstance(record, dict) or set(record) != RECORD_KEYS or record["schema"] != 2:
         fail(f"invalid evidence schema: {path.name}")
     try:
         timestamp = datetime.datetime.fromisoformat(record["timestamp"])
@@ -63,7 +65,28 @@ def read_record(path):
         fail(f"invalid evidence timestamp: {path.name}")
     if timestamp.tzinfo is None or timestamp.utcoffset() != datetime.timedelta(0):
         fail(f"evidence timestamp must be UTC: {path.name}")
-    return record, timestamp.date()
+    validate_snapshot(record["state_before"], path)
+    validate_snapshot(record["state_after"], path)
+    return record, timestamp
+
+
+def validate_snapshot(snapshot_value, path):
+    if not isinstance(snapshot_value, dict) or not snapshot_value:
+        fail(f"invalid credential state metadata: {path.name}")
+    for metadata in snapshot_value.values():
+        if not isinstance(metadata, dict) or metadata.get("exists") not in {True, False}:
+            fail(f"invalid credential state metadata: {path.name}")
+        expected = {"exists"} if metadata["exists"] is False else {
+            "exists", "size", "mtime_ns", "ctime_ns", "inode", "mode",
+        }
+        if set(metadata) != expected:
+            fail(f"invalid credential state metadata: {path.name}")
+        if metadata["exists"] is True:
+            if any(
+                not isinstance(metadata[name], int) or isinstance(metadata[name], bool) or metadata[name] < 0
+                for name in ("size", "mtime_ns", "ctime_ns", "inode")
+            ) or not re.fullmatch(r"0[0-7]{3}", str(metadata["mode"])):
+                fail(f"invalid credential state metadata: {path.name}")
 
 
 def successful_steps(record, path):
@@ -114,9 +137,11 @@ def main():
     requirements = sorted(set(args.require))
     start = through - datetime.timedelta(days=args.days - 1)
     present = set()
+    histories = {}
     records = 0
     for path in sorted(args.evidence_dir.glob("*.json")):
-        record, day = read_record(path)
+        record, timestamp = read_record(path)
+        day = timestamp.date()
         if day < start or day > through:
             continue
         if record["kind"] != "claude" or record["profile"] != args.profile:
@@ -131,6 +156,7 @@ def main():
             fail(f"failed canary evidence: {path.name}")
         successful_steps(record, path)
         present.add((day, host, role))
+        histories.setdefault((host, role), []).append((timestamp, path, record))
         records += 1
 
     for offset in range(args.days):
@@ -138,6 +164,12 @@ def main():
         for host, role in requirements:
             if (day, host, role) not in present:
                 fail(f"missing evidence: {day} {host}:{role}")
+
+    for history in histories.values():
+        ordered = sorted(history, key=lambda item: (item[0], item[1].name))
+        for previous, current in zip(ordered, ordered[1:]):
+            if previous[2]["state_after"] != current[2]["state_before"]:
+                fail(f"writer continuity mismatch: {current[1].name}")
 
     print(json.dumps({
         "status": "ok",

@@ -25,9 +25,11 @@ import http.server
 import json
 import os
 import datetime
+import re
 import socketserver
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 VAULT_DIR = Path(os.environ.get("CODEX_VAULT_DIR", str(Path.home() / ".codex-vault")))
@@ -38,6 +40,7 @@ HEARTBEAT_DIR = VAULT_DIR / "client-heartbeats"
 LISTEN = os.environ.get("CODEX_VAULT_LISTEN", "127.0.0.1:8231")
 ALLOWED_PROFILE = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.")
 ALLOWED_TOOL = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.")
+MIN_CLIENT_VERSION = (3, 0, 0)
 
 
 def load_tokens():
@@ -78,6 +81,10 @@ def valid_profile(p):
 
 def valid_tool(p):
     return bool(p) and all(c in ALLOWED_TOOL for c in p)
+
+def supported_writer_version(value):
+    match = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)", value or "")
+    return bool(match) and tuple(map(int, match.groups())) >= MIN_CLIENT_VERSION
 
 def server_event(event, user="", profile="", status="", detail=""):
     try:
@@ -134,7 +141,8 @@ def broker_refresh(account):
     sf = os.path.expanduser(f"~/.claude-tokens/{account}.json")
     if not os.path.exists(sf):
         sf = os.path.expanduser(f"~/shared/claude-tokens/{account}.json")
-    d = json.load(open(sf))
+    with open(sf) as fh:
+        d = json.load(fh)
     o = d.get("claudeAiOauth", d)
     ttl = max(60, int(float(o.get("expiresAt") or 0) / 1000 - time.time()))
     server_event("broker-refresh", account, "claude:" + account, "ok", "locked-publish")
@@ -230,6 +238,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
         user = self._identity()
         if not user:
             return
+        if self.path.startswith(("/sync/", "/push/")):
+            version = self.headers.get("X-Ai-Token-Version", "")
+            if not supported_writer_version(version):
+                server_event("protocol", user, self.path, "rejected", f"client-version={version or 'missing'}")
+                return self._send(426, '{"error":"ai-token 3.0.0 or newer is required for credential writes"}')
         if self.path == "/heartbeat/claude-token":
             if length > 16384:
                 return self._send(413, '{"error":"heartbeat too large"}')

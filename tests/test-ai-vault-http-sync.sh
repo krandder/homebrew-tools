@@ -43,6 +43,7 @@ done
 
 post() {
     /usr/bin/curl -fsS -H "Authorization: Bearer test-vault-token" \
+        -H "X-Ai-Token-Version: 3.0.3" \
         --data-binary '{"credential":"fixture"}' "http://127.0.0.1:$PORT$1" >/dev/null
 }
 
@@ -54,6 +55,7 @@ post /push/claude/owner-a
 [ "$(cat "$TMP/args")" = "receive claude:owner-a" ]
 
 code="$(/usr/bin/curl -sS -o /dev/null -w '%{http_code}' -H "Authorization: Bearer test-vault-token" \
+    -H "X-Ai-Token-Version: 3.0.3" \
     --data-binary '{}' "http://127.0.0.1:$PORT/sync/codex/owner-a")"
 [ "$code" = 400 ]
 
@@ -67,15 +69,18 @@ mkdir -p "$TMP/home/.claude-profiles/owner-a/.claude"
 cat > "$TMP/home/.claude-profiles/owner-a/.claude/credentials.json" <<'JSON'
 {"claudeAiOauth":{"accessToken":"access","refreshToken":"owner-refresh"},"claudeTokenSync":{"refreshAuthority":"owner"}}
 JSON
+AI_TOKEN_BIN="$ROOT/ai-token" CODEX_VAULT_DIR="$TMP/vault" \
 HOME="$TMP/home" python3 - "$ROOT/ai-vault-http" <<'PY'
-import importlib.machinery, types, sys
+import importlib.machinery, json, pathlib, types, sys
 
 module = types.ModuleType("ai_vault_http")
 importlib.machinery.SourceFileLoader(module.__name__, sys.argv[1]).exec_module(module)
 try:
     module.broker_refresh("owner-a")
-except RuntimeError as exc:
-    assert "owner machine" in str(exc)
+except RuntimeError:
+    events = [json.loads(line) for line in pathlib.Path(module.HTTP_EVENTS_FILE).read_text().splitlines()]
+    assert events[-1]["status"] == "failed"
+    assert "owner-managed" in events[-1]["detail"]
 else:
     raise AssertionError("owner-managed refresh reached the broker")
 PY

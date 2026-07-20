@@ -36,7 +36,7 @@
 # refreshes an owner-managed token (takeover is an explicit manual publish).
 
 set -euo pipefail
-VERSION="3.0.1"
+VERSION="3.0.3"
 AI_TOKEN_REAL_HOME="${AI_TOKEN_REAL_HOME:-$HOME}"
 
 # ---- tool selection (arg or shim name) ----
@@ -124,8 +124,14 @@ have_http_vault() { [ -n "${AI_VAULT_TOKEN:-${CLAUDE_VAULT_TOKEN:-${CODEX_VAULT_
 vault_url()   { echo "${AI_VAULT_URL:-${CLAUDE_VAULT_URL:-${CODEX_VAULT_URL:-$(awk -F= '/^url=/{print $2;exit}' "$CONFIG_FILE" 2>/dev/null)}}}"; }
 vault_token() { echo "${AI_VAULT_TOKEN:-${CLAUDE_VAULT_TOKEN:-${CODEX_VAULT_TOKEN:-$(sed -n 's/^token=//p' "$CONFIG_FILE" 2>/dev/null)}}}"; }
 ssh_vault() {
-    if [ -f "$VAULT_KEY" ]; then ssh -i "$VAULT_KEY" -o IdentitiesOnly=yes "$LEADER_HOST" "$@";
-    else ssh "$LEADER_HOST" "$@"; fi
+    local remote=("$@")
+    case "${1:-}" in
+        "ai-vault receive "*|"ai-vault sync-receive "*)
+            remote=("ai-vault client $VERSION ${1#ai-vault }")
+            ;;
+    esac
+    if [ -f "$VAULT_KEY" ]; then ssh -i "$VAULT_KEY" -o IdentitiesOnly=yes "$LEADER_HOST" "${remote[@]}";
+    else ssh "$LEADER_HOST" "${remote[@]}"; fi
 }
 vault_http() { # method path [data_file]
     local method="$1" path="$2" data="${3:-}" url tok host
@@ -168,6 +174,7 @@ kimi_read_store()  { python3 -c 'import json,sys; print(json.dumps(json.load(ope
 kimi_rt_of()       { python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("refresh_token",""))' "$1" 2>/dev/null; }
 kimi_expiry_of()   { python3 -c 'import json,sys; print(int(json.load(open(sys.argv[1])).get("expires_at") or 0))' "$1" 2>/dev/null; }
 kimi_access_of()   { python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("access_token",""))' "$1" 2>/dev/null; }
+kimi_authority_of() { python3 -c 'import json,sys; print((json.load(open(sys.argv[1])).get("kimiTokenSync") or {}).get("refreshAuthority", "vault"))' "$1" 2>/dev/null; }
 
 kimi_write_store() { # json_str dest — atomic, 0600
     python3 -c 'import json,os,sys
@@ -320,6 +327,7 @@ kimi_cmd_serve() {
     cf="$(kimi_canonical_file "$p")"
     if [ -f "$cf" ]; then
         if [ "$(kimi_needs_refresh "$cf")" = yes ]; then
+            [ "$(kimi_authority_of "$cf")" != owner ] || return 1
             kimi_refresh_store "$cf" || return 1
         fi
         PROFILE="$p" kimi_cmd_publish >/dev/null 2>&1 || return 1
@@ -435,13 +443,14 @@ kimi_cmd_run() {
         exec "$(kimi_resolve_bin)" "$@"              # owner: native path
     fi
     PROFILE="$p" kimi_cmd_pull || die "run: no fresh follower token for kimi:$p"
-    ( PROFILE="$p" kimi_cmd_keepfresh >/dev/null 2>&1 & echo $! > "${TMPDIR:-/tmp}/ai-token-keepfresh-$$.pid" )
+    PROFILE="$p" kimi_cmd_keepfresh >/dev/null 2>&1 &
+    local keepfresh_pid=$!
     export KIMI_CODE_OAUTH_HOST="$BLACKHOLE_URL"
     local bin; bin="$(kimi_resolve_bin)"
     "$bin" "$@"
     local rc=$?
-    kill "$(cat "${TMPDIR:-/tmp}/ai-token-keepfresh-$$.pid" 2>/dev/null)" 2>/dev/null || true
-    rm -f "${TMPDIR:-/tmp}/ai-token-keepfresh-$$.pid"
+    kill "$keepfresh_pid" 2>/dev/null || true
+    wait "$keepfresh_pid" 2>/dev/null || true
     return $rc
 }
 
@@ -575,7 +584,7 @@ cmd_install_generic() { # tool [--token T] [--user U]
 # follower: sentinel RT + CODEX_REFRESH_TOKEN_URL_OVERRIDE blackhole at launch
 # ═══════════════════════════════════════════════════════════════════════════
 CODEX_CLIENT_ID="app_EMoamEEZ73f0CkXaXp7hrann"
-CODEX_TOKEN_EP="https://auth.openai.com/oauth/token"
+CODEX_TOKEN_EP="${CODEX_TOKEN_EP:-https://auth.openai.com/oauth/token}"
 CODEX_PROFILES_DIR="${CODEX_PROFILES_DIR:-$AI_TOKEN_REAL_HOME/.codex-profiles}"
 CODEX_SHARED_DIR="${CODEX_SHARED_DIR:-$AI_TOKEN_REAL_HOME/shared/codex-tokens}"
 CODEX_LEGACY_AUTH="${CODEX_CONFIG_DIR:-$AI_TOKEN_REAL_HOME/.codex}/auth.json"
@@ -855,6 +864,7 @@ codex_cmd_run() { # [args...] follower launcher: freshen ~/.codex then exec code
     local user; user="$(config_user)"
     [ -n "$user" ] || die "run: no user configured. Run 'ai-token codex pair' first."
     local sf="$CODEX_SHARED_DIR/$user.json"
+    mkdir -p "$(dirname "$CODEX_LEGACY_AUTH")"
     if [ -f "$sf" ]; then
         codex_copy_token "$sf" "$CODEX_LEGACY_AUTH"
     elif have_http_vault; then
@@ -1035,7 +1045,9 @@ acquire_oauth_refresh_lock() {
 claude_profile_needs_refresh() { # auth_file -> yes/no
     python3 - "$1" <<'PY'
 import json, sys, time
-o=json.load(open(sys.argv[1])); o=o.get("claudeAiOauth",o)
+with open(sys.argv[1]) as fh:
+    o=json.load(fh)
+o=o.get("claudeAiOauth",o)
 rt=o.get("refreshToken","")
 exp=(o.get("expiresAt") or 0)/1000
 print("yes" if (not rt or rt.startswith("vlt:") or rt=="__follower_no_refresh__" or exp < time.time()+9000) else "no")
@@ -1045,7 +1057,8 @@ PY
 claude_profile_refresh_authority() { # auth_file -> owner/vault
     python3 - "$1" <<'PY'
 import json, sys
-d=json.load(open(sys.argv[1]))
+with open(sys.argv[1]) as fh:
+    d=json.load(fh)
 print((d.get("claudeTokenSync") or {}).get("refreshAuthority") or "vault")
 PY
 }
@@ -1057,7 +1070,8 @@ refresh_claude() { # auth_file -> stdout json
 import json, sys, urllib.request, urllib.error
 
 af, default_cid, url, default_scope, profile_url = sys.argv[1:6]
-d = json.load(open(af))
+with open(af) as fh:
+    d = json.load(fh)
 o = d.get("claudeAiOauth", d) if isinstance(d, dict) else {}
 rt = o.get("refreshToken", "")
 if not rt:
@@ -1089,8 +1103,8 @@ req = urllib.request.Request(
     },
 )
 try:
-    r = urllib.request.urlopen(req, timeout=30)
-    token = json.loads(r.read().decode())
+    with urllib.request.urlopen(req, timeout=30) as r:
+        token = json.loads(r.read().decode())
 except urllib.error.HTTPError as e:
     retry = e.headers.get("Retry-After") or e.headers.get("retry-after") or "none"
     cf_ray = e.headers.get("CF-RAY") or e.headers.get("cf-ray") or "none"
@@ -1113,8 +1127,8 @@ if access:
         },
     )
     try:
-        pr = urllib.request.urlopen(profile_req, timeout=10)
-        token["_profile"] = json.loads(pr.read().decode())
+        with urllib.request.urlopen(profile_req, timeout=10) as pr:
+            token["_profile"] = json.loads(pr.read().decode())
         token["_profile_fetch"] = {"status": "ok"}
     except urllib.error.HTTPError as e:
         retry = e.headers.get("Retry-After") or e.headers.get("retry-after") or "none"
@@ -1139,7 +1153,8 @@ claude_fresh_access_from_file() { # published-token JSON -> access token when fr
     python3 - "$1" <<'PY'
 import json, sys, time
 
-d = json.load(open(sys.argv[1]))
+with open(sys.argv[1]) as fh:
+    d = json.load(fh)
 o = d.get("claudeAiOauth", d)
 token = o.get("accessToken", "")
 try:
@@ -1155,7 +1170,8 @@ claude_needs_relogin_marker() { # canonical_file -> yes/no
     python3 - "$1" <<'PY' 2>/dev/null
 import json,sys
 try:
-    d=json.load(open(sys.argv[1]))
+    with open(sys.argv[1]) as fh:
+        d=json.load(fh)
     print("yes" if (d.get("claudeTokenSync") or {}).get("needsRelogin") else "no")
 except Exception:
     print("no")
@@ -1165,12 +1181,16 @@ claude_mark_needs_relogin() { # canonical_file reason
     python3 - "$1" "$2" <<'PY'
 import json,sys,os,datetime
 f,reason=sys.argv[1],sys.argv[2]
-d=json.load(open(f))
+with open(f) as fh:
+    d=json.load(fh)
 sync=d.setdefault("claudeTokenSync",{})
 sync["needsRelogin"]=True
 sync["needsReloginSince"]=datetime.datetime.now(datetime.timezone.utc).isoformat()
 sync["needsReloginReason"]=reason
-tmp=f+".tmp"; json.dump(d,open(tmp,"w"),indent=2); os.chmod(tmp,0o600); os.replace(tmp,f)
+tmp=f+".tmp"
+with open(tmp,"w") as fh:
+    json.dump(d,fh,indent=2)
+os.chmod(tmp,0o600); os.replace(tmp,f)
 PY
 }
 claude_alert_relogin() { # profile detail — durable operator alert (best effort)
@@ -1612,6 +1632,14 @@ claude_cmd_run() { # [claude args...]  — follower launcher; falls back to norm
         fi
         rm -f "$tmp"
     fi
+    if [ -z "$access" ] && ! have_http_vault; then
+        local tmp
+        tmp="$(mktemp)"
+        if ssh_vault "ai-vault serve claude:$user" > "$tmp" 2>/dev/null; then
+            access="$(claude_fresh_access_from_file "$tmp" 2>/dev/null || true)"
+        fi
+        rm -f "$tmp"
+    fi
     # If we have a fresh broker/shared token, keep Claude in the caller's normal
     # HOME and select only the account through environment credentials.
     # Otherwise -> fall through to normal claude (uses the local keychain/login).
@@ -2045,7 +2073,7 @@ import http from "node:http";
 import { readFileSync } from "node:fs";
 
 const [registryPath, sharedDir] = process.argv.slice(2);
-const UPSTREAM = "https://api.anthropic.com";
+const UPSTREAM = process.env.CLAUDE_PROXY_UPSTREAM || "https://api.anthropic.com";
 const HOP_BY_HOP = new Set([
   "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
   "te", "trailer", "trailers", "transfer-encoding", "upgrade",

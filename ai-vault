@@ -218,7 +218,7 @@ PY
     if [ "$kind" = kimi ] && [ "${KIMI_OWNER_SYNC:-0}" = 1 ]; then
         set +e
         python3 - "$tmp" "$af" "$sf" "$(name_of "$p")" <<'PYK'
-import datetime, json, os, sys, time
+import datetime, fcntl, json, os, sys, tempfile, time
 
 incoming_path, auth_path, shared_path, profile = sys.argv[1:5]
 sentinel = "__follower_no_refresh__"
@@ -226,30 +226,70 @@ sentinel = "__follower_no_refresh__"
 def atomic_json(path, data):
     d = os.path.dirname(path) or "."
     os.makedirs(d, exist_ok=True)
-    tmp = path + ".tmp"
-    with open(tmp, "w") as fh:
-        json.dump(data, fh, indent=2)
-    os.chmod(tmp, 0o600)
-    os.replace(tmp, path)
+    fd, temporary = tempfile.mkstemp(prefix=".token-", dir=d)
+    try:
+        with os.fdopen(fd, "w") as fh:
+            json.dump(data, fh, indent=2)
+            fh.write("\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
 
 try:
     creds = json.load(open(incoming_path))
 except Exception as exc:
     sys.exit("ai-vault: invalid token JSON: " + str(exc))
+if not isinstance(creds, dict):
+    sys.exit("ai-vault: token JSON must be an object")
 rt = creds.get("refresh_token", "")
 if not rt or rt == sentinel:
     sys.exit("ai-vault: kimi sync requires a real owner refresh token")
 if not creds.get("access_token"):
     sys.exit("ai-vault: kimi sync requires an access token")
-creds.setdefault("kimiTokenSync", {})["refreshAuthority"] = "owner"
-creds["synced_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
-atomic_json(auth_path, creds)
-published = dict(creds)
-published["refresh_token"] = sentinel
-published["profile"] = profile
-published["published_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
-published["note"] = "owner-synced; vault did not refresh"
-atomic_json(shared_path, published)
+try:
+    expires = int(creds.get("expires_at") or 0)
+except Exception:
+    expires = 0
+if expires <= int(time.time()) + 60:
+    sys.exit("ai-vault: kimi sync requires a fresh versioned access token")
+
+lock_path = auth_path + ".lock"
+with open(lock_path, "a+") as lock:
+    os.chmod(lock_path, 0o600)
+    fcntl.flock(lock, fcntl.LOCK_EX)
+    if os.path.exists(auth_path):
+        try:
+            existing = json.load(open(auth_path))
+        except Exception as exc:
+            sys.exit("ai-vault: canonical credential is invalid; refusing overwrite: " + str(exc))
+        if not isinstance(existing, dict):
+            sys.exit("ai-vault: canonical credential is invalid; refusing overwrite")
+        try:
+            current_expires = int(existing.get("expires_at") or 0)
+        except Exception:
+            current_expires = 0
+        current_refresh = existing.get("refresh_token", "")
+        if expires < current_expires:
+            sys.exit("ai-vault: stale kimi credential snapshot rejected")
+        if expires == current_expires and current_refresh and rt != current_refresh:
+            sys.exit("ai-vault: conflicting kimi credential rotation rejected")
+
+    sync = creds.setdefault("kimiTokenSync", {})
+    if not isinstance(sync, dict):
+        sys.exit("ai-vault: kimiTokenSync must be an object")
+    sync["refreshAuthority"] = "owner"
+    creds["synced_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    atomic_json(auth_path, creds)
+    published = dict(creds)
+    published["refresh_token"] = sentinel
+    published["profile"] = profile
+    published["published_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    published["note"] = "owner-synced; vault did not refresh"
+    atomic_json(shared_path, published)
 PYK
         rc=$?
         set -e
@@ -262,28 +302,112 @@ PYK
 
     set +e
     python3 - "$tmp" "$af" "$(kind_of "$p")" <<'PY'
-import json,sys,os
-tmp,af,kind=sys.argv[1],sys.argv[2],sys.argv[3]
-try: data=json.load(open(tmp))
-except Exception as e: sys.exit("ai-vault: invalid token JSON: "+str(e))
-# accept codex ({tokens:{refresh_token}}) or claude ({refreshToken} / {claudeAiOauth:{refreshToken}})
-def rt(o):
-    return ((o.get("tokens") or {}).get("refresh_token") or o.get("refreshToken")
-            or (o.get("claudeAiOauth") or {}).get("refreshToken")
-            or o.get("refresh_token") or "")
-if not rt(data): sys.exit("ai-vault: token has no refresh_token")
-sync = data.setdefault("claudeTokenSync", {}) if kind == "claude" else None
-if sync is not None:
-    sync.setdefault("refreshAuthority", "vault")   # plain push = vault owns refresh
-    for k in ("needsRelogin","needsReloginSince","needsReloginReason"):
-        sync.pop(k, None)                            # fresh creds = revived
-json.dump(data,open(af,"w"),indent=2); os.chmod(af,0o600)
+import datetime, fcntl, json, os, sys, tempfile
+
+incoming_path, auth_path, kind = sys.argv[1:4]
+sentinel = "__follower_no_refresh__"
+
+try:
+    data = json.load(open(incoming_path))
+except Exception as exc:
+    sys.exit("ai-vault: invalid token JSON: " + str(exc))
+if not isinstance(data, dict):
+    sys.exit("ai-vault: token JSON must be an object")
+
+def refresh_token(value):
+    return ((value.get("tokens") or {}).get("refresh_token") or value.get("refreshToken")
+            or (value.get("claudeAiOauth") or {}).get("refreshToken")
+            or value.get("refresh_token") or "")
+
+incoming_refresh = refresh_token(data)
+if not incoming_refresh:
+    sys.exit("ai-vault: token has no refresh_token")
+
+incoming_expiry = 0
+incoming_generation = None
+if kind == "claude":
+    if incoming_refresh == sentinel or incoming_refresh.startswith("vlt:"):
+        sys.exit("ai-vault: Claude vault handoff requires a real refresh token")
+    oauth = data.get("claudeAiOauth", data)
+    try:
+        incoming_expiry = int(float(oauth.get("expiresAt") or 0))
+    except Exception:
+        incoming_expiry = 0
+    if incoming_expiry <= 0:
+        sys.exit("ai-vault: Claude vault handoff requires expiresAt")
+elif kind == "codex":
+    raw_generation = data.get("last_refresh")
+    try:
+        incoming_generation = datetime.datetime.fromisoformat(
+            str(raw_generation).replace("Z", "+00:00")
+        ).timestamp()
+    except Exception:
+        sys.exit("ai-vault: Codex vault handoff requires ISO-8601 last_refresh")
+
+def atomic_json(path, value):
+    fd, temporary = tempfile.mkstemp(prefix=".token-", dir=os.path.dirname(path))
+    try:
+        with os.fdopen(fd, "w") as handle:
+            json.dump(value, handle, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+with open(auth_path + ".lock", "a+") as lock:
+    os.chmod(auth_path + ".lock", 0o600)
+    fcntl.flock(lock, fcntl.LOCK_EX)
+    existing = None
+    if os.path.exists(auth_path):
+        try:
+            existing = json.load(open(auth_path))
+        except Exception as exc:
+            sys.exit("ai-vault: canonical credential is invalid; refusing overwrite: " + str(exc))
+        if not isinstance(existing, dict):
+            sys.exit("ai-vault: canonical credential is invalid; refusing overwrite")
+
+    if kind == "claude" and existing is not None:
+        existing_oauth = existing.get("claudeAiOauth", existing)
+        try:
+            existing_expiry = int(float(existing_oauth.get("expiresAt") or 0))
+        except Exception:
+            existing_expiry = 0
+        existing_refresh = refresh_token(existing)
+        if incoming_expiry < existing_expiry:
+            sys.exit("ai-vault: stale Claude credential snapshot rejected")
+        if incoming_expiry == existing_expiry and existing_refresh and incoming_refresh != existing_refresh:
+            sys.exit("ai-vault: conflicting Claude credential rotation rejected")
+    if kind == "codex" and existing is not None:
+        try:
+            existing_generation = datetime.datetime.fromisoformat(
+                str(existing.get("last_refresh")).replace("Z", "+00:00")
+            ).timestamp()
+        except Exception:
+            sys.exit("ai-vault: canonical Codex credential has no valid generation; refusing overwrite")
+        existing_refresh = refresh_token(existing)
+        if incoming_generation < existing_generation:
+            sys.exit("ai-vault: stale Codex credential snapshot rejected")
+        if incoming_generation == existing_generation and existing_refresh and incoming_refresh != existing_refresh:
+            sys.exit("ai-vault: conflicting Codex credential rotation rejected")
+
+    if kind == "claude":
+        sync = data.setdefault("claudeTokenSync", {})
+        if not isinstance(sync, dict):
+            sys.exit("ai-vault: claudeTokenSync must be an object")
+        sync["refreshAuthority"] = "vault"
+        for key in ("needsRelogin", "needsReloginSince", "needsReloginReason"):
+            sync.pop(key, None)
+    atomic_json(auth_path, data)
 PY
     rc=$?
     set -e
     rm -f "$tmp"
     [ "$rc" -eq 0 ] || { audit "$p" push failed "bad token"; exit "$rc"; }
-    "$(publish_tool_for "$p")" publish --profile "$(name_of "$p")" >/dev/null 2>&1 \
+    ai-token "$kind" publish --profile "$(name_of "$p")" >/dev/null 2>&1 \
         || { audit "$p" publish deferred "rate-limited/pending"; say "received '$p' ($kind) — token stored; publish deferred (cron will refresh)."; return 0; }
     audit "$p" push ok "by $(current_user) ($kind)"
     say "received '$p' ($kind) from $(current_user); refreshed + published"
@@ -544,6 +668,26 @@ cmd_authorize_pull() {
     can_pull "$1" || die "authorize-pull: '$(current_user)' is not authorized for '$1'"
 }
 
+client_version_supported() {
+    python3 - "$1" <<'PY'
+import re, sys
+match = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)", sys.argv[1])
+sys.exit(0 if match and tuple(map(int, match.groups())) >= (3, 0, 0) else 1)
+PY
+}
+
+cmd_client() { # version receive|sync-receive profile
+    local version="${1:-}" action="${2:-}" profile="${3:-}"
+    client_version_supported "$version" || {
+        [ -z "$profile" ] || audit "$profile" protocol rejected "client-version=${version:-missing}"
+        die "client: ai-token 3.0.0 or newer is required for credential writes"
+    }
+    case "$action" in
+        receive|sync-receive) exec ai-vault "$action" "$profile" ;;
+        *) die "client: only versioned receive/sync-receive writes are permitted" ;;
+    esac
+}
+
 # SSH forced-command wrapper: binds the connection to <identity> and only allows
 # receive/sync-receive/serve. Put in authorized_keys as:
 #   command="ai-vault shell stale-a",no-pty,no-port-forwarding,... ssh-ed25519 AAA... stale-a@laptop
@@ -555,7 +699,11 @@ cmd_shell() {
     cmd="${cmd#ai-vault }"   # tolerate "ai-vault receive X" form
     [ -n "$cmd" ] || die "shell: no command (interactive logins are not permitted)"
     case "$cmd" in
-        receive\ *|sync-receive\ *|serve\ *) exec ai-vault $cmd ;;
+        client\ *|serve\ *) exec ai-vault $cmd ;;
+        receive\ *|sync-receive\ *)
+            audit "${cmd#* }" protocol rejected "client-version=missing"
+            die "shell: unversioned credential writes are not permitted"
+            ;;
         whoami) cmd_whoami ;;
         *) die "shell: disallowed command (only receive/sync-receive/serve): $cmd" ;;
     esac
@@ -567,9 +715,10 @@ usage() { sed -n '2,/^$/p' "$0" | sed 's/^# \?//' >&2; }
 [ $# -ge 1 ] || { usage; exit 1; }
 cmd="$1"; shift || true
 case "$cmd" in
+    client)     cmd_client "$@" ;;
     receive)    cmd_receive "$@" ;;
     sync-receive)
-        case "$(kind_of "$2")" in
+        case "$(kind_of "$1")" in
             claude) CLAUDE_OWNER_SYNC=1 ;;
             kimi)   KIMI_OWNER_SYNC=1 ;;
         esac

@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+MODE="${1:-full}"
+case "$MODE" in fast|full) ;; *) echo "usage: tests/run [fast|full]" >&2; exit 2 ;; esac
+cd "$ROOT"
+
+for script in ai-token ai-vault claude-token codex-token setup-claude-token; do
+    bash -n "$script"
+done
+python3 - <<'PY'
+from pathlib import Path
+compile(Path("ai-vault-http").read_text(encoding="utf-8"), "ai-vault-http", "exec")
+PY
+
+for pattern in 'test_ai_token*.py' 'test_ai_vault*.py' 'test_follower_leader*.py' 'test_formula_integrity.py'; do
+    python3 -m unittest discover -s tests -p "$pattern"
+done
+for test_file in tests/test-*.sh; do
+    echo "RUN $(basename "$test_file")"
+    bash "$test_file"
+done
+
+echo "ok: $MODE suite"

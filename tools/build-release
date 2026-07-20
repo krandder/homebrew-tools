@@ -32,6 +32,7 @@ PAYLOAD = (
     "deploy/canary/farol/ai-token-canary.service",
     "deploy/canary/farol/ai-token-canary.timer",
     "deploy/canary/farol/ai-token-canary-alert@.service",
+    "deploy/canary/farol/ai-token-canary-vault.service",
     "deploy/canary/agent-1/ai-token-canary.service",
     "deploy/canary/agent-1/ai-token-canary.timer",
     "deploy/canary/agent-1/ai-token-canary-alert@.service",

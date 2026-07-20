@@ -6,6 +6,8 @@ import subprocess
 import tempfile
 import unittest
 
+from support import MockOAuthServer
+
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 AI_TOKEN = ROOT / "ai-token"
@@ -56,29 +58,62 @@ class FakeClockTest(unittest.TestCase):
         }))
 
     def test_claude_follower_freshness_uses_the_injected_clock(self):
-        self.write_claude(59)
+        self.write_claude(60)
         self.assertNotEqual(self.run_check("claude").returncode, 0)
         self.write_claude(61)
         self.assertEqual(self.run_check("claude").returncode, 0)
 
     def test_kimi_follower_freshness_uses_the_injected_clock(self):
-        self.write_kimi(59)
+        self.write_kimi(60)
         self.assertNotEqual(self.run_check("kimi").returncode, 0)
         self.write_kimi(61)
         self.assertEqual(self.run_check("kimi").returncode, 0)
+
+    def test_kimi_publish_refreshes_at_the_follower_freshness_boundary(self):
+        canonical = self.home / "kimi-profiles" / "fixture" / "credentials.json"
+        canonical.parent.mkdir(parents=True)
+        canonical.write_text(json.dumps({
+            "access_token": "boundary-access",
+            "refresh_token": "real-refresh",
+            "expires_at": NOW + 60,
+        }))
+        token = {
+            "access_token": "fresh-access",
+            "refresh_token": "rotated-refresh",
+            "expires_in": 900,
+        }
+        with MockOAuthServer(200, token) as server:
+            env = {
+                **self.env,
+                "KIMI_PROFILES_DIR": str(self.home / "kimi-profiles"),
+                "KIMI_SHARED_DIR": str(self.home / "kimi-shared"),
+                "KIMI_CODE_OAUTH_HOST": server.token_url.rsplit("/oauth/token", 1)[0],
+            }
+            result = subprocess.run(
+                [AI_TOKEN, "kimi", "publish", "--profile", "fixture"],
+                env=env,
+                text=True,
+                capture_output=True,
+                timeout=10,
+            )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(server.requests), 1)
+        published = json.loads((self.home / "kimi-shared" / "fixture.json").read_text())
+        self.assertEqual(published["access_token"], "fresh-access")
+        self.assertEqual(published["refresh_token"], SENTINEL)
 
     @staticmethod
     def jwt(expiry):
         payload = base64.urlsafe_b64encode(json.dumps({"exp": expiry}).encode()).rstrip(b"=").decode()
         return f"e30.{payload}.sig"
 
-    def test_codex_run_rejects_an_expired_published_token_before_launch(self):
+    def test_codex_run_uses_the_same_strict_freshness_boundary(self):
         shared = self.home / "shared" / "codex-tokens" / "fixture.json"
         shared.parent.mkdir(parents=True)
         shared.write_text(json.dumps({
             "auth_mode": "chatgpt",
             "tokens": {
-                "access_token": self.jwt(NOW + 59),
+                "access_token": self.jwt(NOW + 60),
                 "refresh_token": SENTINEL,
             },
         }))
@@ -101,6 +136,19 @@ class FakeClockTest(unittest.TestCase):
         )
         self.assertNotEqual(result.returncode, 0)
         self.assertFalse(marker.exists())
+
+        value = json.loads(shared.read_text())
+        value["tokens"]["access_token"] = self.jwt(NOW + 61)
+        shared.write_text(json.dumps(value))
+        result = subprocess.run(
+            [AI_TOKEN, "codex", "run", "--probe"],
+            env=env,
+            text=True,
+            capture_output=True,
+            timeout=10,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(marker.exists())
 
 
 if __name__ == "__main__":

@@ -48,6 +48,16 @@ class ProxyTest(unittest.TestCase):
             def do_POST(self):
                 body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
                 requests.append(({key.lower(): value for key, value in self.headers.items()}, body))
+                if self.path == "/disconnect":
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/event-stream")
+                    self.send_header("Transfer-Encoding", "chunked")
+                    self.end_headers()
+                    self.wfile.write(b"d\r\ndata: first\n\n\r\n")
+                    self.wfile.flush()
+                    self.connection.shutdown(socket.SHUT_RDWR)
+                    self.connection.close()
+                    return
                 compressed = gzip.compress(b"proxy-ok")
                 self.send_response(200)
                 self.send_header("Content-Type", "text/plain")
@@ -116,6 +126,21 @@ class ProxyTest(unittest.TestCase):
                 rotated_response = rotated.getresponse()
                 self.assertEqual(rotated_response.read(), b"proxy-ok")
                 rotated.close()
+
+                disconnected = http.client.HTTPConnection("127.0.0.1", proxy_port, timeout=5)
+                disconnected.request("POST", "/disconnect", body=b"stream-request")
+                disconnected_response = disconnected.getresponse()
+                try:
+                    disconnected_body = disconnected_response.read()
+                except http.client.IncompleteRead as error:
+                    disconnected_body = error.partial
+                disconnected.close()
+
+                recovered = http.client.HTTPConnection("127.0.0.1", proxy_port, timeout=5)
+                recovered.request("POST", "/v1/messages", body=b"after-disconnect")
+                recovered_response = recovered.getresponse()
+                recovered_body = recovered_response.read()
+                recovered.close()
             finally:
                 proxy.terminate()
                 try:
@@ -136,6 +161,12 @@ class ProxyTest(unittest.TestCase):
         self.assertEqual(requests[0][1], b"request-body")
         self.assertEqual(requests[1][0]["authorization"], "Bearer rotated-access")
         self.assertEqual(requests[1][1], b"second-request")
+        self.assertEqual(disconnected_response.status, 200)
+        self.assertEqual(disconnected_body, b"data: first\n\n")
+        self.assertEqual(recovered_response.status, 200)
+        self.assertEqual(recovered_body, b"proxy-ok")
+        self.assertEqual(requests[3][0]["authorization"], "Bearer rotated-access")
+        self.assertEqual(requests[3][1], b"after-disconnect")
 
 
 if __name__ == "__main__":

@@ -179,6 +179,28 @@ class ClaudeLifecycleTest(unittest.TestCase):
         self.assertIn("owner-managed", result.stderr)
         self.assertEqual(server.requests, [])
 
+    def test_refresh_threshold_uses_the_injected_clock(self):
+        now = 4_102_444_800
+        token = {
+            "access_token": "new-access",
+            "refresh_token": "new-refresh",
+            "expires_in": 28_800,
+        }
+        with MockOAuthServer(200, token, 200, {}) as server:
+            self.write_credentials(expires_at=(now + 9_000) * 1000)
+            exact = self.run_publish(server, AI_TOKEN_TEST_NOW=str(now))
+            self.assertEqual(exact.returncode, 0, exact.stderr)
+            self.assertEqual(server.requests, [])
+            published = json.loads((self.shared / f"{self.profile}.json").read_text())
+            self.assertEqual(published["claudeAiOauth"]["accessToken"], "old-access")
+
+            self.write_credentials(expires_at=(now + 8_999) * 1000)
+            below = self.run_publish(server, AI_TOKEN_TEST_NOW=str(now))
+            self.assertEqual(below.returncode, 0, below.stderr)
+            self.assertEqual(sum(request[0] == "POST" for request in server.requests), 1)
+            published = json.loads((self.shared / f"{self.profile}.json").read_text())
+            self.assertEqual(published["claudeAiOauth"]["accessToken"], "new-access")
+
     def test_success_rotates_atomically_and_publishes_follower(self):
         self.write_credentials()
         token = {

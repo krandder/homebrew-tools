@@ -36,7 +36,7 @@
 # refreshes an owner-managed token (takeover is an explicit manual publish).
 
 set -euo pipefail
-VERSION="3.0.7"
+VERSION="3.0.8"
 infer_machine_home() {
     case "$1" in
         */.codex-profiles/*) printf '%s\n' "${1%%/.codex-profiles/*}" ;;
@@ -296,7 +296,7 @@ try:
     rt=d.get("refresh_token","")
     exp=int(d.get("expires_at") or 0)
     now=float(os.environ.get("AI_TOKEN_TEST_NOW") or time.time())
-    print("yes" if (not rt or rt=="__follower_no_refresh__" or exp < now+60) else "no")
+    print("yes" if (not rt or rt=="__follower_no_refresh__" or exp <= now+60) else "no")
 except Exception:
     print("yes")
 PY

@@ -2,8 +2,8 @@ class AiToken < Formula
   desc "One credential-sync tool for AI CLIs (claude, codex, kimi) via the vault"
   homepage "https://github.com/krandder/homebrew-tools"
   url "https://raw.githubusercontent.com/krandder/homebrew-tools/main/ai-token"
-  version "3.0.7"
-  sha256 "217fc82c404e3bca2bf29f4552439767a4388053f9cd51d361fc58db07357d49"
+  version "3.0.8"
+  sha256 "63e063482c1b8feee7a8626af54a290cdbdb69adb863f7ae83a6065c075723f1"
 
   def install
     bin.install "ai-token"
@@ -14,7 +14,7 @@ class AiToken < Formula
   end
 
   test do
-    assert_match "ai-token 3.0.7", shell_output("#{bin}/ai-token --version")
-    assert_match "claude-token 3.0.7", shell_output("#{bin}/claude-token --version")
+    assert_match "ai-token 3.0.8", shell_output("#{bin}/ai-token --version")
+    assert_match "claude-token 3.0.8", shell_output("#{bin}/claude-token --version")
   end
 end

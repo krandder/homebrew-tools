@@ -265,6 +265,11 @@ class LiveCanaryTest(unittest.TestCase):
                     with self.assertRaises(SystemExit):
                         runner.load_config(self.config)
 
+        self.write_config("follower", schema=2, os_user="kas")
+        with mock.patch.object(runner.platform, "system", return_value="Darwin"):
+            with self.assertRaises(SystemExit):
+                runner.load_config(self.config)
+
     def test_failure_evidence_discards_command_output_and_stops(self):
         self.write_config("follower")
         self.fail_action.write_text("pull")

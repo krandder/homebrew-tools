@@ -14,6 +14,7 @@ import json
 import os
 import pathlib
 import platform
+import pwd
 import re
 import socket
 import stat
@@ -32,8 +33,10 @@ CONFIG_KEYS = {
     "expect_commit",
     "evidence_dir",
 }
+MACOS_CONFIG_KEYS = CONFIG_KEYS | {"os_user"}
 COMMIT = re.compile(r"^[0-9a-f]{40}$")
 PROFILE = re.compile(r"^canary-[A-Za-z0-9._-]+$")
+MACOS_USER = re.compile(r"^ai-token-canary(?:-[A-Za-z0-9._-]+)?$")
 SAFE_PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
 
 
@@ -51,10 +54,13 @@ def load_config(path):
         config = json.loads(path.read_text())
     except (OSError, json.JSONDecodeError) as error:
         fail(f"invalid config: {error}")
-    if not isinstance(config, dict) or set(config) != CONFIG_KEYS:
-        fail("config keys do not match schema 1")
-    if config["schema"] != 1 or config["kind"] != "claude":
-        fail("only schema-1 Claude canaries are supported")
+    if not isinstance(config, dict):
+        fail("config must be an object")
+    expected_keys = CONFIG_KEYS if config.get("schema") == 1 else MACOS_CONFIG_KEYS
+    if config.get("schema") not in {1, 2} or set(config) != expected_keys:
+        fail("config keys do not match the declared schema")
+    if config["kind"] != "claude":
+        fail("only Claude canaries are supported")
     if config["non_human"] is not True or not PROFILE.fullmatch(str(config["profile"])):
         fail("profile must be explicitly non-human and named canary-*")
     if config["role"] not in {"leader", "follower"}:
@@ -72,7 +78,14 @@ def load_config(path):
     if evidence.is_symlink() or (evidence.exists() and not evidence.is_dir()):
         fail("evidence_dir must be a directory, not a symlink")
     if platform.system() == "Darwin" and config["role"] == "follower":
-        fail("a macOS follower requires a dedicated OS account/keychain")
+        if config["schema"] != 2 or not MACOS_USER.fullmatch(str(config.get("os_user", ""))):
+            fail("a macOS follower requires a designated dedicated OS account/keychain")
+        try:
+            account = pwd.getpwuid(os.getuid())
+        except KeyError:
+            fail("the current macOS account has no password-database record")
+        if account.pw_name != config["os_user"] or pathlib.Path(account.pw_dir).resolve() != home.resolve():
+            fail("the current macOS account/home does not match the dedicated canary designation")
     return config
 
 

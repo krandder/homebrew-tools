@@ -188,12 +188,14 @@ controlled release phases on 2026-07-20. The dedicated canary profile remains
 the only required designation.
 
 The immutable release now includes a fail-closed live-canary runner. It requires
-an explicit schema-1 designation for a non-human `canary-*` Claude profile,
+an explicit designation for a non-human `canary-*` Claude profile,
 pins all lifecycle commands to a verified installed commit, replaces ambient
 `HOME` with the dedicated canary home, and retains only sanitized mode-0600
-step evidence. It will not use the process-wide Claude login keychain for a
-macOS follower; that role requires a dedicated OS account/keychain. No live
-canary is authorized until the profile and host-specific homes are designated.
+step evidence. Linux uses schema 1. A macOS follower uses schema 2 and must name
+an `ai-token-canary*` OS user; the runner verifies the kernel UID resolves to
+that exact user and that its password-database home is the configured canary
+home before touching the process-wide Claude Keychain service. Directory-only
+isolation or merely changing `HOME` is rejected.
 
 The release also includes `verify-live-soak`, the executable M6 accounting
 gate. It requires 30 complete UTC days by default, an explicit set of required

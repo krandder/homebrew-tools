@@ -1,0 +1,327 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Connect to farol. Try direct path (port-knock + m2/farol host) first;
+# fall back to farol-ts (Tailscale, no knock) if direct is unreachable.
+# Requires: Host m2/farol and Host farol-ts in ~/.ssh/config
+
+DIRECT_HOST="farol"
+FALLBACK_HOST="farol-ts"
+REMOTE_HOST=""        # chosen by select_host
+NEEDS_KNOCK=0
+BACKOFF=2
+MAX_BACKOFF=30
+SUCCESS_THRESHOLD=10  # seconds before resetting backoff
+
+RED='\033[0;31m'
+YEL='\033[0;33m'
+GRN='\033[0;32m'
+RST='\033[0m'
+
+set_tab_title() { printf '\033]1;%s\007' "${1#cao-}"; }
+
+cleanup() {
+    stty sane 2>/dev/null || true
+    set_tab_title "${SHELL##*/}"
+    printf '\n%bGoodbye%b\n' "$GRN" "$RST"
+    exit 0
+}
+trap cleanup SIGINT SIGTERM
+
+# --- Port knocking ---
+raw_knock() {
+    command knock -u -d 150 smtp.etica.net 7026 6126 9026 || true
+    sleep 1
+}
+
+# Knock only if the chosen host needs it (direct path); no-op for farol-ts.
+knock() {
+    [ "$NEEDS_KNOCK" = "1" ] && raw_knock
+    return 0
+}
+
+# Hard wall-clock cap for connectivity probes: ConnectTimeout only bounds the
+# TCP-connect phase, not a stalled SSH handshake (knock opens the port but the
+# server is unresponsive). Degrade gracefully if no timeout binary exists.
+if command -v timeout >/dev/null 2>&1; then
+    TIMEOUT_BIN="timeout"
+elif command -v gtimeout >/dev/null 2>&1; then
+    TIMEOUT_BIN="gtimeout"
+else
+    TIMEOUT_BIN=""
+fi
+
+# probe_ssh <connect_timeout_secs> <host> -- true if reachable, fast-fail.
+# ConnectionAttempts=1 overrides ssh_config's value of 3, which would
+# otherwise make each probe (and thus the fallback) ~3x slower.
+probe_ssh() {
+    local ct="$1" host="$2" cap=$(( $1 + 4 ))
+    if [ -n "$TIMEOUT_BIN" ]; then
+        "$TIMEOUT_BIN" "$cap" ssh -o ConnectTimeout="$ct" \
+            -o ConnectionAttempts=1 -o BatchMode=yes "$host" true 2>/dev/null
+    else
+        ssh -o ConnectTimeout="$ct" -o ConnectionAttempts=1 \
+            -o BatchMode=yes "$host" true 2>/dev/null
+    fi
+}
+
+# --- Host selection: knock + direct first, then Tailscale fallback ---
+# farol lives inside the 'etica' network; the knock opens etica's firewall so
+# the direct `farol` ssh host (smtp.etica.net / 179.111.200.44:2342) becomes
+# reachable. farol-ts (Tailscale) is the automatic fallback.
+select_host() {
+    raw_knock
+    if probe_ssh 8 "$DIRECT_HOST"; then
+        REMOTE_HOST="$DIRECT_HOST"
+        NEEDS_KNOCK=1
+        return 0
+    fi
+    printf '%bDirect path unreachable, trying Tailscale (%s)...%b\n' \
+        "$YEL" "$FALLBACK_HOST" "$RST" >&2
+    if probe_ssh 12 "$FALLBACK_HOST"; then
+        REMOTE_HOST="$FALLBACK_HOST"
+        NEEDS_KNOCK=0
+        printf '%bUsing %s%b\n' "$GRN" "$FALLBACK_HOST" "$RST" >&2
+        return 0
+    fi
+    printf '%bError:%b cannot reach farol via direct or Tailscale\n' "$RED" "$RST" >&2
+    return 1
+}
+
+# --- Pre-flight ---
+preflight() {
+    if [ -z "$REMOTE_HOST" ]; then
+        select_host || return 1
+        return 0
+    fi
+    knock
+    if ! probe_ssh 10 "$REMOTE_HOST"; then
+        REMOTE_HOST=""
+        select_host || return 1
+    fi
+}
+
+usage() {
+    cat <<EOF
+Usage: slot [session-name]
+       slot ls
+       slot new [session-name]
+       slot clean
+       slot shell
+
+Attach to a tmux session on farol with port knocking and auto-reconnect.
+Fuzzy-matches session names (e.g. "q2-fleet" matches "cao-q2-fleet").
+With no args, interactive picker with "+ new session" option.
+Agents for 'slot new': claude, codex, kimi, elia.
+
+Examples:
+  slot                       # pick a session or create new
+  slot ls                    # list tmux sessions on farol
+  slot q2-fleet              # attach to cao-q2-fleet
+  slot new                   # pick agent, name, cao launch
+  slot new my-session        # create named session (picks agent if >1)
+  slot clean                 # kill numeric tmux sessions (asks first)
+  slot shell                 # attach or create "main" session
+EOF
+    exit 0
+}
+
+# --- Parse args ---
+CMD=""
+SESSION=""
+for arg in "$@"; do
+    case "$arg" in
+        --help|-h) usage ;;
+        ls)        CMD="ls" ;;
+        clean)     CMD="clean" ;;
+        new)       CMD="new" ;;
+        shell)     CMD="shell" ;;
+        *)         SESSION="$arg" ;;
+    esac
+done
+
+list_sessions() {
+    knock
+    ssh -o ConnectTimeout=10 -o BatchMode=yes "$REMOTE_HOST" \
+        "tmux list-sessions -F '#{session_last_attached}|#{session_name}|#{session_windows}|#{session_attached}' 2>/dev/null | sort -t'|' -k1 -nr | cut -d'|' -f2- || true"
+}
+
+clean_sessions() {
+    preflight || exit 1
+    local numeric_sessions
+    numeric_sessions="$(ssh -o ConnectTimeout=10 -o BatchMode=yes "$REMOTE_HOST" \
+        "tmux list-sessions -F '#{session_name}' 2>/dev/null | grep -E '^[0-9]+$' || true")"
+
+    if [ -z "$numeric_sessions" ]; then
+        printf '%bNo numeric sessions to clean on %s%b\n' "$GRN" "$REMOTE_HOST" "$RST"
+        exit 0
+    fi
+
+    printf '%bThe following numeric sessions will be killed:%b\n' "$YEL" "$RST"
+    printf '%s\n' "$numeric_sessions"
+    printf 'Kill them? [y/N] '
+    read -r yn
+    if [[ "${yn:-}" =~ ^[Yy]$ ]]; then
+        printf '%bKilling sessions...%b\n' "$RED" "$RST"
+        local total=0 killed=0
+        while IFS= read -r session; do
+            [ -n "$session" ] || continue
+            total=$((total + 1))
+            if ssh -n -o ConnectTimeout=10 -o BatchMode=yes "$REMOTE_HOST" \
+                "tmux kill-session -t '$session'" >/dev/null 2>&1; then
+                printf '  %b✓ killed %s%b\n' "$GRN" "$session" "$RST"
+                killed=$((killed + 1))
+            else
+                printf '  %b✗ failed to kill %s%b\n' "$RED" "$session" "$RST"
+            fi
+        done <<< "$numeric_sessions"
+        printf '%b%d/%d sessions killed%b\n' "$GRN" "$killed" "$total" "$RST"
+    else
+        printf 'Aborted. No sessions were killed.\n'
+    fi
+    exit 0
+}
+
+# cao launch: pick agent + name, create managed session, attach
+launch_new() {
+    local provided_name="$SESSION"
+    local name_cmd
+    if [ -n "$provided_name" ]; then
+        local safe_name
+        safe_name=$(printf '%q' "$provided_name")
+        name_cmd="name=$safe_name"
+    else
+        name_cmd="printf 'session name: ' >&2; read -r name; [ -z \"\$name\" ] && exit 0"
+    fi
+    preflight || exit 1
+    ssh -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -t "$REMOTE_HOST" "
+        agent=\$(printf 'claude\ncodex\nkimi\nelia\n' | fzf --prompt='agent> ' --height=~10) || exit 0
+        $name_cmd
+        case \"\$agent\" in
+            claude) cao launch --agents \"\$agent\" --session-name \"\$name\" --provider claude_code --yolo ;;
+            codex)  cao launch --agents \"\$agent\" --session-name \"\$name\" --provider codex --auto-approve ;;
+            kimi)   tmux has-session -t \"cao-\$name\" 2>/dev/null || { tmux new-session -d -s \"cao-\$name\" \"export FLEET_ACTOR=cao-\$name; exec bash --login\"; sleep 1; tmux send-keys -t \"cao-\$name\" -l \"kimi-any --yolo\"; tmux send-keys -t \"cao-\$name\" Enter; }; tmux attach -t \"cao-\$name\" ;;
+            elia)   tmux new-session -A -s \"cao-\$name\" elia-dgx ;;
+        esac
+    "
+    set_tab_title "${SHELL##*/}"
+    exit 0
+}
+
+shell_session() {
+    preflight || exit 1
+    printf '%bAttaching to %s (creating main if none exists)...%b\n' "$GRN" "$REMOTE_HOST" "$RST"
+    ssh -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -t "$REMOTE_HOST" 'tmux attach-session || tmux new-session -s main' || true
+    set_tab_title "${SHELL##*/}"
+    exit 0
+}
+
+if [[ "$CMD" == "ls" ]]; then
+    preflight || exit 1
+    out="$(list_sessions)" || out=""
+    if [ -z "$out" ]; then
+        printf '%bNo tmux sessions on %s%b\n' "$YEL" "$REMOTE_HOST" "$RST"
+    else
+        printf '%b%-30s %-12s %s%b\n' "$YEL" "SESSION" "WINDOWS" "STATUS" "$RST"
+        while IFS='|' read -r name windows attached; do
+            [ -n "$name" ] || continue
+            win_str="$windows window"
+            [ "$windows" != "1" ] && win_str="${win_str}s"
+            if [ "$attached" = "1" ]; then
+                printf '%b%-30s %-12s %s%b\n' "$GRN" "$name" "$win_str" "attached" "$RST"
+            else
+                printf '%-30s %-12s %s\n' "$name" "$win_str" "detached"
+            fi
+        done <<< "$out"
+    fi
+    exit 0
+fi
+
+if [[ "$CMD" == "clean" ]]; then
+    clean_sessions
+fi
+
+if [[ "$CMD" == "shell" ]]; then
+    shell_session
+fi
+
+if [[ "$CMD" == "new" ]]; then
+    launch_new
+fi
+
+# No session: interactive picker (with + new option)
+if [[ -z "$SESSION" ]]; then
+    preflight || exit 1
+    ssh -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -t "$REMOTE_HOST" "
+        pick=\$( (echo '+ new session'; tmux list-sessions -F '#{session_last_attached}|#{session_name}' 2>/dev/null | sort -t'|' -k1 -nr | cut -d'|' -f2-) | fzf --prompt='slot> ' --height=~20) || exit 0
+        if [ \"\$pick\" = '+ new session' ]; then
+            agent=\$(printf 'claude\ncodex\nkimi\n' | fzf --prompt='agent> ' --height=~10) || exit 0
+            printf 'session name: ' >&2
+            read -r name
+            [ -z \"\$name\" ] && exit 0
+            case \"\$agent\" in
+                claude) cao launch --agents \"\$agent\" --session-name \"\$name\" --provider claude_code --yolo ;;
+                codex)  cao launch --agents \"\$agent\" --session-name \"\$name\" --provider codex --auto-approve ;;
+                kimi)   tmux has-session -t \"cao-\$name\" 2>/dev/null || { tmux new-session -d -s \"cao-\$name\" \"export FLEET_ACTOR=cao-\$name; exec bash --login\"; sleep 1; tmux send-keys -t \"cao-\$name\" -l \"kimi-any --yolo\"; tmux send-keys -t \"cao-\$name\" Enter; }; tmux attach -t \"cao-\$name\" ;;
+            esac
+        else
+            exec tmux attach -t \"\$pick\"
+        fi
+    "
+    set_tab_title "${SHELL##*/}"
+    exit 0
+fi
+
+# --- Connect ---
+connect() {
+    printf '%bConnecting to %s via SSH (port-knock)...%b\n' "$GRN" "$REMOTE_HOST" "$RST"
+    local rc=0
+    ssh -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -t "$REMOTE_HOST" "
+        target='$SESSION'
+        if tmux has-session -t \"\$target\" 2>/dev/null; then
+            exec tmux attach -t \"\$target\"
+        fi
+        match=\$(tmux list-sessions -F '#{session_last_attached}|#{session_name}' 2>/dev/null | sort -t'|' -k1 -nr | cut -d'|' -f2- | grep -i \"\$target\" | head -1)
+        if [ -n \"\$match\" ]; then
+            exec tmux attach -t \"\$match\"
+        fi
+        echo \"No tmux session matching '\$target'. Available:\"
+        tmux list-sessions 2>/dev/null || echo '(none)'
+    " || rc=$?
+    return $rc
+}
+
+# --- Main loop ---
+# preflight at the top of each iteration so we never enter connect()
+# with an empty REMOTE_HOST after a failed reachability check.
+while true; do
+    if ! preflight; then
+        printf '%bPreflight failed.%b Retrying in %ds...\n' "$YEL" "$RST" "$BACKOFF"
+        sleep "$BACKOFF"
+        BACKOFF=$(( BACKOFF * 2 ))
+        (( BACKOFF > MAX_BACKOFF )) && BACKOFF=$MAX_BACKOFF
+        continue
+    fi
+
+    start_time=$(date +%s)
+    rc=0
+    connect || rc=$?
+    elapsed=$(( $(date +%s) - start_time ))
+
+    # Clean exit (rc=0): done
+    if (( rc == 0 )); then
+        set_tab_title "${SHELL##*/}"
+        break
+    fi
+
+    # Long session + failure = likely a connection drop, reset backoff
+    if (( elapsed >= SUCCESS_THRESHOLD )); then
+        BACKOFF=2
+    fi
+
+    printf '%bConnection lost (exit %d).%b Reconnecting in %ds...\n' "$YEL" "$rc" "$RST" "$BACKOFF"
+    sleep "$BACKOFF"
+
+    BACKOFF=$(( BACKOFF * 2 ))
+    (( BACKOFF > MAX_BACKOFF )) && BACKOFF=$MAX_BACKOFF
+done

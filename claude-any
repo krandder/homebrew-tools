@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# claude-any — claude CLI on the healthiest profile, chosen PER REQUEST by the
+# any-proxy (127.0.0.1:7800). Mid-turn 401/429 failover happens there. Falls
+# back to the ai-any launcher (selection+retry at launch) if the proxy is down.
+set -euo pipefail
+# Env hygiene, previously an inline `unset $(env | sed …)` that cao typed into
+# every pane (ugly history, hostile to ctrl+C/up-arrow). Strip CLAUDE* vars
+# inherited through tmux's global env (nested-session guard), keeping the
+# provider-auth allowlist.
+for v in $(env | sed -n 's/^\(CLAUDE[A-Z_]*\)=.*/\1/p' | grep -v -E 'CLAUDE_CODE_USE_(BEDROCK|VERTEX|FOUNDRY)|CLAUDE_CODE_SKIP_(BEDROCK|VERTEX|FOUNDRY)_AUTH'); do unset "$v"; done
+export TSC_WATCHFILE=DynamicPriorityPolling
+export TSC_WATCHDIRECTORY=RecursiveDirectoryUsingDynamicPriorityPolling
+REAL_HOME="${HOME%/.claude-profiles/*}"
+export CLAUDE_CONFIG_DIR="$REAL_HOME/.claude"
+ANY_URL="http://127.0.0.1:7800"
+if (exec 3<>"/dev/tcp/127.0.0.1/7800") 2>/dev/null; then
+  exec 3>&- 3<&-
+  export ANTHROPIC_BASE_URL="$ANY_URL"
+  export ANTHROPIC_AUTH_TOKEN=token-proxy-managed
+  CLAUDE_BIN="$REAL_HOME/bin/claude.real"
+  [ -x "$CLAUDE_BIN" ] || CLAUDE_BIN="$(command -v claude)"
+  exec env "$CLAUDE_BIN" "$@"
+else
+  exec ai-any "$@"
+fi

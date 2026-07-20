@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# imgpush — push the Mac's clipboard image to farol for kimi. Run this after
+# copying an image (bind it to a hotkey via Shortcuts/Alfred/Raycast for a
+# "paste" feel). Prints the farol path to paste into the kimi prompt.
+set -euo pipefail
+FAROL="farol"   # ssh alias in ~/.ssh/config (tailscale, hermes.pem); never a raw IP
+DEST="/tmp/kimi-images"
+ts=$(date +%Y%m%d-%H%M%S)
+tmp=$(mktemp /tmp/imgpush-XXXXXX)
+
+have=$(osascript -e 'clipboard info' 2>/dev/null || true)
+if ! printf '%s' "$have" | grep -Eq 'PNGf|JPEG|TIFF'; then
+  echo "imgpush: clipboard has no image (copy one first)" >&2; rm -f "$tmp"; exit 1
+fi
+
+osascript - "$tmp" <<'OSA' >/dev/null 2>&1
+on run argv
+  set out to item 1 of argv
+  set img to (the clipboard as «class PNGf»)
+  set f to open for access (POSIX file out) with write permission
+  write img to f
+  close access f
+end run
+OSA
+[ -s "$tmp" ] || { echo "imgpush: failed to read clipboard image" >&2; rm -f "$tmp"; exit 1; }
+
+ssh "$FAROL" "mkdir -p $DEST"
+scp -q "$tmp" "$FAROL:$DEST/$ts.png"
+rm -f "$tmp"
+echo "$DEST/$ts.png"

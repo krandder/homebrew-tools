@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+# codex-any — codex CLI on the healthiest profile, chosen PER REQUEST by the
+# codex-any-proxy (127.0.0.1:7810). Mid-turn 401/429 failover happens there;
+# this wrapper only prepares a dedicated CODEX_HOME and points codex at it.
+# Falls back to the ai-any launcher when the proxy is down.
+set -euo pipefail
+ANY_HOME="$HOME/.codex-any"
+ANY_URL="http://127.0.0.1:7810"
+
+if ! (exec 3<>"/dev/tcp/127.0.0.1/7810") 2>/dev/null; then
+  exec ai-any "$@"
+fi
+exec 3>&- 3<&-
+
+mkdir -p "$ANY_HOME"
+# freshest profile AT at launch (sentinel RT: codex must never refresh itself);
+# the proxy owns per-request freshness afterwards.
+python3 - <<'PY'
+import json, glob, time, base64, os
+def exp(t):
+    try:
+        p = t.split('.')[1]; p += '=' * (-len(p) % 4)
+        return json.loads(base64.urlsafe_b64decode(p)).get('exp', 0)
+    except Exception: return 0
+best, best_auth = 0, None
+for f in glob.glob(os.path.expanduser('~/.codex-profiles/*/.codex/auth.json')):
+    try: d = json.load(open(f))
+    except Exception: continue
+    t = (d.get('tokens') or {}).get('access_token')
+    if t and exp(t) > best:
+        best, best_auth = exp(t), d
+if not best_auth: raise SystemExit('codex-any: no fresh codex token available')
+best_auth['tokens']['refresh_token'] = 'sentinel-follower'
+json.dump(best_auth, open(os.path.expanduser('~/.codex-any/auth.json'), 'w'), indent=2)
+PY
+cat > "$ANY_HOME/config.toml" <<'TOML'
+model_provider = "any"
+
+[model_providers.any]
+name = "any-proxy"
+base_url = "http://127.0.0.1:7810"
+wire_api = "responses"
+TOML
+
+export CODEX_HOME="$ANY_HOME"
+export CODEX_REFRESH_TOKEN_URL_OVERRIDE="http://127.0.0.1:9/oauth/token"
+exec codex "$@"

@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# kimi-any — kimi CLI on the healthiest kimi profile, chosen PER REQUEST by the
+# kimi-any-proxy (127.0.0.1:7812). Per-request failover + freshness live there.
+set -euo pipefail
+ANY_URL="http://127.0.0.1:7812/coding/v1"
+( exec 3<>"/dev/tcp/127.0.0.1/7812" ) 2>/dev/null || { echo "kimi-any: proxy down (7812); run kimi directly" >&2; exit 1; }
+exec 3>&- 3<&-
+
+# freshest profile AT at launch; the proxy keeps it fresh per request afterwards
+AT=$(python3 - <<'PY'
+import json, glob, time, os
+best, best_at = 0, ""
+for f in glob.glob(os.path.expanduser('~/.kimi-profiles/*/credentials.json')):
+    try: d = json.load(open(f))
+    except Exception: continue
+    if d.get('access_token') and d.get('expires_at', 0) > best:
+        best, best_at = d['expires_at'], d['access_token']
+print(best_at)
+PY
+)
+[ -n "$AT" ] || { echo "kimi-any: no fresh kimi token in ~/.kimi-profiles" >&2; exit 1; }
+export KIMI_BASE_URL="$ANY_URL"
+export KIMI_API_KEY="$AT"
+exec kimi "$@"

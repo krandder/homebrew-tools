@@ -36,7 +36,7 @@
 # refreshes an owner-managed token (takeover is an explicit manual publish).
 
 set -euo pipefail
-VERSION="3.0.3"
+VERSION="3.0.4"
 AI_TOKEN_REAL_HOME="${AI_TOKEN_REAL_HOME:-$HOME}"
 
 # ---- tool selection (arg or shim name) ----
@@ -59,6 +59,7 @@ need_cmd() { command -v "$1" >/dev/null 2>&1 || die "missing required command: $
 need_cmd python3
 short_host() { hostname -s 2>/dev/null || hostname; }
 is_mac() { [ "$(uname)" = Darwin ]; }
+now_epoch() { [ -z "${AI_TOKEN_TEST_NOW:-}" ] && date +%s || printf '%.0f\n' "$AI_TOKEN_TEST_NOW"; }
 
 SENTINEL_RT="__follower_no_refresh__"
 BLACKHOLE_URL="http://127.0.0.1:9/oauth/token"
@@ -145,6 +146,93 @@ vault_http() { # method path [data_file]
 
 stat_mtime() { if stat -f %m "$1" >/dev/null 2>&1; then stat -f %m "$1"; else stat -c %Y "$1"; fi; }
 
+# Refresh throttling is deliberately shared by every profile for a provider:
+# the credential sidecar protects one refresh token, while the provider file
+# protects this machine's IP when an endpoint asks us to back off.
+refresh_global_cooldown_file() {
+    printf '%s/%s.json\n' "${AI_TOKEN_REFRESH_STATE_DIR:-$VAULT_DIR_CLIENT/refresh-state}" "$TOOL"
+}
+refresh_cooldown_remaining() { # credential_file -> seconds; 0 iff blocked
+    python3 - "$1.refresh-cooldown" "$(refresh_global_cooldown_file)" "$(now_epoch)" <<'PY'
+import json, math, os, sys
+now = float(sys.argv[3])
+remaining = []
+for path in sys.argv[1:3]:
+    try:
+        with open(path) as fh:
+            until = float(json.load(fh).get("until", 0))
+        if until > now:
+            remaining.append(until - now)
+        else:
+            os.unlink(path)
+    except (FileNotFoundError, ValueError, TypeError, json.JSONDecodeError, OSError):
+        pass
+if remaining:
+    print(max(1, math.ceil(max(remaining))))
+    sys.exit(0)
+sys.exit(1)
+PY
+}
+mark_refresh_cooldown() { # credential_file seconds
+    local seconds="${2:-60}" global
+    case "$seconds" in ''|*[!0-9]*) seconds=60 ;; esac
+    [ "$seconds" -ge 1 ] || seconds=1
+    [ "$seconds" -le 86400 ] || seconds=86400
+    global="$(refresh_global_cooldown_file)"
+    python3 - "$1.refresh-cooldown" "$global" "$(now_epoch)" "$seconds" <<'PY'
+import json, os, sys
+paths, now, seconds = sys.argv[1:3], int(sys.argv[3]), int(sys.argv[4])
+record = {"until": now + seconds, "reason": "rate-limit"}
+for path in paths:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w") as fh:
+        json.dump(record, fh, separators=(",", ":"))
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, path)
+PY
+}
+retry_after_from_error() { # captured refresh stderr -> seconds
+    printf '%s\n' "$1" | python3 -c 'import re,sys
+s=sys.stdin.read()
+m=re.search(r"retry-after-seconds=([0-9]+)",s)
+print(min(86400,max(1,int(m.group(1))))) if m else print(60)'
+}
+refresh_cooldown_guard() { # credential_file profile -> nonzero when blocked
+    local remaining
+    if remaining="$(refresh_cooldown_remaining "$1")"; then
+        log_event refresh "${2:-}" skipped "cooldown=${remaining}s"
+        say "refresh cooldown active for $TOOL:${2:-unknown} (${remaining}s remaining)"
+        return 1
+    fi
+    return 0
+}
+acquire_provider_refresh_lock() {
+    local state_dir lock i now mt age delay
+    state_dir="${AI_TOKEN_REFRESH_STATE_DIR:-$VAULT_DIR_CLIENT/refresh-state}"
+    lock="$state_dir/$TOOL.lock"
+    mkdir -p "$state_dir"
+    for i in 1 2 3 4 5; do
+        if mkdir "$lock" 2>/dev/null; then
+            printf '%s\n' "$lock"
+            return 0
+        fi
+        now="$(date +%s)"
+        mt="$(stat_mtime "$lock" 2>/dev/null || echo 0)"
+        age=$((now - mt))
+        if [ "$age" -ge 10 ]; then
+            rmdir "$lock" 2>/dev/null || true
+            continue
+        fi
+        delay="$(python3 -c 'import random; print("%.3f" % (1 + random.random()))')"
+        sleep "$delay"
+    done
+    return 1
+}
+release_provider_refresh_lock() { rmdir "$1" 2>/dev/null || true; }
+
 # ═══════════════════════════════════════════════════════════════════════════
 # BACKEND: kimi
 #
@@ -185,12 +273,14 @@ json.dump(d,open(tmp,"w"),indent=2); os.chmod(tmp,0o600); os.replace(tmp,sys.arg
 
 kimi_needs_refresh() { # file -> yes/no (60s margin)
     python3 - "$1" <<'PY'
-import json,sys,time
+import json,os,sys,time
 try:
-    d=json.load(open(sys.argv[1]))
+    with open(sys.argv[1]) as fh:
+        d=json.load(fh)
     rt=d.get("refresh_token","")
     exp=int(d.get("expires_at") or 0)
-    print("yes" if (not rt or rt=="__follower_no_refresh__" or exp < time.time()+60) else "no")
+    now=float(os.environ.get("AI_TOKEN_TEST_NOW") or time.time())
+    print("yes" if (not rt or rt=="__follower_no_refresh__" or exp < now+60) else "no")
 except Exception:
     print("yes")
 PY
@@ -198,19 +288,21 @@ PY
 
 kimi_fresh_access_from_file() { # file -> access token iff fresh (>60s)
     python3 - "$1" <<'PY'
-import json,sys,time
+import json,os,sys,time
 try:
-    d=json.load(open(sys.argv[1]))
+    with open(sys.argv[1]) as fh:
+        d=json.load(fh)
     tok=d.get("access_token","")
     exp=int(d.get("expires_at") or 0)
-    if tok and exp > time.time()+60: print(tok)
+    now=float(os.environ.get("AI_TOKEN_TEST_NOW") or time.time())
+    if tok and exp > now+60: print(tok)
 except Exception: pass
 PY
 }
 
-kimi_refresh_store() { # creds_file — refresh in place (atomic). Verified endpoint.
+kimi_refresh_store_unlocked() { # creds_file — refresh in place (atomic). Verified endpoint.
     python3 - "$1" "$KIMI_CLIENT_ID" "$(kimi_oauth_host)" <<'PY'
-import json, os, sys, time, urllib.request, urllib.parse, urllib.error
+import datetime, email.utils, json, os, sys, time, urllib.request, urllib.parse, urllib.error
 f, client_id, host = sys.argv[1], sys.argv[2], sys.argv[3].rstrip("/")
 creds = json.load(open(f))
 rt = creds.get("refresh_token", "")
@@ -224,20 +316,61 @@ try:
     resp = urllib.request.urlopen(req, timeout=30)
     tok = json.loads(resp.read())
 except urllib.error.HTTPError as e:
-    sys.stderr.write("kimi refresh FAILED: HTTP %d %s\n" % (e.code, e.read().decode(errors="replace")[:200])); sys.exit(1)
+    retry = e.headers.get("Retry-After") or ""
+    retry_seconds = 60
+    try:
+        retry_seconds = int(retry)
+    except (TypeError, ValueError):
+        try:
+            when = email.utils.parsedate_to_datetime(retry)
+            retry_seconds = max(1, int((when - datetime.datetime.now(datetime.timezone.utc)).total_seconds()))
+        except (TypeError, ValueError, OverflowError):
+            pass
+    sys.stderr.write("kimi refresh FAILED: HTTP %d retry-after-seconds=%d %s\n" %
+                     (e.code, retry_seconds, e.read().decode(errors="replace")[:200])); sys.exit(1)
 except Exception as e:
     sys.stderr.write("kimi refresh FAILED: %s\n" % e); sys.exit(1)
 new = dict(creds)
 new["access_token"] = tok["access_token"]
 new["refresh_token"] = tok.get("refresh_token") or rt
 new["expires_in"] = int(tok.get("expires_in", 900))
-new["expires_at"] = int(time.time()) + new["expires_in"]
+new["expires_at"] = int(float(os.environ.get("AI_TOKEN_TEST_NOW") or time.time())) + new["expires_in"]
 if tok.get("scope"): new["scope"] = tok["scope"]
 if tok.get("token_type"): new["token_type"] = tok["token_type"]
 tmp = f + ".tmp"
 json.dump(new, open(tmp, "w"), indent=2); os.chmod(tmp, 0o600); os.replace(tmp, f)
 print("refreshed (expires_in=%ds)" % new["expires_in"])
 PY
+}
+
+kimi_refresh_store() { # creds_file [profile] — serialized and rate-limit safe
+    local store="$1" profile="${2:-$(config_user)}" lock output rc retry_after
+    refresh_cooldown_guard "$store" "$profile" || return 1
+    lock="$(acquire_provider_refresh_lock)" || { say "could not acquire kimi refresh lock"; return 1; }
+    if ! refresh_cooldown_guard "$store" "$profile"; then
+        release_provider_refresh_lock "$lock"
+        return 1
+    fi
+    if [ "$(kimi_needs_refresh "$store")" != yes ]; then
+        release_provider_refresh_lock "$lock"
+        return 0
+    fi
+    set +e
+    output="$(kimi_refresh_store_unlocked "$store" 2>&1)"
+    rc=$?
+    set -e
+    if [ "$rc" -ne 0 ] && printf '%s' "$output" | grep -q 'HTTP 429'; then
+        retry_after="$(retry_after_from_error "$output")"
+        mark_refresh_cooldown "$store" "$retry_after"
+        log_event refresh "$profile" rate-limited "cooldown=${retry_after}s"
+    fi
+    release_provider_refresh_lock "$lock"
+    if [ "$rc" -eq 0 ]; then
+        [ -z "$output" ] || printf '%s\n' "$output"
+    else
+        printf '%s\n' "$output" >&2
+    fi
+    return "$rc"
 }
 
 kimi_local_refresh_mode() { # owner/follower/missing for the LIVE local store
@@ -262,8 +395,8 @@ kimi_cmd_check() {
     [ -f "$KIMI_STORE" ] || { echo "missing: $KIMI_STORE"; return 1; }
     local exp rt
     exp="$(kimi_expiry_of "$KIMI_STORE")"; rt="$(kimi_rt_of "$KIMI_STORE")"
-    local now mode ttl; now="$(date +%s)"; mode="$(kimi_local_refresh_mode)"
-    if [ "$exp" -le "$now" ]; then
+    local now mode ttl; now="$(now_epoch)"; mode="$(kimi_local_refresh_mode)"
+    if [ "$exp" -le $((now + 60)) ]; then
         if [ "$mode" = owner ]; then echo "ok: owner refreshToken present; access token expired (native kimi refreshes on next call)"
         else echo "stale: follower access token expired; the vault must publish a fresh one"; return 1; fi
     else
@@ -301,7 +434,7 @@ kimi_cmd_publish() {
     mkdir -p "$KIMI_SHARED_DIR"
     if [ "$(kimi_needs_refresh "$src")" = yes ]; then
         log_event refresh "$p" start "kimi ttl=900"
-        kimi_refresh_store "$src" || { log_event refresh "$p" failed "endpoint"; die "publish: kimi refresh failed"; }
+        kimi_refresh_store "$src" "$p" || { log_event refresh "$p" failed "endpoint"; die "publish: kimi refresh failed"; }
         log_event refresh "$p" ok "$src"
     fi
     kimi_make_follower_copy "$src" "$sf"
@@ -328,7 +461,7 @@ kimi_cmd_serve() {
     if [ -f "$cf" ]; then
         if [ "$(kimi_needs_refresh "$cf")" = yes ]; then
             [ "$(kimi_authority_of "$cf")" != owner ] || return 1
-            kimi_refresh_store "$cf" || return 1
+            kimi_refresh_store "$cf" "$p" || return 1
         fi
         PROFILE="$p" kimi_cmd_publish >/dev/null 2>&1 || return 1
         cat "$sf"; return 0
@@ -639,7 +772,8 @@ codex_resolve_profile() {
 codex_email_of() { python3 - "$1" <<'PY'
 import json,sys,base64
 try:
-    d=json.load(open(sys.argv[1]))
+    with open(sys.argv[1]) as fh:
+        d=json.load(fh)
     t=d.get("tokens",{}).get("id_token","")
     p=t.split(".")[1]; p+="="*(-len(p)%4)
     print(json.loads(base64.b64decode(p)).get("email",""))
@@ -650,7 +784,8 @@ PY
 codex_access_exp() { python3 - "$1" <<'PY'
 import json,sys,base64
 try:
-    d=json.load(open(sys.argv[1]))
+    with open(sys.argv[1]) as fh:
+        d=json.load(fh)
     t=d.get("tokens",{}).get("access_token","")
     p=t.split(".")[1]; p+="="*(-len(p)%4)
     print(int(json.loads(base64.b64decode(p)).get("exp",0)))
@@ -658,10 +793,17 @@ except Exception:
     print(0)
 PY
 }
+codex_file_is_fresh() {
+    local exp now
+    exp="$(codex_access_exp "$1")"
+    now="$(now_epoch)"
+    [ "$exp" -gt $((now + 60)) ]
+}
 codex_tokens_get() { python3 - "$1" "$2" <<'PY'
 import json,sys
 try:
-    d=json.load(open(sys.argv[1]))
+    with open(sys.argv[1]) as fh:
+        d=json.load(fh)
     print((d.get("tokens") or {}).get(sys.argv[2]) or "")
 except Exception:
     print("")
@@ -670,45 +812,100 @@ PY
 codex_rt_is_real() { local rt; rt="$(codex_tokens_get "$1" refresh_token)"; [ -n "$rt" ] && [ "$rt" != "$SENTINEL_RT" ]; }
 codex_revert_sentinel() { python3 - "$1" "$SENTINEL_RT" <<'PY'
 import json,sys,os
-af,s=sys.argv[1],sys.argv[2]; d=json.load(open(af)); d.setdefault("tokens",{})["refresh_token"]=s
-json.dump(d,open(af,"w"),indent=2); os.chmod(af,0o600)
+af,s=sys.argv[1],sys.argv[2]
+with open(af) as fh: d=json.load(fh)
+d.setdefault("tokens",{})["refresh_token"]=s
+with open(af,"w") as fh: json.dump(d,fh,indent=2)
+os.chmod(af,0o600)
 PY
 }
 
 codex_refresh_profile() { # profile -> updates its auth.json with fresh tokens
-    local p="$1" af; af="$(codex_auth_file "$p")"
+    local p="$1" af lock output rc retry_after; af="$(codex_auth_file "$p")"
     [ -f "$af" ] || die "refresh: missing auth.json for '$p' at $af"
     local rt; rt="$(codex_tokens_get "$af" refresh_token)"
     [ -n "$rt" ] || die "refresh: '$p' has no refresh_token"
     [ "$rt" = "$SENTINEL_RT" ] && die "refresh: '$p' is a follower (sentinel token); nothing to refresh"
-    local resp
-    resp="$(curl -s -X POST "$CODEX_TOKEN_EP" \
-        -H "Content-Type: application/x-www-form-urlencoded" \
-        -d "grant_type=refresh_token&client_id=${CODEX_CLIENT_ID}&refresh_token=${rt}")" || die "refresh: curl failed"
-    python3 - "$af" "$resp" <<'PY'
-import json,sys,os
-from datetime import datetime,timezone
-af,raw=sys.argv[1],sys.argv[2]
-resp=json.loads(raw)
-if "access_token" not in resp:
-    err=resp.get("error_description") or resp.get("error") or json.dumps(resp)
-    print(f"refresh FAILED: {err}",file=sys.stderr); sys.exit(1)
-d=json.load(open(af))
-d.setdefault("tokens",{})
-d["tokens"]["access_token"]=resp["access_token"]
-d["tokens"]["refresh_token"]=resp["refresh_token"]
-if "id_token" in resp: d["tokens"]["id_token"]=resp["id_token"]
-d["last_refresh"]=datetime.now(timezone.utc).isoformat()
-json.dump(d,open(af,"w"),indent=2); os.chmod(af,0o600)
+    refresh_cooldown_guard "$af" "$p" || return 1
+    lock="$(acquire_provider_refresh_lock)" || { say "could not acquire codex refresh lock"; return 1; }
+    if ! refresh_cooldown_guard "$af" "$p"; then
+        release_provider_refresh_lock "$lock"
+        return 1
+    fi
+    if codex_file_is_fresh "$af"; then
+        release_provider_refresh_lock "$lock"
+        return 0
+    fi
+    set +e
+    output="$(python3 - "$af" "$rt" "$CODEX_CLIENT_ID" "$CODEX_TOKEN_EP" 2>&1 <<'PY'
+import datetime, email.utils, json, os, sys, urllib.error, urllib.parse, urllib.request
+af, refresh_token, client_id, endpoint = sys.argv[1:5]
+body = urllib.parse.urlencode({"grant_type": "refresh_token", "client_id": client_id,
+                               "refresh_token": refresh_token}).encode()
+request = urllib.request.Request(endpoint, data=body,
+    headers={"Content-Type": "application/x-www-form-urlencoded"}, method="POST")
+try:
+    with urllib.request.urlopen(request, timeout=30) as response:
+        token = json.loads(response.read())
+except urllib.error.HTTPError as error:
+    retry = error.headers.get("Retry-After") or ""
+    retry_seconds = 60
+    try:
+        retry_seconds = int(retry)
+    except (TypeError, ValueError):
+        try:
+            when = email.utils.parsedate_to_datetime(retry)
+            retry_seconds = max(1, int((when - datetime.datetime.now(datetime.timezone.utc)).total_seconds()))
+        except (TypeError, ValueError, OverflowError):
+            pass
+    sys.stderr.write(f"codex refresh FAILED: HTTP {error.code} retry-after-seconds={retry_seconds} ")
+    sys.stderr.write(error.read().decode(errors="replace")[:200] + "\n")
+    sys.exit(1)
+if "access_token" not in token:
+    error = token.get("error_description") or token.get("error") or json.dumps(token)
+    sys.stderr.write(f"codex refresh FAILED: {error}\n")
+    sys.exit(1)
+with open(af) as fh:
+    credential = json.load(fh)
+credential.setdefault("tokens", {})
+credential["tokens"]["access_token"] = token["access_token"]
+credential["tokens"]["refresh_token"] = token.get("refresh_token") or refresh_token
+if "id_token" in token:
+    credential["tokens"]["id_token"] = token["id_token"]
+credential["last_refresh"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+tmp = af + ".tmp"
+with open(tmp, "w") as fh:
+    json.dump(credential, fh, indent=2)
+    fh.flush()
+    os.fsync(fh.fileno())
+os.chmod(tmp, 0o600)
+os.replace(tmp, af)
 print("refreshed")
 PY
+    )"
+    rc=$?
+    set -e
+    if [ "$rc" -ne 0 ] && printf '%s' "$output" | grep -q 'HTTP 429'; then
+        retry_after="$(retry_after_from_error "$output")"
+        mark_refresh_cooldown "$af" "$retry_after"
+        log_event refresh "$p" rate-limited "cooldown=${retry_after}s"
+    fi
+    release_provider_refresh_lock "$lock"
+    if [ "$rc" -eq 0 ]; then
+        [ -z "$output" ] || printf '%s\n' "$output"
+    else
+        printf '%s\n' "$output" >&2
+    fi
+    return "$rc"
 }
 
 codex_publish_profile() { # profile -> refresh + write shared file with sentinel RT
     local p="$1" af sf email
     af="$(codex_auth_file "$p")"; sf="$(codex_shared_file "$p")"
     [ -f "$af" ] || die "publish: missing auth.json for '$p'"
-    codex_refresh_profile "$p" >/dev/null || die "publish: could not refresh '$p' (refresh token invalid — relogin required)"
+    if ! codex_file_is_fresh "$af"; then
+        codex_refresh_profile "$p" >/dev/null || die "publish: could not refresh '$p' (refresh token invalid or rate limited)"
+    fi
     email="$(codex_email_of "$af")"
     mkdir -p "$CODEX_SHARED_DIR"
     python3 - "$af" "$sf" "$p" "$email" "$SENTINEL_RT" "$LEADER_HOST" <<'PY'
@@ -733,6 +930,7 @@ codex_pull_profile() { # profile -> local canonical auth from shared file or vau
     sf="$(codex_shared_file "$p")"; af="$(codex_auth_file "$p")"
     mkdir -p "$(dirname "$af")"
     if [ -f "$sf" ]; then
+        codex_file_is_fresh "$sf" || die "pull: published token is stale for codex:$p"
         codex_copy_token "$sf" "$af"
         echo "pulled"
     else
@@ -743,13 +941,9 @@ codex_pull_profile() { # profile -> local canonical auth from shared file or vau
             need_cmd ssh
             ssh_vault "ai-vault serve codex:$p" > "$tmp" || { rm -f "$tmp"; die "pull: leader denied/unavailable for codex:$p"; }
         fi
-        python3 - "$tmp" "$af" <<'PY'
-import json,sys,os
-src,dst=sys.argv[1],sys.argv[2]
-d=json.load(open(src))
-clean={k:d[k] for k in ("auth_mode","tokens","last_refresh","account_id") if k in d}
-json.dump(clean,open(dst,"w"),indent=2); os.chmod(dst,0o600); os.remove(src)
-PY
+        codex_file_is_fresh "$tmp" || { rm -f "$tmp"; die "pull: vault served a stale token for codex:$p"; }
+        codex_copy_token "$tmp" "$af"
+        rm -f "$tmp"
         echo "pulled (via vault)"
     fi
 }
@@ -866,13 +1060,16 @@ codex_cmd_run() { # [args...] follower launcher: freshen ~/.codex then exec code
     local sf="$CODEX_SHARED_DIR/$user.json"
     mkdir -p "$(dirname "$CODEX_LEGACY_AUTH")"
     if [ -f "$sf" ]; then
+        codex_file_is_fresh "$sf" || die "run: published token is stale for codex:$user"
         codex_copy_token "$sf" "$CODEX_LEGACY_AUTH"
     elif have_http_vault; then
         vault_http GET "/pull/codex/$user" > "$CODEX_LEGACY_AUTH.tmp" || { rm -f "$CODEX_LEGACY_AUTH.tmp"; die "run: cannot reach/authorized for codex:$user"; }
+        codex_file_is_fresh "$CODEX_LEGACY_AUTH.tmp" || { rm -f "$CODEX_LEGACY_AUTH.tmp"; die "run: vault served a stale token for codex:$user"; }
         codex_copy_token "$CODEX_LEGACY_AUTH.tmp" "$CODEX_LEGACY_AUTH"; rm -f "$CODEX_LEGACY_AUTH.tmp"
     else
         need_cmd ssh
         ssh_vault "ai-vault serve codex:$user" > "$CODEX_LEGACY_AUTH.tmp" || { rm -f "$CODEX_LEGACY_AUTH.tmp"; die "run: cannot reach/authorized for codex:$user"; }
+        codex_file_is_fresh "$CODEX_LEGACY_AUTH.tmp" || { rm -f "$CODEX_LEGACY_AUTH.tmp"; die "run: vault served a stale token for codex:$user"; }
         codex_copy_token "$CODEX_LEGACY_AUTH.tmp" "$CODEX_LEGACY_AUTH"; rm -f "$CODEX_LEGACY_AUTH.tmp"
     fi
     [ "$refresh_only" = "1" ] && return 0
@@ -1044,13 +1241,14 @@ acquire_oauth_refresh_lock() {
 
 claude_profile_needs_refresh() { # auth_file -> yes/no
     python3 - "$1" <<'PY'
-import json, sys, time
+import json, os, sys, time
 with open(sys.argv[1]) as fh:
     o=json.load(fh)
 o=o.get("claudeAiOauth",o)
 rt=o.get("refreshToken","")
 exp=(o.get("expiresAt") or 0)/1000
-print("yes" if (not rt or rt.startswith("vlt:") or rt=="__follower_no_refresh__" or exp < time.time()+9000) else "no")
+now=float(os.environ.get("AI_TOKEN_TEST_NOW") or time.time())
+print("yes" if (not rt or rt.startswith("vlt:") or rt=="__follower_no_refresh__" or exp < now+9000) else "no")
 PY
 }
 
@@ -1067,7 +1265,7 @@ PY
 refresh_claude() { # auth_file -> stdout json
     local af="$1"
     python3 - "$af" "$CLAUDE_CLIENT_ID" "$CLAUDE_TOKEN_EP" "$CLAUDE_DEFAULT_SCOPE" "$CLAUDE_PROFILE_EP" <<'PY'
-import json, sys, urllib.request, urllib.error
+import datetime, email.utils, json, sys, urllib.request, urllib.error
 
 af, default_cid, url, default_scope, profile_url = sys.argv[1:6]
 with open(af) as fh:
@@ -1106,9 +1304,18 @@ try:
     with urllib.request.urlopen(req, timeout=30) as r:
         token = json.loads(r.read().decode())
 except urllib.error.HTTPError as e:
-    retry = e.headers.get("Retry-After") or e.headers.get("retry-after") or "none"
+    retry = e.headers.get("Retry-After") or e.headers.get("retry-after") or ""
+    retry_seconds = 60
+    try:
+        retry_seconds = int(retry)
+    except (TypeError, ValueError):
+        try:
+            when = email.utils.parsedate_to_datetime(retry)
+            retry_seconds = max(1, int((when - datetime.datetime.now(datetime.timezone.utc)).total_seconds()))
+        except (TypeError, ValueError, OverflowError):
+            pass
     cf_ray = e.headers.get("CF-RAY") or e.headers.get("cf-ray") or "none"
-    sys.stderr.write(f"refresh FAILED: HTTP {e.code} retry-after={retry} cf-ray={cf_ray} ")
+    sys.stderr.write(f"refresh FAILED: HTTP {e.code} retry-after-seconds={retry_seconds} cf-ray={cf_ray} ")
     sys.stderr.write(e.read().decode(errors="replace")[:200] + "\n")
     sys.exit(1)
 
@@ -1151,7 +1358,7 @@ claude_shared_file()    { echo "$CLAUDE_SHARED_DIR/$1.json"; }
 
 claude_fresh_access_from_file() { # published-token JSON -> access token when fresh
     python3 - "$1" <<'PY'
-import json, sys, time
+import json, os, sys, time
 
 with open(sys.argv[1]) as fh:
     d = json.load(fh)
@@ -1161,7 +1368,8 @@ try:
     expires = float(o.get("expiresAt") or 0) / 1000
 except Exception:
     expires = 0
-if token and expires > time.time() + 60:
+now = float(os.environ.get("AI_TOKEN_TEST_NOW") or time.time())
+if token and expires > now + 60:
     sys.stdout.write(token)
 PY
 }
@@ -1220,9 +1428,15 @@ claude_publish_profile() { # profile
         rt="$(python3 -c 'import json,sys;o=json.load(open(sys.argv[1]));o=o.get("claudeAiOauth",o);print(o.get("refreshToken",""))' "$af")"
         [ -n "$rt" ] || die "publish: no refreshToken for '$p'"
         [ "$rt" = "$SENTINEL_RT" ] && die "publish: '$p' is a follower (sentinel)"
+        refresh_cooldown_guard "$af" "$p" || die "publish: '$p' refresh cooldown active"
         log_event refresh "$p" start "threshold=9000s shape=json"
         lock="$(acquire_oauth_refresh_lock)" || { log_event refresh "$p" failed "lock"; die "publish: could not acquire OAuth refresh lock"; }
         log_event refresh_lock "$p" acquired "$lock"
+        if ! refresh_cooldown_guard "$af" "$p"; then
+            rm -f "$lock"
+            log_event refresh_lock "$p" released "$lock"
+            die "publish: '$p' refresh cooldown active"
+        fi
         needs_refresh="$(claude_profile_needs_refresh "$af")"
         if [ "$needs_refresh" != "yes" ]; then
             rm -f "$lock"
@@ -1235,9 +1449,9 @@ claude_publish_profile() { # profile
         rc=$?
         set -e
         if [ "$rc" -ne 0 ]; then
-            rm -f "$lock"
             case "$resp" in
                 *invalid_grant*)
+                    rm -f "$lock"
                     # Permanent: the RT is dead server-side. Mark + skip + alert;
                     # only a fresh owner login (synced) revives this profile.
                     claude_mark_needs_relogin "$af" "invalid_grant"
@@ -1246,9 +1460,15 @@ claude_publish_profile() { # profile
                     die "publish: '$p' needs re-login (invalid_grant); marked needs_relogin and skipped until the owner syncs fresh credentials"
                     ;;
                 *)
-                    # Transient (429/5xx/network): no state change; the next
-                    # maintain cycle retries (threshold keeps it ~once/5.5h).
-                    log_event refresh "$p" failed "transient"
+                    if printf '%s' "$resp" | grep -q 'HTTP 429'; then
+                        local retry_after
+                        retry_after="$(retry_after_from_error "$resp")"
+                        mark_refresh_cooldown "$af" "$retry_after"
+                        log_event refresh "$p" rate-limited "cooldown=${retry_after}s"
+                    else
+                        log_event refresh "$p" failed "transient"
+                    fi
+                    rm -f "$lock"
                     die "publish: refresh failed for '$p' (transient)"
                     ;;
             esac
@@ -1356,11 +1576,12 @@ claude_pull_profile() { # profile -> local store
     fi
     set +e
     python3 - "$sf" <<'PY'
-import json, sys, time
+import json, os, sys, time
 d=json.load(open(sys.argv[1])); o=d.get("claudeAiOauth",d)
 if not o.get("accessToken"): sys.exit("pull: no accessToken in published token")
 try:
-    fresh=float(o.get("expiresAt") or 0)/1000 > time.time()+60
+    now=float(os.environ.get("AI_TOKEN_TEST_NOW") or time.time())
+    fresh=float(o.get("expiresAt") or 0)/1000 > now+60
 except Exception:
     fresh=False
 if not fresh: sys.exit("pull: published access token is stale")
@@ -1424,7 +1645,7 @@ claude_cmd_check() {
     local oauth
     oauth="$(read_oauth_json 2>/dev/null)" || { echo "missing: no Claude credentials found"; return 1; }
     printf '%s' "$oauth" | python3 -c '
-import json, sys, time
+import json, os, sys, time
 
 sentinel = sys.argv[1]
 try:
@@ -1446,7 +1667,8 @@ if missing:
 
 exp = oauth.get("expiresAt") or 0
 try:
-    seconds = float(exp) / 1000 - time.time()
+    now = float(os.environ.get("AI_TOKEN_TEST_NOW") or time.time())
+    seconds = float(exp) / 1000 - now
 except Exception:
     seconds = -1
 follower = refresh == sentinel or refresh.startswith("vlt:")

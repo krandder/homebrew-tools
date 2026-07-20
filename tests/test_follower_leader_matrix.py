@@ -1,3 +1,4 @@
+import base64
 import hashlib
 import datetime
 import json
@@ -20,6 +21,11 @@ AI_TOKEN = ROOT / "ai-token"
 AI_VAULT = ROOT / "ai-vault"
 AI_VAULT_HTTP = ROOT / "ai-vault-http"
 SENTINEL = "__follower_no_refresh__"
+
+
+def jwt_with_exp(expiry, marker):
+    encode = lambda value: base64.urlsafe_b64encode(json.dumps(value).encode()).decode().rstrip("=")
+    return f"{encode({'alg': 'none'})}.{encode({'exp': expiry, 'marker': marker})}.fixture"
 
 
 class FleetLab:
@@ -208,6 +214,7 @@ class FleetLab:
             }
             command = "sync"
         else:
+            access = jwt_with_exp(expires_seconds, access)
             path = home / "codex-profiles" / profile / ".codex" / "auth.json"
             value = {
                 "auth_mode": "chatgpt",
@@ -215,7 +222,7 @@ class FleetLab:
                     datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(minutes=generation)
                 ).isoformat(),
                 "tokens": {
-                    "access_token": f"old-{access}",
+                    "access_token": jwt_with_exp(1, f"old-{profile}-{generation}"),
                     "refresh_token": refresh,
                     "id_token": "fixture-id",
                 },
@@ -409,7 +416,7 @@ class FollowerLeaderMatrixTest(unittest.TestCase):
                         with self.assertRaises(urllib.error.HTTPError) as rejected:
                             post(version)
                         self.assertEqual(rejected.exception.code, 426)
-                with post("3.0.3") as accepted:
+                with post("3.0.4") as accepted:
                     self.assertEqual(accepted.status, 200)
             finally:
                 lab.close()
@@ -431,7 +438,7 @@ class FollowerLeaderMatrixTest(unittest.TestCase):
 
                 self.assertNotEqual(post("ai-vault sync-receive claude:alpha").returncode, 0)
                 self.assertNotEqual(post("ai-vault client 2.9.9 sync-receive claude:alpha").returncode, 0)
-                accepted = post("ai-vault client 3.0.3 sync-receive claude:alpha")
+                accepted = post("ai-vault client 3.0.4 sync-receive claude:alpha")
                 self.assertEqual(accepted.returncode, 0, accepted.stderr.decode())
             finally:
                 lab.close()

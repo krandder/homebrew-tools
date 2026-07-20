@@ -11,10 +11,11 @@ for script in ai-token ai-vault claude-token codex-token setup-claude-token; do
 done
 python3 - <<'PY'
 from pathlib import Path
-compile(Path("ai-vault-http").read_text(encoding="utf-8"), "ai-vault-http", "exec")
+for script in ("ai-vault-http", "ai-any"):
+    compile(Path(script).read_text(encoding="utf-8"), script, "exec")
 PY
 
-for pattern in 'test_ai_token*.py' 'test_ai_vault*.py' 'test_follower_leader*.py' 'test_formula_integrity.py'; do
+for pattern in 'test_ai_any.py' 'test_ai_token*.py' 'test_ai_vault*.py' 'test_follower_leader*.py' 'test_formula_integrity.py'; do
     python3 -m unittest discover -s tests -p "$pattern"
 done
 for test_file in tests/test-*.sh; do

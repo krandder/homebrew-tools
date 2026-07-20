@@ -5,12 +5,15 @@ import time
 
 
 class MockOAuthServer:
-    def __init__(self, token_status=200, token_body=None, profile_status=200, profile_body=None, delay=0):
+    def __init__(self, token_status=200, token_body=None, profile_status=200, profile_body=None, delay=0,
+                 token_headers=None, profile_headers=None):
         self.token_status = token_status
         self.token_body = token_body or {}
         self.profile_status = profile_status
         self.profile_body = profile_body or {}
         self.delay = delay
+        self.token_headers = token_headers or {}
+        self.profile_headers = profile_headers or {}
         self.requests = []
         scenario = self
 
@@ -20,17 +23,19 @@ class MockOAuthServer:
                 scenario.requests.append(("POST", self.path, dict(self.headers), body))
                 if scenario.delay:
                     time.sleep(scenario.delay)
-                self.respond(scenario.token_status, scenario.token_body)
+                self.respond(scenario.token_status, scenario.token_body, scenario.token_headers)
 
             def do_GET(self):
                 scenario.requests.append(("GET", self.path, dict(self.headers), b""))
-                self.respond(scenario.profile_status, scenario.profile_body)
+                self.respond(scenario.profile_status, scenario.profile_body, scenario.profile_headers)
 
-            def respond(self, status, body):
+            def respond(self, status, body, headers):
                 data = json.dumps(body).encode()
                 self.send_response(status)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(data)))
+                for key, value in headers.items():
+                    self.send_header(key, value)
                 self.end_headers()
                 self.wfile.write(data)
 

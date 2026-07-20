@@ -147,7 +147,8 @@ except Exception:
     expires = 0
 if not refresh or refresh == sentinel or refresh.startswith("vlt:"):
     sys.exit("ai-vault: Claude sync requires a real owner refresh token")
-if not access or expires <= int((time.time() + 60) * 1000):
+now = float(os.environ.get("AI_TOKEN_TEST_NOW") or time.time())
+if not access or expires <= int((now + 60) * 1000):
     sys.exit("ai-vault: Claude sync requires a fresh access token")
 
 def atomic_json(path, value):
@@ -254,7 +255,8 @@ try:
     expires = int(creds.get("expires_at") or 0)
 except Exception:
     expires = 0
-if expires <= int(time.time()) + 60:
+now = float(os.environ.get("AI_TOKEN_TEST_NOW") or time.time())
+if expires <= int(now) + 60:
     sys.exit("ai-vault: kimi sync requires a fresh versioned access token")
 
 lock_path = auth_path + ".lock"
@@ -454,13 +456,14 @@ cmd_access() { # id -> stdout: access token (plain text)
     kind="$(kind_of "$p")"
     [ -f "$sf" ] || die "access: no published token for '$p'"
     python3 - "$sf" "$kind" <<'PY'
-import json, sys, time
+import json, os, sys, time
 
 d=json.load(open(sys.argv[1])); o=d.get("claudeAiOauth",d)
 token=o.get("accessToken") or (d.get("tokens") or {}).get("access_token") or ""
 if sys.argv[2] == "claude":
     try:
-        fresh=float(o.get("expiresAt") or 0)/1000 > time.time()+60
+        now=float(os.environ.get("AI_TOKEN_TEST_NOW") or time.time())
+        fresh=float(o.get("expiresAt") or 0)/1000 > now+60
     except Exception:
         fresh=False
     if not token or not fresh:

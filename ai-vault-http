@@ -144,7 +144,8 @@ def broker_refresh(account):
     with open(sf) as fh:
         d = json.load(fh)
     o = d.get("claudeAiOauth", d)
-    ttl = max(60, int(float(o.get("expiresAt") or 0) / 1000 - time.time()))
+    now = float(os.environ.get("AI_TOKEN_TEST_NOW") or time.time())
+    ttl = max(60, int(float(o.get("expiresAt") or 0) / 1000 - now))
     server_event("broker-refresh", account, "claude:" + account, "ok", "locked-publish")
     return o["accessToken"], ttl
 

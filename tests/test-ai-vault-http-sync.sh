@@ -43,7 +43,7 @@ done
 
 post() {
     /usr/bin/curl -fsS -H "Authorization: Bearer test-vault-token" \
-        -H "X-Ai-Token-Version: 3.0.3" \
+        -H "X-Ai-Token-Version: 3.0.4" \
         --data-binary '{"credential":"fixture"}' "http://127.0.0.1:$PORT$1" >/dev/null
 }
 
@@ -55,7 +55,7 @@ post /push/claude/owner-a
 [ "$(cat "$TMP/args")" = "receive claude:owner-a" ]
 
 code="$(/usr/bin/curl -sS -o /dev/null -w '%{http_code}' -H "Authorization: Bearer test-vault-token" \
-    -H "X-Ai-Token-Version: 3.0.3" \
+    -H "X-Ai-Token-Version: 3.0.4" \
     --data-binary '{}' "http://127.0.0.1:$PORT/sync/codex/owner-a")"
 [ "$code" = 400 ]
 

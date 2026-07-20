@@ -1,4 +1,5 @@
 import fcntl
+import datetime
 import json
 import os
 import pathlib
@@ -6,6 +7,7 @@ import subprocess
 import tempfile
 import time
 import unittest
+import random
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -87,6 +89,16 @@ class VaultReceiveTest(unittest.TestCase):
             timeout=10,
         )
 
+    def claude_sync(self, value):
+        return subprocess.run(
+            [AI_VAULT, "sync-receive", "claude:fixture"],
+            input=json.dumps(value),
+            env=self.env,
+            text=True,
+            capture_output=True,
+            timeout=10,
+        )
+
     def codex_receive(self, value):
         return subprocess.run(
             [AI_VAULT, "receive", "codex:fixture"],
@@ -152,6 +164,13 @@ class VaultReceiveTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertFalse(self.canonical.exists())
 
+    def test_claude_freshness_uses_the_injected_clock(self):
+        now = 4_102_444_800
+        self.env["AI_TOKEN_TEST_NOW"] = str(now)
+        result = self.claude_sync(self.credentials("access", "refresh", (now + 59) * 1000))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(self.canonical.exists())
+
     def test_malformed_canonical_fails_closed(self):
         self.canonical.parent.mkdir(parents=True)
         self.canonical.write_text("{")
@@ -190,6 +209,13 @@ class VaultReceiveTest(unittest.TestCase):
 
     def test_unversioned_kimi_snapshot_is_rejected(self):
         result = self.kimi_sync(self.kimi_credentials("access", "refresh", 0))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(self.kimi_canonical.exists())
+
+    def test_kimi_freshness_uses_the_injected_clock(self):
+        now = 4_102_444_800
+        self.env["AI_TOKEN_TEST_NOW"] = str(now)
+        result = self.kimi_sync(self.kimi_credentials("access", "refresh", now + 59))
         self.assertNotEqual(result.returncode, 0)
         self.assertFalse(self.kimi_canonical.exists())
 
@@ -265,6 +291,55 @@ class VaultReceiveTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         stored = json.loads(self.codex_canonical.read_text())
         self.assertEqual(stored["tokens"]["refresh_token"], "new-refresh")
+
+    def exercise_generated_generations(self, receive, credentials, canonical, refresh_from):
+        rng = random.Random(97)
+        events = [(generation, f"refresh-{generation}") for generation in range(1, 11)]
+        events += [(generation, f"conflict-{generation}") for generation in range(1, 11)]
+        rng.shuffle(events)
+        current_generation = None
+        current_refresh = None
+        for generation, refresh in events:
+            result = receive(credentials(generation, refresh))
+            accepted = (
+                current_generation is None
+                or generation > current_generation
+                or (generation == current_generation and refresh == current_refresh)
+            )
+            self.assertEqual(result.returncode == 0, accepted, result.stderr)
+            if accepted:
+                current_generation, current_refresh = generation, refresh
+            stored = json.loads(canonical.read_text())
+            self.assertEqual(refresh_from(stored), current_refresh)
+
+    def test_generated_claude_generations_match_the_reference_rule(self):
+        self.exercise_generated_generations(
+            self.receive,
+            lambda generation, refresh: self.credentials(f"access-{generation}", refresh, generation * 1000),
+            self.canonical,
+            lambda value: value["claudeAiOauth"]["refreshToken"],
+        )
+
+    def test_generated_kimi_generations_match_the_reference_rule(self):
+        now = 4_102_444_800
+        self.env["AI_TOKEN_TEST_NOW"] = str(now)
+        self.exercise_generated_generations(
+            self.kimi_sync,
+            lambda generation, refresh: self.kimi_credentials(f"access-{generation}", refresh, now + 1000 + generation),
+            self.kimi_canonical,
+            lambda value: value["refresh_token"],
+        )
+
+    def test_generated_codex_generations_match_the_reference_rule(self):
+        base = datetime.datetime(2026, 7, 20, tzinfo=datetime.timezone.utc)
+        self.exercise_generated_generations(
+            self.codex_receive,
+            lambda generation, refresh: self.codex_credentials(
+                f"access-{generation}", refresh, (base + datetime.timedelta(seconds=generation)).isoformat()
+            ),
+            self.codex_canonical,
+            lambda value: value["tokens"]["refresh_token"],
+        )
 
 
 if __name__ == "__main__":

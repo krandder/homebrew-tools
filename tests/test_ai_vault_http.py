@@ -30,6 +30,7 @@ class VaultHttpTest(unittest.TestCase):
                 "HOME": str(home),
                 "CODEX_VAULT_DIR": str(home / "vault"),
                 "AI_TOKEN_BIN": "/bin/true",
+                "AI_TOKEN_TEST_NOW": str(int(time.time()) + 3000),
             }
             with mock.patch.dict(os.environ, env, clear=False):
                 loader = importlib.machinery.SourceFileLoader("ai_vault_http_test_module", str(AI_VAULT_HTTP))
@@ -39,7 +40,7 @@ class VaultHttpTest(unittest.TestCase):
                 access, ttl = module.broker_refresh("fixture")
 
             self.assertEqual(access, "fresh-access")
-            self.assertGreaterEqual(ttl, 3500)
+            self.assertEqual(ttl, 600)
 
 
 if __name__ == "__main__":

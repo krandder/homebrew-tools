@@ -48,6 +48,9 @@ Excluded:
 7. Followers receive usable access tokens but never functional refresh tokens.
 8. Permanent failures such as `invalid_grant` stop retries and surface a clear
    `needsRelogin` state; transient failures retain bounded retry behavior.
+   A 429 creates a durable per-credential and provider-wide cooldown: no
+   profile may make another refresh request from that host before
+   `Retry-After`, and throttling never mutates credential bytes.
 9. Legacy clients cannot silently downgrade authority or credential state.
 10. Running code, scheduled jobs, configuration, and installed versions must
     agree with the version that passed the release gates.

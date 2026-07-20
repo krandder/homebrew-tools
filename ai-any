@@ -1,0 +1,282 @@
+#!/usr/bin/env python3
+"""ai-any — claude-any / codex-any: launch the CLI on any working profile.
+
+Selection: spread load (least-recently-used) across profiles that are
+fresh-tokened, not needs-relogin, and not in 401/429 cooldown. The main
+claude account is NOT in the rotation — it is the last-resort fallback when
+no profile works (claude only).
+
+Non-interactive calls (claude -p/--print, codex exec) are retried: on a
+401/429-class failure the profile is marked in a cooldown file and the next
+best profile is tried. Interactive launches get smart selection at launch
+(no mid-session swap — the token proxy already heals expiry in-session).
+
+Everything is logged as JSONL: ~/.claude-token/any.log (claude),
+~/.codex-profiles/any.log (codex).
+
+Symlink claude-any and codex-any to this file; behavior follows argv0.
+"""
+
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+
+FAIL_RE = re.compile(
+    r"401|Invalid authentication|Re-authenticate|429|rate.?limit|usage.?limit|overloaded",
+    re.IGNORECASE,
+)
+COOLDOWN_401_S = 900       # dead-token signal; proxy/refresh gets 15 min to heal
+COOLDOWN_429_S = 1800      # rate/usage limit: sit out 30 min
+MIN_FRESH_S = 600          # need at least 10 min of AT life to be eligible
+
+
+def now():
+    return time.time()
+
+
+class Tool:
+    def __init__(self, kind, home):
+        self.kind = kind
+        self.home = home
+        if kind == "claude":
+            self.ports_file = os.path.join(home, ".claude-token/proxy-ports.json")
+            self.state_file = os.path.join(home, ".claude-token/any-state.json")
+            self.log_file = os.path.join(home, ".claude-token/any.log")
+        else:
+            self.state_file = os.path.join(home, ".codex-profiles/any-state.json")
+            self.log_file = os.path.join(home, ".codex-profiles/any.log")
+
+    def log(self, event, **kv):
+        try:
+            os.makedirs(os.path.dirname(self.log_file), exist_ok=True)
+            with open(self.log_file, "a") as f:
+                f.write(json.dumps({"ts": round(now(), 3), "event": event, **kv}) + "\n")
+        except OSError:
+            pass
+
+    def load_state(self):
+        try:
+            with open(self.state_file) as f:
+                return json.load(f)
+        except Exception:
+            return {}
+
+    def save_state(self, state):
+        try:
+            os.makedirs(os.path.dirname(self.state_file), exist_ok=True)
+            tmp = self.state_file + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump(state, f, indent=1)
+            os.rename(tmp, self.state_file)
+        except OSError:
+            pass
+
+    def mark_cooldown(self, state, profile, kind):
+        ent = state.setdefault(profile, {})
+        key = "cooldown_401_until" if kind == "401" else "cooldown_429_until"
+        ent[key] = now() + (COOLDOWN_401_S if kind == "401" else COOLDOWN_429_S)
+        self.save_state(state)
+        self.log("cooldown", profile=profile, kind=kind, until=ent[key])
+
+    def clear_cooldown(self, state, profile):
+        ent = state.get(profile) or {}
+        changed = ent.pop("cooldown_401_until", None) is not None
+        if changed:
+            self.save_state(state)
+            self.log("cooldown-cleared", profile=profile)
+
+    def role_of(self, profile):
+        """leader = this machine may refresh+publish; follower = pull only."""
+        if self.kind == "codex":
+            rf = os.path.join(self.home, ".codex-profiles", profile, ".role")
+            if os.path.isfile(rf):
+                with open(rf) as f:
+                    return f.read().strip()
+            return "leader" if os.uname().nodename.split(".")[0] == "farol" else "follower"
+        cfg = os.path.join(self.home, ".claude-token/config")
+        try:
+            with open(cfg) as f:
+                for line in f:
+                    if line.startswith("mode="):
+                        return "follower" if line.strip().split("=", 1)[1] == "follower" else "leader"
+        except OSError:
+            pass
+        return "leader"
+
+    def heal(self, state, profile):
+        """Best-effort refresh of one profile after a 401: leader publishes
+        (refresh+publish), follower pulls the published AT. On success the
+        401 cooldown is cleared so the profile is eligible again next call."""
+        role = self.role_of(profile)
+        action = "publish" if role == "leader" else "pull"
+        cmd = ["ai-token", self.kind, action, "--profile", profile]
+        env = dict(os.environ)
+        self.log("heal-start", profile=profile, role=role, action=action)
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=180, env=env)
+            ok = r.returncode == 0
+        except Exception as e:
+            r, ok = None, False
+            self.log("heal-error", profile=profile, error=str(e)[:200])
+        self.log("heal-done", profile=profile, ok=ok,
+                 detail=((r.stdout or "") if r else "")[-160:].strip())
+        if ok:
+            self.clear_cooldown(state, profile)
+        return ok
+
+    def mark_used(self, state, profile):
+        state.setdefault(profile, {})["last_used"] = now()
+        self.save_state(state)
+
+    def eligible(self, profile, state):
+        ent = state.get(profile, {})
+        t = now()
+        if ent.get("cooldown_401_until", 0) > t or ent.get("cooldown_429_until", 0) > t:
+            return None
+        fresh = self.freshness(profile)
+        if fresh is None or fresh < MIN_FRESH_S:
+            return None
+        if self.needs_relogin(profile):
+            return None
+        return fresh
+
+    # --- per-tool probes --------------------------------------------------- #
+    def candidates(self):
+        if self.kind == "claude":
+            try:
+                with open(self.ports_file) as f:
+                    ports = json.load(f)
+            except Exception:
+                ports = {}
+            return sorted(ports)
+        base = os.path.join(self.home, ".codex-profiles")
+        if not os.path.isdir(base):
+            return []
+        return sorted(d for d in os.listdir(base)
+                      if os.path.isfile(os.path.join(base, d, ".codex/auth.json")))
+
+    def freshness(self, profile):
+        """Seconds of AT life left, or None if unknowable/expired."""
+        try:
+            if self.kind == "claude":
+                p = os.path.join(self.home, "shared/claude-tokens", profile + ".json")
+                if not os.path.isfile(p):  # follower layout: pulled store in profile home
+                    p = os.path.join(self.home, ".claude-profiles", profile, ".claude", "credentials.json")
+                with open(p) as f:
+                    d = json.load(f)
+                o = d.get("claudeAiOauth", d)
+                return o.get("expiresAt", 0) / 1000 - now()
+            with open(os.path.join(self.home, ".codex-profiles", profile, ".codex/auth.json")) as f:
+                d = json.load(f)
+            tok = (d.get("tokens") or {}).get("access_token", "")
+            import base64
+            part = tok.split(".")[1]
+            part += "=" * (-len(part) % 4)
+            return json.loads(base64.urlsafe_b64decode(part)).get("exp", 0) - now()
+        except Exception:
+            return None
+
+    def needs_relogin(self, profile):
+        if self.kind != "claude":
+            return False
+        try:
+            with open(os.path.join(
+                self.home, ".claude-profiles", profile, ".claude/credentials.json")) as f:
+                d = json.load(f)
+            return bool((d.get("claudeTokenSync") or {}).get("needsRelogin"))
+        except Exception:
+            return False
+
+    def launch_argv(self, profile, args):
+        if profile == "main":
+            return ["claude"] + args
+        return [f"{self.kind}-{profile}"] + args
+
+    def is_noninteractive(self, args):
+        if self.kind == "claude":
+            return any(a in ("-p", "--print") for a in args)
+        return bool(args) and args[0] == "exec"
+
+
+def pick(tool, state, exclude=()):
+    best = None
+    for p in tool.candidates():
+        if p in exclude:
+            continue
+        fresh = tool.eligible(p, state)
+        if fresh is None:
+            continue
+        last = state.get(p, {}).get("last_used", 0)
+        if best is None or last < best[1]:
+            best = (p, last, fresh)
+    return best[0] if best else None
+
+
+def run_streaming(argv):
+    """Run argv, stream stdout/stderr through, capture both. Returns (rc, text)."""
+    proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                            text=True, bufsize=1)
+    buf = []
+    try:
+        for line in proc.stdout:
+            sys.stdout.write(line)
+            sys.stdout.flush()
+            buf.append(line)
+    except KeyboardInterrupt:
+        proc.kill()
+        raise
+    finally:
+        proc.stdout.close()
+    return proc.wait(), "".join(buf)
+
+
+def main():
+    kind = "codex" if os.path.basename(sys.argv[0]).startswith("codex") else "claude"
+    args = sys.argv[1:]
+    home = os.path.expanduser("~")
+    tool = Tool(kind, home)
+    state = tool.load_state()
+    noninteractive = tool.is_noninteractive(args)
+
+    tried = []
+    while True:
+        profile = pick(tool, state, exclude=tried)
+        if profile is None:
+            if kind == "claude" and "main" not in tried:
+                profile = "main"   # last resort, never in rotation
+            else:
+                tool.log("exhausted", tried=tried)
+                print(f"{kind}-any: no working profile left "
+                      f"(tried: {', '.join(tried) or 'none'})", file=sys.stderr)
+                return 1
+        tool.log("select", profile=profile, noninteractive=noninteractive, tried=tried)
+        argv = tool.launch_argv(profile, args)
+        if not noninteractive:
+            tool.mark_used(state, profile)
+            tool.log("exec-interactive", profile=profile)
+            os.execvp(argv[0], argv)   # becomes the CLI; no retry mid-session
+        rc, out = run_streaming(argv)
+        if rc == 0:
+            tool.mark_used(state, profile)
+            tool.log("ok", profile=profile)
+            return 0
+        m = FAIL_RE.search(out)
+        tried.append(profile)
+        if not m:
+            tool.log("failed-nonauth", profile=profile, rc=rc)
+            return rc   # real failure, not an auth/rate problem: do not mask it
+        kind_of = "401" if ("401" in m.group(0) or "authentication" in m.group(0).lower()
+                            or "authenticate" in m.group(0).lower()) else "429"
+        tool.mark_cooldown(state, profile, kind_of)
+        tool.log("retry", profile=profile, kind=kind_of, rc=rc)
+        if kind_of == "401":
+            tool.heal(state, profile)   # leader: refresh+publish; follower: pull
+        print(f"\n{kind}-any: {profile} hit {kind_of}; trying next profile…\n",
+              file=sys.stderr)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

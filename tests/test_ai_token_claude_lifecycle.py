@@ -29,6 +29,7 @@ class ClaudeLifecycleTest(unittest.TestCase):
             "CLAUDE_PROFILES_DIR": str(self.profiles),
             "CLAUDE_SHARED_DIR": str(self.shared),
             "CLAUDE_OAUTH_LOCK_DIR": str(self.home / "locks"),
+            "AI_TOKEN_REFRESH_STATE_DIR": str(self.home / "refresh-state"),
             "AI_TOKEN_LOG_DIR": str(self.logs),
             "PATH": "/usr/bin:/bin",
         }
@@ -92,6 +93,82 @@ class ClaudeLifecycleTest(unittest.TestCase):
         self.assertEqual(self.auth.read_bytes(), before)
         self.assertNotIn("needsRelogin", json.loads(self.auth.read_text())["claudeTokenSync"])
         self.assertEqual(len(server.requests), 2)
+
+    def test_rate_limit_persists_retry_after_and_blocks_refresh_hammering(self):
+        self.write_credentials()
+        before = self.auth.read_bytes()
+        now = 4_102_444_800
+        with MockOAuthServer(
+            429,
+            {"error": "rate_limited"},
+            token_headers={"Retry-After": "120"},
+        ) as server:
+            first = self.run_publish(server, AI_TOKEN_TEST_NOW=str(now))
+            second = self.run_publish(server, AI_TOKEN_TEST_NOW=str(now + 30))
+            third = self.run_publish(server, AI_TOKEN_TEST_NOW=str(now + 121))
+
+        self.assertNotEqual(first.returncode, 0)
+        self.assertNotEqual(second.returncode, 0)
+        self.assertNotEqual(third.returncode, 0)
+        self.assertEqual(self.auth.read_bytes(), before)
+        self.assertEqual(len(server.requests), 2)
+        self.assertIn("cooldown", second.stderr)
+        cooldown = json.loads(pathlib.Path(f"{self.auth}.refresh-cooldown").read_text())
+        self.assertEqual(cooldown["until"], now + 241)
+
+    def test_rate_limit_on_one_profile_blocks_other_profiles_on_the_same_ip(self):
+        self.write_credentials()
+        other = self.profiles / "other" / ".claude" / "credentials.json"
+        other.parent.mkdir(parents=True)
+        other.write_text(self.auth.read_text())
+        other.chmod(0o600)
+        now = 4_102_444_800
+        with MockOAuthServer(429, {"error": "rate_limited"}, token_headers={"Retry-After": "120"}) as server:
+            first = self.run_publish(server, AI_TOKEN_TEST_NOW=str(now))
+            env = {
+                **self.env,
+                "AI_TOKEN_TEST_NOW": str(now),
+                "CLAUDE_TOKEN_EP": server.token_url,
+                "CLAUDE_PROFILE_EP": server.profile_url,
+            }
+            second = subprocess.run(
+                [AI_TOKEN, "claude", "publish", "--profile", "other"],
+                env=env,
+                text=True,
+                capture_output=True,
+                timeout=15,
+            )
+
+        self.assertNotEqual(first.returncode, 0)
+        self.assertNotEqual(second.returncode, 0)
+        self.assertIn("cooldown", second.stderr)
+        self.assertEqual(len(server.requests), 1)
+        self.assertFalse(pathlib.Path(f"{other}.refresh-cooldown").exists())
+
+    def test_concurrent_rate_limited_publishes_make_one_network_request(self):
+        self.write_credentials()
+        now = 4_102_444_800
+        with MockOAuthServer(
+            429,
+            {"error": "rate_limited"},
+            delay=0.2,
+            token_headers={"Retry-After": "120"},
+        ) as server:
+            env = {
+                **self.env,
+                "AI_TOKEN_TEST_NOW": str(now),
+                "CLAUDE_TOKEN_EP": server.token_url,
+                "CLAUDE_PROFILE_EP": server.profile_url,
+            }
+            command = [AI_TOKEN, "claude", "publish", "--profile", self.profile]
+            processes = [
+                subprocess.Popen(command, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                for _ in range(2)
+            ]
+            results = [process.communicate(timeout=15) + (process.returncode,) for process in processes]
+
+        self.assertTrue(all(result[2] != 0 for result in results), results)
+        self.assertEqual(len(server.requests), 1)
 
     def test_owner_authority_refuses_refresh_before_network(self):
         self.write_credentials(authority="owner")

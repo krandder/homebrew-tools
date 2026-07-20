@@ -5,6 +5,8 @@ import subprocess
 import tempfile
 import unittest
 
+from support import MockOAuthServer
+
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 AI_TOKEN = ROOT / "ai-token"
@@ -27,38 +29,31 @@ class CodexLifecycleTest(unittest.TestCase):
             }))
             (profile / ".role").write_text("leader")
 
-            binary = home / "bin"
-            binary.mkdir()
-            curl = binary / "curl"
-            curl.write_text(
-                '#!/usr/bin/env bash\n'
-                'printf "%s\\n" "$*" > "$CURL_ARGS"\n'
-                'printf \'%s\\n\' \'{"access_token":"new-access","refresh_token":"new-refresh"}\'\n'
-            )
-            curl.chmod(0o755)
-            args = home / "curl-args"
-            endpoint = "http://127.0.0.1:1/hermetic-codex-token"
-            env = {
-                **os.environ,
-                "HOME": str(home),
-                "AI_TOKEN_REAL_HOME": str(home),
-                "CODEX_PROFILES_DIR": str(home / "profiles"),
-                "CODEX_SHARED_DIR": str(home / "shared"),
-                "CODEX_TOKEN_EP": endpoint,
-                "CURL_ARGS": str(args),
-                "PATH": f"{binary}:/usr/bin:/bin",
-            }
+            token = {"access_token": "new-access", "refresh_token": "new-refresh"}
+            with MockOAuthServer(200, token) as server:
+                env = {
+                    **os.environ,
+                    "HOME": str(home),
+                    "AI_TOKEN_REAL_HOME": str(home),
+                    "AI_TOKEN_REFRESH_STATE_DIR": str(home / "refresh-state"),
+                    "CODEX_PROFILES_DIR": str(home / "profiles"),
+                    "CODEX_SHARED_DIR": str(home / "shared"),
+                    "CODEX_TOKEN_EP": server.token_url,
+                    "PATH": "/usr/bin:/bin",
+                }
 
-            result = subprocess.run(
-                [AI_TOKEN, "codex", "publish", "--profile", "fixture"],
-                env=env,
-                text=True,
-                capture_output=True,
-                timeout=10,
-            )
+                result = subprocess.run(
+                    [AI_TOKEN, "codex", "publish", "--profile", "fixture"],
+                    env=env,
+                    text=True,
+                    capture_output=True,
+                    timeout=10,
+                )
 
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn(endpoint, args.read_text())
+            self.assertEqual(len(server.requests), 1)
+            self.assertIn(b"refresh_token=old-refresh", server.requests[0][3])
+            self.assertEqual(json.loads(auth.read_text())["tokens"]["refresh_token"], "new-refresh")
 
 
 if __name__ == "__main__":

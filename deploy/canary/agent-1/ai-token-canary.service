@@ -1,0 +1,8 @@
+[Unit]
+Description=Daily ai-token follower lifecycle canary
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/home/kas/.ai-token-canary/release/current/tools/run-live-canary --config /home/kas/.ai-token-canary/canary.json --live

@@ -1,0 +1,10 @@
+[Unit]
+Description=Schedule daily ai-token leader lifecycle canary
+
+[Timer]
+OnCalendar=*-*-* 04:00:00 UTC
+Persistent=true
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

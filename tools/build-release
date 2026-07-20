@@ -28,6 +28,15 @@ PAYLOAD = (
     "tools/install-release",
     "tools/run-live-canary",
     "tools/verify-live-soak",
+    "deploy/canary/farol/ai-token-canary.service",
+    "deploy/canary/farol/ai-token-canary.timer",
+    "deploy/canary/farol/ai-token-canary-alert@.service",
+    "deploy/canary/agent-1/ai-token-canary.service",
+    "deploy/canary/agent-1/ai-token-canary.timer",
+    "deploy/canary/macos/com.futarchy.ai-token-canary-dispatch.plist",
+    "deploy/canary/macos/run-as-ai-token-canary.expect",
+    "deploy/canary/macos/run-live",
+    "deploy/canary/macos/run-scheduled",
 )
 
 

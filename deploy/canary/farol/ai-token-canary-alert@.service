@@ -1,0 +1,6 @@
+[Unit]
+Description=File incident for failed ai-token canary unit %i
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /home/kelvin/.openclaw/workspace/scripts/incident.py --severity error --category auth-credential --summary "ai-token canary unit failed: %i" --source systemd --detail "Inspect journalctl --user -u %i and sanitized evidence under /home/kelvin/.ai-token-canary/evidence" --tags ai-token,canary,tdd

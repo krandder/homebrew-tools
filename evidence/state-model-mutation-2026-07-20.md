@@ -36,3 +36,5 @@ Result: 18 killed, 0 survived, for a 100% score over this explicit mutation
 set. This is mutation evidence for the executable credential model, not a
 claim of whole-program mutation coverage for the Bash/Python implementation.
 No network, credential store, or installed executable participates.
+
+The expanded model is included in the clean 108-Python-test release gate.

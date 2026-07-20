@@ -4,6 +4,9 @@ This audit compares the authoritative goal with current canonical tests and
 deployed evidence. A green unit test is not treated as proof of a physical
 deployment.
 
+At this audit point the clean local release gate passes 108 Python tests and
+four shell integration suites.
+
 ## Proven in canonical CI
 
 - M1's hermetic laboratory covers loopback OAuth/API behavior, injected time,

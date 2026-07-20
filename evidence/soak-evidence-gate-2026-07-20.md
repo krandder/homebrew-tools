@@ -28,3 +28,7 @@ The release payload includes the verifier, while the installer remains able to
 install and roll back older valid artifacts that predate it. The real soak
 remains unstarted until the dedicated profile and scheduled host roles are
 designated and deployed.
+
+The clean release gate passed 108 Python tests and four shell integration
+suites without retry. Its checksum-verified artifact contains 15 manifested
+payload files, including `tools/verify-live-soak`.

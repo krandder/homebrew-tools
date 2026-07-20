@@ -28,3 +28,18 @@ the single `tools/build-release` gate, retain artifacts for 30 days, and run on
 push, pull request, manual dispatch, and daily at 03:17 UTC. The schedule is
 version-controlled but has not run remotely because this goal has not pushed
 or deployed the commits.
+
+## Packaged-path drill
+
+The externally checksummed `1865368e8393-24484a5040cb` bundle was installed
+after `1361fbfee39e-ff22c190e2df` in a disposable root. The verifier accepted
+the expected `1865368e8393` commit. Changing only the installed `ai-token` mode
+to 0700 was then detected as drift. The same packaged verifier rolled back and
+accepted expected commit `1361fbfee39e`.
+
+The deployment journal actions were, in order:
+
+```text
+install-intent, install, install-intent, install, verify,
+rollback-intent, rollback, verify
+```

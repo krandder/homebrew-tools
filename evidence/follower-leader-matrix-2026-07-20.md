@@ -14,7 +14,7 @@ tests/run full && git diff --check
 
 Result:
 
-- 78 scoped Python tests passed.
+- 81 scoped Python tests passed.
 - Eight cross-machine cases passed: HTTP and forced-command SSH for complete
   owner/leader/follower convergence, follower CLI launch, and legacy-writer
   rejection, plus established-follower revocation.
@@ -87,7 +87,8 @@ would require a provider feature and is not claimed by this test.
 
 - deterministic disconnect and crash-point fault injection;
 - fake-clock coverage across all lifecycle thresholds;
-- systemd, launchd, cron, PATH, wrapper, and obsolete-writer simulations;
+- physical systemd, launchd, cron, PATH, wrapper, and obsolete-writer inventory
+  during disposable-profile canary staging;
 - executable generated state-machine/property tests and mutation testing;
 - clean-checkout blocking CI/release evidence and immutable release bundles;
 - disposable-profile staging on farol/Mac/agent-1, rollback, scheduled canary,

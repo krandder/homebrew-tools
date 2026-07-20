@@ -353,8 +353,11 @@ cat > "$TMP/bin/claude-token" <<'SH'
 printf '%s\n' "$*" > "$WRAPPER_OUTPUT"
 SH
 chmod +x "$TMP/bin/claude-token"
-PATH="$TMP/bin:$PATH" "$HOME/bin/claude-operator" hello
-[ "$(cat "$WRAPPER_OUTPUT")" = "run-follower operator hello" ]
+CURL_RESPONSE="$HOME/operator.json"; export CURL_RESPONSE
+write_shared operator-wrapper-token 4102444800000 "$CURL_RESPONSE"
+CLAUDE_REAL_BIN="$TMP/bin/claude-real" PATH="$TMP/bin:$PATH" "$HOME/bin/claude-operator" hello
+[ "$(sed -n '1p' "$TEST_OUTPUT")" = operator-wrapper-token ]
+[ ! -e "$WRAPPER_OUTPUT" ]
 
 # An authorized main config can install a named follower without re-pairing.
 new_home install-from-current

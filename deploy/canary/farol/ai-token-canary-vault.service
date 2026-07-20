@@ -1,0 +1,20 @@
+[Unit]
+Description=Isolated ai-token canary vault
+After=network-online.target tailscaled-userspace.service
+Wants=network-online.target
+OnFailure=ai-token-canary-alert@%n.service
+
+[Service]
+Type=simple
+Environment=HOME=/home/kelvin/.ai-token-canary
+Environment=PATH=/home/kelvin/.ai-token-canary/release/current:/home/kelvin/.npm-global/bin:/usr/local/bin:/usr/bin:/bin
+Environment=CODEX_VAULT_DIR=/home/kelvin/.ai-token-canary/.codex-vault
+Environment=CODEX_VAULT_LISTEN=127.0.0.1:8232
+Environment=AI_VAULT_INCIDENT_BIN=/home/kelvin/.openclaw/workspace/scripts/incident.py
+Environment=OPENCLAW_STATE_DIR=/home/kelvin/.openclaw/workspace
+ExecStart=/home/kelvin/.ai-token-canary/release/current/ai-vault-http
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

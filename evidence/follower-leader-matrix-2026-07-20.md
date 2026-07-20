@@ -14,7 +14,7 @@ tests/run full && git diff --check
 
 Result:
 
-- 81 scoped Python tests passed.
+- 85 scoped Python tests passed.
 - Eight cross-machine cases passed: HTTP and forced-command SSH for complete
   owner/leader/follower convergence, follower CLI launch, and legacy-writer
   rejection, plus established-follower revocation.

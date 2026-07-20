@@ -22,6 +22,52 @@ from credential_state_model import (
 
 
 class CredentialStateMachineTest(unittest.TestCase):
+    def test_authority_generation_and_failure_transition_contract(self):
+        state = owner_sync(State(), 2, "owner-refresh")
+        self.assertEqual(state.canonical.authority, Authority.OWNER)
+        with self.assertRaisesRegex(Rejected, "stale"):
+            owner_sync(state, 1, "older-refresh")
+        with self.assertRaisesRegex(Rejected, "conflicting"):
+            owner_sync(state, 2, "different-refresh")
+
+        state = vault_handoff(state, 3, "vault-refresh")
+        self.assertEqual(state.canonical.authority, Authority.VAULT)
+        with self.assertRaisesRegex(Rejected, "advance"):
+            refresh_success(state, 3, "same-generation")
+        state = refresh_success(state, 4, "rotated-refresh")
+        self.assertEqual(state.canonical.generation, 4)
+
+        published = publish(state)
+        self.assertEqual(published.follower.authority, Authority.FOLLOWER)
+        self.assertIsNone(published.follower.refresh_token)
+        with self.assertRaisesRegex(Rejected, "never refresh"):
+            follower_refresh(published)
+
+        unchanged = transient_failure(published)
+        self.assertEqual(unchanged, published)
+        relogin = invalid_grant(state)
+        self.assertTrue(relogin.canonical.needs_relogin)
+        with self.assertRaisesRegex(Rejected, "relogin"):
+            refresh_attempt(relogin)
+
+    def test_time_and_retry_after_boundaries(self):
+        with self.assertRaisesRegex(Rejected, "backwards"):
+            advance_time(State(), -1)
+        with self.assertRaisesRegex(Rejected, "retry-after"):
+            rate_limited(State(), 0)
+        state = rate_limited(State(now=10), 100_000)
+        self.assertEqual(state.provider_cooldown_until, 86_410)
+        self.assertEqual(advance_time(state, 0), state)
+
+    def test_explicit_takeover_is_required_before_owner_chain_refresh(self):
+        owner = owner_sync(State(), 1, "owner-refresh")
+        with self.assertRaisesRegex(Rejected, "outside vault authority"):
+            refresh_attempt(owner)
+        vault = explicit_takeover(owner)
+        self.assertEqual(vault.canonical.authority, Authority.VAULT)
+        attempted = refresh_attempt(vault)
+        self.assertEqual(attempted.refresh_requests, 1)
+
     def test_generated_event_histories_preserve_all_invariants(self):
         operations = (
             "owner", "handoff", "takeover", "refresh", "attempt", "rate-limit",

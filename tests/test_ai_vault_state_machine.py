@@ -6,6 +6,8 @@ from credential_state_model import (
     Credential,
     Rejected,
     State,
+    TRANSITIONS,
+    access_is_fresh,
     advance_time,
     check_invariants,
     explicit_takeover,
@@ -14,6 +16,7 @@ from credential_state_model import (
     owner_sync,
     publish,
     rate_limited,
+    relogin_recovery,
     refresh_attempt,
     refresh_success,
     transient_failure,
@@ -71,7 +74,7 @@ class CredentialStateMachineTest(unittest.TestCase):
     def test_generated_event_histories_preserve_all_invariants(self):
         operations = (
             "owner", "handoff", "takeover", "refresh", "attempt", "rate-limit",
-            "advance", "invalid", "transient", "publish", "follower",
+            "advance", "invalid", "transient", "publish", "follower", "recover",
         )
         for seed in range(100):
             rng = random.Random(seed)
@@ -105,8 +108,14 @@ class CredentialStateMachineTest(unittest.TestCase):
                         state = transient_failure(state)
                     elif operation == "publish":
                         state = publish(state)
-                    else:
+                    elif operation == "follower":
                         state = follower_refresh(state)
+                    else:
+                        generation = (state.canonical.generation if state.canonical else 0) + 1
+                        authority = rng.choice((Authority.OWNER, Authority.VAULT, Authority.FOLLOWER))
+                        state = relogin_recovery(
+                            state, generation, f"recovered-{seed}-{generation}", authority,
+                        )
                 except Rejected:
                     state = before
 
@@ -142,6 +151,83 @@ class CredentialStateMachineTest(unittest.TestCase):
         state = advance_time(state, 1)
         state = refresh_attempt(state)
         self.assertEqual(state.refresh_requests, 2)
+
+    def test_expiry_and_relogin_recovery_transitions(self):
+        state = vault_handoff(
+            State(now=100), 1, "vault-refresh", expires_at=160,
+        )
+        self.assertFalse(access_is_fresh(state, state.canonical))
+        with self.assertRaisesRegex(Rejected, "expired"):
+            publish(state)
+
+        marked = invalid_grant(state)
+        with self.assertRaisesRegex(Rejected, "advance"):
+            relogin_recovery(
+                marked, 1, "same-generation", Authority.OWNER, expires_at=1000,
+            )
+        recovered = relogin_recovery(
+            marked, 2, "fresh-owner-refresh", Authority.OWNER, expires_at=1000,
+        )
+        self.assertFalse(recovered.canonical.needs_relogin)
+        self.assertEqual(recovered.canonical.authority, Authority.OWNER)
+        self.assertTrue(access_is_fresh(recovered, recovered.canonical))
+        self.assertEqual(publish(recovered).follower.expires_at, 1000)
+
+    def test_every_declared_transition_has_accepted_and_rejected_coverage(self):
+        observed = set()
+
+        def exercise(name, function):
+            try:
+                function()
+                observed.add((name, "accepted"))
+            except Rejected:
+                observed.add((name, "rejected"))
+
+        empty = State(now=100)
+        owner = owner_sync(empty, 1, "owner-refresh", expires_at=1000)
+        vault = vault_handoff(empty, 1, "vault-refresh", expires_at=1000)
+        marked = invalid_grant(vault)
+        expired = vault_handoff(empty, 1, "vault-refresh", expires_at=160)
+        cooled = rate_limited(vault, 120)
+        cases = {
+            "owner-sync": (
+                lambda: owner_sync(empty, 1, "owner-refresh"),
+                lambda: owner_sync(owner, 0, "stale-refresh"),
+            ),
+            "vault-handoff": (
+                lambda: vault_handoff(empty, 1, "vault-refresh"),
+                lambda: vault_handoff(vault, 1, "conflict"),
+            ),
+            "takeover": (lambda: explicit_takeover(owner), lambda: explicit_takeover(empty)),
+            "refresh-success": (
+                lambda: refresh_success(vault, 2, "rotated"),
+                lambda: refresh_success(owner, 2, "rotated"),
+            ),
+            "invalid-grant": (lambda: invalid_grant(vault), lambda: invalid_grant(owner)),
+            "transient-failure": (lambda: transient_failure(vault),),
+            "refresh-attempt": (lambda: refresh_attempt(vault), lambda: refresh_attempt(cooled)),
+            "rate-limit": (lambda: rate_limited(vault, 1), lambda: rate_limited(vault, 0)),
+            "advance-time": (lambda: advance_time(vault, 1), lambda: advance_time(vault, -1)),
+            "publish": (lambda: publish(vault), lambda: publish(expired)),
+            "follower-refresh": (lambda: follower_refresh(vault),),
+            "relogin-recovery": (
+                lambda: relogin_recovery(marked, 2, "recovered", Authority.OWNER),
+                lambda: relogin_recovery(vault, 2, "not-marked", Authority.OWNER),
+            ),
+        }
+        self.assertEqual(set(cases), set(TRANSITIONS))
+        for name, functions in cases.items():
+            for function in functions:
+                exercise(name, function)
+
+        expected = {
+            (name, outcome)
+            for name in TRANSITIONS
+            for outcome in ({"rejected"} if name == "follower-refresh" else
+                            {"accepted"} if name == "transient-failure" else
+                            {"accepted", "rejected"})
+        }
+        self.assertEqual(observed, expected)
 
 
 if __name__ == "__main__":

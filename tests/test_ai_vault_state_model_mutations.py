@@ -22,12 +22,12 @@ class StateModelMutationTest(unittest.TestCase):
                 "if generation < current.generation and refresh_token != current.refresh_token:",
             ),
             "owner-becomes-vault": (
-                "Credential(generation, refresh_token, Authority.OWNER)",
-                "Credential(generation, refresh_token, Authority.VAULT)",
+                "generation, refresh_token, Authority.OWNER, expires_at=expires_at,",
+                "generation, refresh_token, Authority.VAULT, expires_at=expires_at,",
             ),
             "handoff-stays-owner": (
-                "return replace(state, canonical=Credential(generation, refresh_token, Authority.VAULT))",
-                "return replace(state, canonical=Credential(generation, refresh_token, Authority.OWNER))",
+                "generation, refresh_token, Authority.VAULT, expires_at=expires_at,",
+                "generation, refresh_token, Authority.OWNER, expires_at=expires_at,",
             ),
             "equal-generation-refresh": (
                 "if generation <= current.generation:",
@@ -44,12 +44,12 @@ class StateModelMutationTest(unittest.TestCase):
             ),
             "allow-backwards-time": ("if seconds < 0:", "if seconds < -1:"),
             "leak-follower-refresh": (
-                "Credential(current.generation, None, Authority.FOLLOWER, current.needs_relogin)",
-                "Credential(current.generation, current.refresh_token, Authority.FOLLOWER, current.needs_relogin)",
+                "        None,\n        Authority.FOLLOWER,\n        current.needs_relogin,",
+                "        current.refresh_token,\n        Authority.FOLLOWER,\n        current.needs_relogin,",
             ),
             "wrong-follower-authority": (
-                "Credential(current.generation, None, Authority.FOLLOWER, current.needs_relogin)",
-                "Credential(current.generation, None, Authority.VAULT, current.needs_relogin)",
+                "        None,\n        Authority.FOLLOWER,\n        current.needs_relogin,",
+                "        None,\n        Authority.VAULT,\n        current.needs_relogin,",
             ),
             "mutate-on-transient": (
                 "def transient_failure(state):\n    return state",
@@ -58,6 +58,26 @@ class StateModelMutationTest(unittest.TestCase):
             "allow-follower-refresh": (
                 'def follower_refresh(state):\n    raise Rejected("followers never refresh")',
                 "def follower_refresh(state):\n    return state",
+            ),
+            "allow-expired-publish": (
+                "if not access_is_fresh(state, current):",
+                "if False:",
+            ),
+            "recovery-accepts-equal-generation": (
+                'if generation <= current.generation:\n        raise Rejected("recovery did not advance generation")',
+                'if generation < current.generation:\n        raise Rejected("recovery did not advance generation")',
+            ),
+            "recovery-keeps-relogin-marker": (
+                "generation, refresh_token, authority, needs_relogin=False, expires_at=expires_at,",
+                "generation, refresh_token, authority, needs_relogin=True, expires_at=expires_at,",
+            ),
+            "publish-invents-later-expiry": (
+                "        current.expires_at,\n    )",
+                "        current.expires_at + 1,\n    )",
+            ),
+            "undeclared-recovery-transition": (
+                '    "relogin-recovery",\n',
+                "",
             ),
         }
         source = MODEL.read_text()

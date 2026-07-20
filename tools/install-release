@@ -112,9 +112,10 @@ def write_stage(releases, manifest, payload):
         (stage / "MANIFEST.json").chmod(0o644)
         subprocess.run(["bash", "-n", stage / "ai-token", stage / "ai-vault"], check=True)
         compile((stage / "ai-vault-http").read_text(), "ai-vault-http", "exec")
-        canary = stage / "tools/run-live-canary"
-        if canary.is_file():
-            compile(canary.read_text(), "run-live-canary", "exec")
+        for relative in ("tools/run-live-canary", "tools/verify-live-soak"):
+            optional = stage / relative
+            if optional.is_file():
+                compile(optional.read_text(), relative, "exec")
         fsync_directory(stage)
         return stage
     except Exception:

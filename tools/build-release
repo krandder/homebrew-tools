@@ -27,6 +27,7 @@ PAYLOAD = (
     "tools/build-release",
     "tools/install-release",
     "tools/run-live-canary",
+    "tools/verify-live-soak",
 )
 
 

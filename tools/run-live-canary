@@ -1,0 +1,214 @@
+#!/bin/sh
+''':'
+for python in /opt/homebrew/bin/python3 /usr/local/bin/python3 /usr/bin/python3; do
+    [ ! -x "$python" ] || exec "$python" "$0" "$@"
+done
+echo "run-live-canary: no supported Python 3 executable found" >&2
+exit 127
+':'''
+"""Run one pinned, non-human Claude lifecycle canary and retain safe evidence."""
+
+import argparse
+import datetime
+import json
+import os
+import pathlib
+import platform
+import re
+import socket
+import stat
+import subprocess
+import sys
+
+
+CONFIG_KEYS = {
+    "schema",
+    "kind",
+    "profile",
+    "non_human",
+    "role",
+    "home",
+    "release_root",
+    "expect_commit",
+    "evidence_dir",
+}
+COMMIT = re.compile(r"^[0-9a-f]{40}$")
+PROFILE = re.compile(r"^canary-[A-Za-z0-9._-]+$")
+SAFE_PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+
+
+def fail(message):
+    print(f"run-live-canary: {message}", file=sys.stderr)
+    raise SystemExit(1)
+
+
+def load_config(path):
+    if path.is_symlink() or not path.is_file():
+        fail("config must be a regular, non-symlink file")
+    if stat.S_IMODE(path.stat().st_mode) & (stat.S_IWGRP | stat.S_IWOTH):
+        fail("config must not be group- or world-writable")
+    try:
+        config = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError) as error:
+        fail(f"invalid config: {error}")
+    if not isinstance(config, dict) or set(config) != CONFIG_KEYS:
+        fail("config keys do not match schema 1")
+    if config["schema"] != 1 or config["kind"] != "claude":
+        fail("only schema-1 Claude canaries are supported")
+    if config["non_human"] is not True or not PROFILE.fullmatch(str(config["profile"])):
+        fail("profile must be explicitly non-human and named canary-*")
+    if config["role"] not in {"leader", "follower"}:
+        fail("role must be leader or follower")
+    if not COMMIT.fullmatch(str(config["expect_commit"])):
+        fail("expect_commit must be a full lowercase commit SHA")
+    for key in ("home", "release_root", "evidence_dir"):
+        value = pathlib.Path(str(config[key]))
+        if not value.is_absolute() or value == pathlib.Path("/"):
+            fail(f"{key} must be an absolute, non-root path")
+    home = pathlib.Path(config["home"])
+    if home.is_symlink() or not home.is_dir():
+        fail("home must be an existing, dedicated, non-symlink directory")
+    evidence = pathlib.Path(config["evidence_dir"])
+    if evidence.is_symlink() or (evidence.exists() and not evidence.is_dir()):
+        fail("evidence_dir must be a directory, not a symlink")
+    if platform.system() == "Darwin" and config["role"] == "follower":
+        fail("a macOS follower requires a dedicated OS account/keychain")
+    return config
+
+
+def selected_release(root):
+    current = root / "current"
+    if not current.is_symlink():
+        fail("release_root/current must select an installed release")
+    try:
+        target = current.resolve(strict=True)
+        target.relative_to((root / "releases").resolve(strict=True))
+    except (FileNotFoundError, RuntimeError, ValueError):
+        fail("current release is missing or outside the release store")
+    for relative in ("tools/install-release", "ai-token"):
+        executable = target / relative
+        if executable.is_symlink() or not executable.is_file() or not os.access(executable, os.X_OK):
+            fail(f"selected release lacks executable {relative}")
+    return target
+
+
+def safe_environment(config, release):
+    environment = {
+        "HOME": str(pathlib.Path(config["home"]).resolve()),
+        "AI_TOKEN_REAL_HOME": str(pathlib.Path(config["home"]).resolve()),
+        "CODEX_USER": config["profile"],
+        "CLAUDE_TOKEN_VAULT_AUTHORITY": "yes" if config["role"] == "leader" else "no",
+        "PATH": f"{release}:{SAFE_PATH}",
+    }
+    for name in ("LANG", "LC_ALL", "TMPDIR"):
+        if name in os.environ:
+            environment[name] = os.environ[name]
+    return environment
+
+
+def write_evidence(path, record):
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    temporary = path.with_name(f".{path.name}.tmp-{os.getpid()}")
+    try:
+        with temporary.open("x") as handle:
+            json.dump(record, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        temporary.chmod(0o600)
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def run_step(name, command, environment, record, evidence_path, timeout):
+    try:
+        result = subprocess.run(
+            command,
+            env=environment,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=timeout,
+        )
+        returncode = result.returncode
+    except subprocess.TimeoutExpired:
+        returncode = 124
+    except OSError:
+        returncode = 127
+    record["steps"].append({"name": name, "returncode": returncode})
+    record["status"] = "running" if returncode == 0 else "failed"
+    write_evidence(evidence_path, record)
+    return returncode == 0
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Run one pinned, non-human Claude lifecycle canary and retain safe evidence."
+    )
+    parser.add_argument("--config", required=True, type=pathlib.Path)
+    parser.add_argument("--live", action="store_true")
+    args = parser.parse_args()
+    if not args.live:
+        fail("provider/vault execution requires --live")
+
+    config = load_config(args.config)
+    release_root = pathlib.Path(config["release_root"]).resolve()
+    release = selected_release(release_root)
+    environment = safe_environment(config, release)
+    timestamp = datetime.datetime.now(datetime.timezone.utc)
+    host = socket.gethostname().split(".")[0]
+    safe_host = re.sub(r"[^A-Za-z0-9._-]", "_", host)
+    evidence_path = pathlib.Path(config["evidence_dir"]) / (
+        f"{timestamp.strftime('%Y%m%dT%H%M%S.%fZ')}-{safe_host}-{config['role']}-{os.getpid()}.json"
+    )
+    record = {
+        "schema": 1,
+        "timestamp": timestamp.isoformat(),
+        "host": host,
+        "kind": "claude",
+        "profile": config["profile"],
+        "role": config["role"],
+        "expect_commit": config["expect_commit"],
+        "release": release.name,
+        "status": "running",
+        "steps": [],
+    }
+    write_evidence(evidence_path, record)
+
+    installer = release / "tools" / "install-release"
+    verify = [
+        installer,
+        "verify",
+        "--root",
+        release_root,
+        "--expect-commit",
+        config["expect_commit"],
+    ]
+    if not run_step("verify-release", verify, environment, record, evidence_path, 30):
+        fail("canary failed at verify-release; sanitized evidence retained")
+    if selected_release(release_root) != release:
+        record["status"] = "failed"
+        record["steps"].append({"name": "release-stability", "returncode": 1})
+        write_evidence(evidence_path, record)
+        fail("selected release changed after verification")
+
+    token = release / "ai-token"
+    if config["role"] == "leader":
+        steps = [("publish", [token, "claude", "publish", "--profile", config["profile"]], 240)]
+    else:
+        steps = [
+            ("pull", [token, "claude", "pull", "--profile", config["profile"]], 120),
+            ("check", [token, "claude", "check"], 30),
+        ]
+    for name, command, timeout in steps:
+        if not run_step(name, command, environment, record, evidence_path, timeout):
+            fail(f"canary failed at {name}; sanitized evidence retained")
+
+    record["status"] = "ok"
+    write_evidence(evidence_path, record)
+    print(f"run-live-canary: ok ({config['role']} {config['profile']} {release.name})")
+
+
+if __name__ == "__main__":
+    main()

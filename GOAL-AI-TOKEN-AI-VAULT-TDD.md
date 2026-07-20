@@ -187,6 +187,14 @@ broad state-machine coverage, hard CI, production-shaped verification, and
 controlled release phases on 2026-07-20. The dedicated canary profile remains
 the only required designation.
 
+The immutable release now includes a fail-closed live-canary runner. It requires
+an explicit schema-1 designation for a non-human `canary-*` Claude profile,
+pins all lifecycle commands to a verified installed commit, replaces ambient
+`HOME` with the dedicated canary home, and retains only sanitized mode-0600
+step evidence. It will not use the process-wide Claude login keychain for a
+macOS follower; that role requires a dedicated OS account/keychain. No live
+canary is authorized until the profile and host-specific homes are designated.
+
 ## Post-characterization implementation language
 
 The recommended migration target is typed Python 3 using the standard library

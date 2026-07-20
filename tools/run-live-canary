@@ -106,6 +106,66 @@ def safe_environment(config, release):
     return environment
 
 
+def credential_paths(config):
+    home = pathlib.Path(config["home"]).resolve()
+    if config["role"] == "leader":
+        return {
+            "canonical": home / ".claude-profiles" / config["profile"] / ".claude" / "credentials.json",
+            "shared": home / "shared" / "claude-tokens" / f"{config['profile']}.json",
+        }
+    return {"local": home / ".claude" / ".credentials.json"}
+
+
+def snapshot(paths):
+    result = {}
+    for name, path in paths.items():
+        try:
+            metadata = path.lstat()
+        except FileNotFoundError:
+            result[name] = {"exists": False}
+            continue
+        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+            fail(f"credential state path must be a regular file: {name}")
+        mode = stat.S_IMODE(metadata.st_mode)
+        if mode != 0o600:
+            fail(f"credential state path must be mode 0600: {name}")
+        result[name] = {
+            "exists": True,
+            "size": metadata.st_size,
+            "mtime_ns": metadata.st_mtime_ns,
+            "ctime_ns": metadata.st_ctime_ns,
+            "inode": metadata.st_ino,
+            "mode": f"{mode:04o}",
+        }
+    return result
+
+
+def previous_state(directory, host, profile, role):
+    latest = None
+    for path in sorted(directory.glob("*.json")) if directory.is_dir() else ():
+        if path.is_symlink() or not path.is_file() or stat.S_IMODE(path.stat().st_mode) != 0o600:
+            fail(f"invalid prior canary evidence: {path.name}")
+        try:
+            record = json.loads(path.read_text())
+            timestamp = datetime.datetime.fromisoformat(record["timestamp"])
+        except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+            fail(f"invalid prior canary evidence: {path.name}")
+        if timestamp.tzinfo is None or timestamp.utcoffset() != datetime.timedelta(0):
+            fail(f"invalid prior canary evidence: {path.name}")
+        if record.get("schema") == 1:
+            continue
+        if record.get("schema") != 2 or not isinstance(record.get("state_after"), dict):
+            fail(f"invalid prior canary evidence: {path.name}")
+        if (
+            record.get("host") == host
+            and record.get("profile") == profile
+            and record.get("role") == role
+            and (latest is None or timestamp > latest[0])
+        ):
+            latest = timestamp, record["state_after"]
+    return None if latest is None else latest[1]
+
+
 def write_evidence(path, record):
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     temporary = path.with_name(f".{path.name}.tmp-{os.getpid()}")
@@ -121,7 +181,7 @@ def write_evidence(path, record):
         temporary.unlink(missing_ok=True)
 
 
-def run_step(name, command, environment, record, evidence_path, timeout):
+def run_step(name, command, environment, record, timeout):
     try:
         result = subprocess.run(
             command,
@@ -138,7 +198,6 @@ def run_step(name, command, environment, record, evidence_path, timeout):
         returncode = 127
     record["steps"].append({"name": name, "returncode": returncode})
     record["status"] = "running" if returncode == 0 else "failed"
-    write_evidence(evidence_path, record)
     return returncode == 0
 
 
@@ -162,8 +221,11 @@ def main():
     evidence_path = pathlib.Path(config["evidence_dir"]) / (
         f"{timestamp.strftime('%Y%m%dT%H%M%S.%fZ')}-{safe_host}-{config['role']}-{os.getpid()}.json"
     )
+    paths = credential_paths(config)
+    state_before = snapshot(paths)
+    previous = previous_state(pathlib.Path(config["evidence_dir"]), host, config["profile"], config["role"])
     record = {
-        "schema": 1,
+        "schema": 2,
         "timestamp": timestamp.isoformat(),
         "host": host,
         "kind": "claude",
@@ -173,8 +235,15 @@ def main():
         "release": release.name,
         "status": "running",
         "steps": [],
+        "state_before": state_before,
+        "state_after": state_before,
     }
     write_evidence(evidence_path, record)
+    if previous is not None and previous != state_before:
+        record["status"] = "failed"
+        record["steps"].append({"name": "writer-continuity", "returncode": 1})
+        write_evidence(evidence_path, record)
+        fail("unexpected credential writer detected; sanitized evidence retained")
 
     installer = release / "tools" / "install-release"
     verify = [
@@ -185,11 +254,16 @@ def main():
         "--expect-commit",
         config["expect_commit"],
     ]
-    if not run_step("verify-release", verify, environment, record, evidence_path, 30):
+    if not run_step("verify-release", verify, environment, record, 30):
+        record["state_after"] = snapshot(paths)
+        write_evidence(evidence_path, record)
         fail("canary failed at verify-release; sanitized evidence retained")
+    record["state_after"] = snapshot(paths)
+    write_evidence(evidence_path, record)
     if selected_release(release_root) != release:
         record["status"] = "failed"
         record["steps"].append({"name": "release-stability", "returncode": 1})
+        record["state_after"] = snapshot(paths)
         write_evidence(evidence_path, record)
         fail("selected release changed after verification")
 
@@ -202,8 +276,12 @@ def main():
             ("check", [token, "claude", "check"], 30),
         ]
     for name, command, timeout in steps:
-        if not run_step(name, command, environment, record, evidence_path, timeout):
+        if not run_step(name, command, environment, record, timeout):
+            record["state_after"] = snapshot(paths)
+            write_evidence(evidence_path, record)
             fail(f"canary failed at {name}; sanitized evidence retained")
+        record["state_after"] = snapshot(paths)
+        write_evidence(evidence_path, record)
 
     record["status"] = "ok"
     write_evidence(evidence_path, record)

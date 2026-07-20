@@ -24,6 +24,11 @@ file, non-0600 mode, or fabricated successful step list. A later green retry
 cannot conceal an earlier failure. The verifier produces a machine-readable
 summary only after the complete matrix passes.
 
+Schema 2 also requires a continuous chain of credential-file metadata for each
+host and role. The gate compares each successful run's final metadata with the
+next run's initial metadata and rejects unexplained between-run changes. It
+never reads or stores credential bytes or hashes.
+
 The release payload includes the verifier, while the installer remains able to
 install and roll back older valid artifacts that predate it. The real soak
 remains unstarted until the dedicated profile and scheduled host roles are

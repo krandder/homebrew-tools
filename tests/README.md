@@ -39,6 +39,13 @@ the expected profile and commit, and a failed duplicate can never be hidden by
 a later success. Malformed, symlinked, permissively readable, or fabricated
 evidence fails closed.
 
+Canary evidence schema 2 carries credential-file metadata before and after each
+run. `test_ai_token_live_canary.py` proves an expected canary mutation chains
+cleanly, while a between-run writer or permissive credential file stops before
+release execution. `test_ai_token_soak_evidence.py` independently rechecks the
+same continuity across the retained host histories. No credential bytes or
+hashes enter evidence.
+
 Every bug fix starts with a deterministic failing test and ends with that test
 in this directory. A flake, retry-to-green result, or unexplained skip fails the
 suite.

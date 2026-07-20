@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# codex-any-mirror — follower-side feed for codex-any-proxy. Materializes
+# vault-published shared files (~/shared/codex-tokens/<p>.json, via syncthing)
+# into the leader layout the proxy reads (~/.codex-profiles/<p>/.codex/auth.json).
+# Strips publish metadata and NEUTERS the refresh_token: a follower must never
+# refresh natively (two refreshers on one rotating RT = invalid_grant wars).
+# Usage: codex-any-mirror [profile]   (no arg = mirror all shared files)
+set -euo pipefail
+SHARED="${CODEX_SHARED_DIR:-$HOME/shared/codex-tokens}"
+PROFILES="${CODEX_PROFILES_DIR:-$HOME/.codex-profiles}"
+python3 - "$SHARED" "$PROFILES" "${1:-}" <<'PY'
+import json, os, sys, glob, tempfile
+shared, profiles, only = sys.argv[1], sys.argv[2], sys.argv[3] or None
+META = {"email", "profile", "leader", "published_at"}
+files = [os.path.join(shared, f"{only}.json")] if only else glob.glob(os.path.join(shared, "*.json"))
+n = 0
+for f in files:
+    name = os.path.basename(f)[:-5]
+    if ".sync-conflict-" in name or name.endswith(".suspect") or not os.path.exists(f):
+        continue
+    try:
+        d = json.load(open(f))
+    except Exception:
+        continue
+    if not (d.get("tokens") or {}).get("access_token"):
+        continue
+    d = {k: v for k, v in d.items() if k not in META}
+    d["tokens"]["refresh_token"] = "sentinel-follower"
+    dest_dir = os.path.join(profiles, name, ".codex")
+    os.makedirs(dest_dir, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=dest_dir)
+    with os.fdopen(fd, "w") as fh:
+        json.dump(d, fh, indent=2)
+    os.replace(tmp, os.path.join(dest_dir, "auth.json"))
+    n += 1
+print(f"codex-any-mirror: {n} profile(s) mirrored")
+PY

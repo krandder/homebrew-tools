@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# claude-any-mirror — follower-side heal hook for the claude any-proxy. The
+# claude any-proxy reads the syncthing-fed shared dir directly, so there is
+# nothing to materialize; a heal means "get a fresher file from the vault".
+# If ai-token is installed we re-pull the profile (which also republishes the
+# shared file on the leader and lets syncthing propagate it); otherwise we
+# no-op and rely on the leader's own refresh cadence + syncthing.
+set -euo pipefail
+profile="${1:?usage: claude-any-mirror <profile>}"
+if command -v ai-token >/dev/null 2>&1; then
+  ai-token claude pull --profile "$profile" >/dev/null 2>&1 || true
+fi
+exit 0

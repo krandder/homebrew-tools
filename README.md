@@ -187,6 +187,35 @@ directory is absent.
 
 ---
 
+### `-any` failover stack
+
+Per-request profile failover for claude, codex, and kimi: a local **any-proxy**
+picks the healthiest profile *per request* (spread-load across the pool) and
+fails over mid-turn on upstream 401/429 — invisible to the CLI session.
+Installed by `brew install ai-token`.
+
+- `claude-any` / `codex-any` / `kimi-any` — run the CLI pointed at its local
+  any-proxy on `127.0.0.1` (**claude 7800, codex 7810, kimi 7812**). claude-any
+  and codex-any fall back to the `ai-any` launcher when the proxy is down;
+  claude-any also strips inherited `CLAUDE*` env noise, keeping the
+  Bedrock/Vertex/Foundry provider-auth allowlist.
+- `any-proxy.mjs` / `codex-any-proxy.mjs` / `kimi-any-proxy.mjs` — the proxies
+  themselves. Run under node >= 18 or bun, as systemd user services on Linux /
+  launchd agents on macOS; the formula installs them to `share/any-proxies`.
+- `claude-any-mirror` / `codex-any-mirror` / `kimi-any-mirror` — follower-side:
+  materialize the syncthing-fed `~/shared/{claude,codex,kimi}-tokens/<p>.json`
+  into the leader profile layout the proxies read, with the refresh token
+  neutered (`sentinel-follower`). Followers run the codex/kimi mirrors on a
+  timer; claude's proxy reads the shared dir directly, so its mirror is only a
+  heal hook.
+- `imgpush` (macOS) / `kimg` (farol) — push the GUI clipboard image to farol
+  `/tmp/kimi-images/`, then print the newest path for pasting into a kimi
+  prompt.
+- `farol-connect` — ssh-to-farol tmux session manager (the `slot` command on
+  Macs).
+
+---
+
 ## Quick Install (No Homebrew)
 
 ```bash

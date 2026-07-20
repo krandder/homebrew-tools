@@ -5,6 +5,7 @@ import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 ASSETS = {
+    "deploy/canary/farol/ai-token-canary-vault.service": 0o644,
     "deploy/canary/farol/ai-token-canary.service": 0o644,
     "deploy/canary/farol/ai-token-canary.timer": 0o644,
     "deploy/canary/farol/ai-token-canary-alert@.service": 0o644,
@@ -43,6 +44,23 @@ class CanaryDeploymentAssetsTest(unittest.TestCase):
                 )
                 self.assertIn(f"OnCalendar=*-*-* {schedule}", timer)
                 self.assertIn("Persistent=true", timer)
+
+    def test_isolated_vault_alerts_enter_the_canonical_incident_pipeline(self):
+        unit = (ROOT / "deploy/canary/farol/ai-token-canary-vault.service").read_text()
+        self.assertIn("Environment=HOME=/home/kelvin/.ai-token-canary", unit)
+        self.assertIn("/home/kelvin/.npm-global/bin", unit)
+        self.assertIn(
+            "Environment=AI_VAULT_INCIDENT_BIN=/home/kelvin/.openclaw/workspace/scripts/incident.py",
+            unit,
+        )
+        self.assertIn(
+            "Environment=OPENCLAW_STATE_DIR=/home/kelvin/.openclaw/workspace",
+            unit,
+        )
+        self.assertIn(
+            "ExecStart=/home/kelvin/.ai-token-canary/release/current/ai-vault-http",
+            unit,
+        )
 
     def test_macos_dispatch_switches_uid_and_unlocks_only_canary_keychain(self):
         root = ROOT / "deploy" / "canary" / "macos"

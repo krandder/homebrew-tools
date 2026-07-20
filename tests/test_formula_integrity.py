@@ -22,11 +22,21 @@ class FormulaIntegrityTest(unittest.TestCase):
     def test_ai_token_and_compatibility_formula_versions_match_canonical_source(self):
         source = (ROOT / "ai-token").read_text()
         version = re.search(r'^VERSION="([^"]+)"$', source, re.MULTILINE).group(1)
+
+        def parts(text):
+            return tuple(int(piece) for piece in text.split("."))
+
         for name in ("ai-token", "claude-token", "codex-token"):
             with self.subTest(formula=name):
                 formula = (ROOT / "Formula" / f"{name}.rb").read_text()
                 packaged = re.search(r'^\s*version "([^"]+)"$', formula, re.MULTILINE).group(1)
-                self.assertEqual(packaged, version)
+                if name == "ai-token":
+                    # Since 3.1.0 the ai-token formula also packages the -any
+                    # failover stack, so the formula version may be ahead of
+                    # the ai-token script's VERSION (but never behind).
+                    self.assertGreaterEqual(parts(packaged), parts(version))
+                else:
+                    self.assertEqual(packaged, version)
 
 
 if __name__ == "__main__":

@@ -8,9 +8,15 @@ permissions:
   contents: read
 
 jobs:
-  test:
+  release-gate:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
-      - run: tests/run full
+      - run: tools/build-release --output "$RUNNER_TEMP/release"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ai-token-vault-${{ github.sha }}
+          path: ${{ runner.temp }}/release/*
+          if-no-files-found: error
+          retention-days: 30

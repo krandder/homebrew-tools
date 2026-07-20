@@ -15,6 +15,12 @@ for Claude, Kimi, and Codex: persisted `Retry-After`, no credential mutation,
 one network request under concurrency, and a provider-wide host/IP cooldown.
 The state-machine suite also generates cooldown and time-advance transitions.
 
+`test_compatibility_shims.py` prevents the deprecated entrypoints from becoming
+independent credential writers again, including under a stale shadowing PATH.
+`test_service_environment.py` pins generated services to the invoked canonical
+artifact. `test_release_artifact.py` proves clean-tree rejection, deterministic
+packaging, embedded file hashes, and an external bundle checksum.
+
 Every bug fix starts with a deterministic failing test and ends with that test
 in this directory. A flake, retry-to-green result, or unexplained skip fails the
 suite.

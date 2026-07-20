@@ -36,7 +36,7 @@
 # refreshes an owner-managed token (takeover is an explicit manual publish).
 
 set -euo pipefail
-VERSION="3.0.4"
+VERSION="3.0.5"
 AI_TOKEN_REAL_HOME="${AI_TOKEN_REAL_HOME:-$HOME}"
 
 # ---- tool selection (arg or shim name) ----
@@ -60,6 +60,14 @@ need_cmd python3
 short_host() { hostname -s 2>/dev/null || hostname; }
 is_mac() { [ "$(uname)" = Darwin ]; }
 now_epoch() { [ -z "${AI_TOKEN_TEST_NOW:-}" ] && date +%s || printf '%.0f\n' "$AI_TOKEN_TEST_NOW"; }
+resolve_invoked_binary() {
+    case "$0" in
+        /*) printf '%s\n' "$0" ;;
+        */*) printf '%s/%s\n' "$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)" "$(basename -- "$0")" ;;
+        *) command -v "$0" ;;
+    esac
+}
+AI_TOKEN_SELF="${AI_TOKEN_BIN:-$(resolve_invoked_binary)}"
 
 SENTINEL_RT="__follower_no_refresh__"
 BLACKHOLE_URL="http://127.0.0.1:9/oauth/token"
@@ -2093,8 +2101,7 @@ claude_cmd_maintain() {
 
 claude_cmd_install_maintenance() {
     local bin dir minute line current plist_dir plist label domain authority=""
-    bin="$(command -v claude-token 2>/dev/null || true)"
-    [ -n "$bin" ] || bin="$0"
+    bin="$AI_TOKEN_SELF"
     dir="$(dirname "$bin")"
     if is_mac; then
         need_cmd launchctl
@@ -2106,7 +2113,7 @@ claude_cmd_install_maintenance() {
         python3 - "$plist" "$label" "$bin" "$dir:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin" "$CLAUDE_TOKEN_REAL_HOME/.claude-token/logs/maintenance.log" "${CLAUDE_TOKEN_VAULT_AUTHORITY:-no}" <<'PY'
 import os, plistlib, sys
 path, label, binary, path_env, log, vault_authority = sys.argv[1:]
-data = {"Label": label, "ProgramArguments": [binary, "maintain"],
+data = {"Label": label, "ProgramArguments": [binary, "claude", "maintain"],
         "EnvironmentVariables": {"PATH": path_env}, "RunAtLoad": True,
         "StartInterval": 7200, "StandardOutPath": log, "StandardErrorPath": log}
 if vault_authority == "yes": data["EnvironmentVariables"]["CLAUDE_TOKEN_VAULT_AUTHORITY"] = "yes"
@@ -2121,7 +2128,7 @@ PY
     need_cmd crontab
     minute="$(printf '%s' "$(short_host)" | cksum | awk '{print $1 % 60}')"
     [ "${CLAUDE_TOKEN_VAULT_AUTHORITY:-no}" != yes ] || authority="CLAUDE_TOKEN_VAULT_AUTHORITY=yes "
-    line="$minute */2 * * * ${authority}PATH=$dir:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin $bin maintain >/dev/null 2>&1 # claude-token-maintain"
+    line="$minute */2 * * * ${authority}PATH=$dir:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin $bin claude maintain >/dev/null 2>&1 # claude-token-maintain"
     current="$(crontab -l 2>/dev/null | grep -v '# claude-token-maintain$' || true)"
     { [ -z "$current" ] || printf '%s\n' "$current"; printf '%s\n' "$line"; } | crontab -
     say "automatic sync/heartbeat installed with cron (every 2 hours)"
@@ -2401,7 +2408,7 @@ claude_cmd_proxy_install() {
     [ "$(uname)" = Linux ] || die "proxy-install: requires Linux (systemd --user)"
     need_cmd systemctl
     local bin unit_dir unit
-    bin="$(command -v claude-token 2>/dev/null || true)"; [ -n "$bin" ] || bin="$0"
+    bin="$AI_TOKEN_SELF"
     unit_dir="$CLAUDE_TOKEN_REAL_HOME/.config/systemd/user"
     unit="$unit_dir/claude-token-proxy.service"
     mkdir -p "$unit_dir"
@@ -2411,7 +2418,8 @@ Description=claude-token proxy (per-profile fresh OAuth token injection)
 After=network-online.target
 
 [Service]
-ExecStart=$bin proxy
+Environment=PATH=$(dirname "$bin"):/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=$bin claude proxy
 Restart=always
 RestartSec=2
 

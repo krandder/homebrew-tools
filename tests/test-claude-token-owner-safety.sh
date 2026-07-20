@@ -25,6 +25,11 @@ printf '%s\n' "${CLAUDE_CONFIG_DIR-unset}" >> "$TEST_OUTPUT"
 SH
 cat > "$TMP/bin/curl" <<'SH'
 #!/usr/bin/env bash
+# No proxy is running in this harness. Keep the vault mock from accidentally
+# making localhost proxy health checks succeed.
+for arg in "$@"; do
+    case "$arg" in http://127.0.0.1:*) exit 1;; esac
+done
 printf called >> "$CURL_CALLED"
 for arg in "$@"; do
     case "$arg" in @/dev/stdin) cat > "$CURL_BODY";; @*) cat "${arg#@}" > "$CURL_BODY";; esac
@@ -303,11 +308,12 @@ run_token install-maintenance >/dev/null
 grep -q 'claude-token-maintain$' "$CRONTAB_FILE"
 grep -q ' maintain ' "$CRONTAB_FILE"
 run_token maintain
-python3 - "$CURL_BODY" <<'PY'
+canonical_version="$("$ROOT/ai-token" claude --version | awk '{print $2}')"
+python3 - "$CURL_BODY" "$canonical_version" <<'PY'
 import json, sys
 d = json.load(open(sys.argv[1]))
 assert d["tool"] == "claude-token"
-assert d["version"] == "2.5.15"
+assert d["version"] == sys.argv[2], (d, sys.argv[2])
 assert d["profile"] == "owner-a"
 assert d["mode"] == "owner"
 assert d["status"] == "synced"

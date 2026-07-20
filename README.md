@@ -111,41 +111,6 @@ so the same name can exist for both tools.
 
 ---
 
-### `claude-token` (legacy extract-only)
-
-**Install:**
-```bash
-brew tap krandder/tools
-brew install claude-token
-```
-
-**Usage:**
-```bash
-claude-token
-```
-
-Outputs Claude's native OAuth JSON with `accessToken`, `refreshToken`, `expiresAt`, `scopes`, `subscriptionType`, etc.
-
-Works on macOS and Linux. Automatically detects:
-- macOS Keychain (`Claude Code-credentials`)
-- `~/.claude/.credentials.json` file
-- `~/.claude/credentials.json` file
-- `CLAUDE_CODE_OAUTH_TOKEN` environment variable as a last-resort access-token-only fallback
-
-`CLAUDE_CODE_OAUTH_TOKEN` is usually only an `sk-ant-oat...` access token and does not contain the `sk-ant-ort...` refresh token. `claude-token` therefore prefers Keychain / credentials files when available.
-
-If no refresh token is found, `claude-token` prints diagnostics to stderr showing which credential sources were checked, whether JSON parsed, and whether `accessToken` / `refreshToken` fields were present. Token values are not printed in diagnostics.
-
-For explicit diagnostics or version checks:
-
-```bash
-claude-token --diagnose
-claude-token check
-claude-token --version
-```
-
----
-
 ### `codex-token` — **DEPRECATED**, use `ai-token`
 
 Print and **sync OpenAI Codex CLI credentials across machines** using a leader/follower model, so several people/machines can share Codex accounts without their refresh tokens invalidating one another.

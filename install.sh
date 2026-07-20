@@ -75,6 +75,9 @@ install_tool() {
     fi
 }
 
+# Install the canonical implementation before its compatibility entrypoints.
+install_tool "ai-token"
+
 # Install claude-token
 install_tool "claude-token"
 

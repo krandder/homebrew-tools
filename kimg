@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# kimg — newest pushed image on farol. Prints the path (for pasting into a
+# kimi prompt); --copy also emits an OSC52 clipboard write when the terminal
+# supports it. Images arrive via imgpush on the Mac (scp to /tmp/kimi-images).
+set -euo pipefail
+dir="${KIMG_DIR:-/tmp/kimi-images}"
+latest=$(ls -t "$dir"/*.png "$dir"/*.jpg "$dir"/*.jpeg 2>/dev/null | head -1 || true)
+[ -n "$latest" ] || { echo "kimg: no images in $dir (on the Mac, run imgpush after copying one)" >&2; exit 1; }
+size=$(stat -c %s "$latest")
+echo "$latest"
+echo "  (${size} bytes, $(date -r "$latest" '+%H:%M:%S'))" >&2

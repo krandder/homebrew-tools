@@ -101,18 +101,21 @@ class ProxyTest(unittest.TestCase):
                 [AI_TOKEN, "claude", "proxy"], env=env,
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
             )
-            try:
+
+            def wait_for_listener(process, port):
                 deadline = time.monotonic() + 10
                 while time.monotonic() < deadline:
                     with socket.socket() as probe:
-                        if probe.connect_ex(("127.0.0.1", proxy_port)) == 0:
-                            break
-                    if proxy.poll() is not None:
-                        stdout, stderr = proxy.communicate(timeout=1)
+                        if probe.connect_ex(("127.0.0.1", port)) == 0:
+                            return
+                    if process.poll() is not None:
+                        stdout, stderr = process.communicate(timeout=1)
                         self.fail(f"proxy exited before listening: {stdout}\n{stderr}")
                     time.sleep(0.02)
-                else:
-                    self.fail("proxy did not listen within 10 seconds")
+                self.fail(f"proxy did not listen on {port} within 10 seconds")
+
+            try:
+                wait_for_listener(proxy, proxy_port)
 
                 connection = http.client.HTTPConnection("127.0.0.1", proxy_port, timeout=5)
                 connection.request(
@@ -147,6 +150,25 @@ class ProxyTest(unittest.TestCase):
                 recovered_response = recovered.getresponse()
                 recovered_body = recovered_response.read()
                 recovered.close()
+
+                with socket.socket() as reservation:
+                    reservation.bind(("127.0.0.1", 0))
+                    added_port = reservation.getsockname()[1]
+                (shared / "added.json").write_text(json.dumps({
+                    "claudeAiOauth": {"accessToken": "added-access"},
+                }))
+                registry.write_text(json.dumps({
+                    "fixture": proxy_port,
+                    "added": added_port,
+                }))
+                original_pid = proxy.pid
+                wait_for_listener(proxy, added_port)
+                self.assertEqual(proxy.pid, original_pid)
+                added = http.client.HTTPConnection("127.0.0.1", added_port, timeout=5)
+                added.request("POST", "/v1/messages", body=b"added-profile")
+                added_response = added.getresponse()
+                added_body = added_response.read()
+                added.close()
             finally:
                 proxy.terminate()
                 try:
@@ -154,6 +176,25 @@ class ProxyTest(unittest.TestCase):
                 except subprocess.TimeoutExpired:
                     proxy.kill()
                     proxy.communicate(timeout=3)
+
+            restarted = subprocess.Popen(
+                [AI_TOKEN, "claude", "proxy"], env=env,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            )
+            try:
+                wait_for_listener(restarted, proxy_port)
+                after_restart = http.client.HTTPConnection("127.0.0.1", proxy_port, timeout=5)
+                after_restart.request("POST", "/v1/messages", body=b"after-restart")
+                restart_response = after_restart.getresponse()
+                restart_body = restart_response.read()
+                after_restart.close()
+            finally:
+                restarted.terminate()
+                try:
+                    restarted.communicate(timeout=3)
+                except subprocess.TimeoutExpired:
+                    restarted.kill()
+                    restarted.communicate(timeout=3)
 
         upstream.shutdown()
         upstream.server_close()
@@ -173,6 +214,14 @@ class ProxyTest(unittest.TestCase):
         self.assertEqual(recovered_body, b"proxy-ok")
         self.assertEqual(requests[3][0]["authorization"], "Bearer rotated-access")
         self.assertEqual(requests[3][1], b"after-disconnect")
+        self.assertEqual(added_response.status, 200)
+        self.assertEqual(added_body, b"proxy-ok")
+        self.assertEqual(requests[4][0]["authorization"], "Bearer added-access")
+        self.assertEqual(requests[4][1], b"added-profile")
+        self.assertEqual(restart_response.status, 200)
+        self.assertEqual(restart_body, b"proxy-ok")
+        self.assertEqual(requests[5][0]["authorization"], "Bearer rotated-access")
+        self.assertEqual(requests[5][1], b"after-restart")
 
 
 if __name__ == "__main__":

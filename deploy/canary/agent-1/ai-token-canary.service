@@ -2,6 +2,7 @@
 Description=Daily ai-token follower lifecycle canary
 After=network-online.target
 Wants=network-online.target
+OnFailure=ai-token-canary-alert@%n.service
 
 [Service]
 Type=oneshot

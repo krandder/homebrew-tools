@@ -10,6 +10,7 @@ ASSETS = {
     "deploy/canary/farol/ai-token-canary-alert@.service": 0o644,
     "deploy/canary/agent-1/ai-token-canary.service": 0o644,
     "deploy/canary/agent-1/ai-token-canary.timer": 0o644,
+    "deploy/canary/agent-1/ai-token-canary-alert@.service": 0o644,
     "deploy/canary/macos/com.futarchy.ai-token-canary-dispatch.plist": 0o644,
     "deploy/canary/macos/run-as-ai-token-canary.expect": 0o755,
     "deploy/canary/macos/run-live": 0o755,

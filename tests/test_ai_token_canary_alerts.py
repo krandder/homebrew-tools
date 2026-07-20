@@ -107,7 +107,7 @@ class CanaryAlertTest(unittest.TestCase):
             }
             server = subprocess.Popen(
                 [VAULT_HTTP], env=environment, stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE, text=True,
+                stderr=subprocess.DEVNULL, text=True,
             )
             try:
                 health = f"http://127.0.0.1:{port}/healthz"

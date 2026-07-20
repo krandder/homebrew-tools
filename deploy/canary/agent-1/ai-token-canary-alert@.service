@@ -1,0 +1,6 @@
+[Unit]
+Description=Report failed ai-token follower canary unit %i
+
+[Service]
+Type=oneshot
+ExecStart=/home/kas/.ai-token-canary/release/current/tools/report-canary-failure --config /home/kas/.ai-token-canary/canary.json

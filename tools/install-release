@@ -112,7 +112,7 @@ def write_stage(releases, manifest, payload):
         (stage / "MANIFEST.json").chmod(0o644)
         subprocess.run(["bash", "-n", stage / "ai-token", stage / "ai-vault"], check=True)
         compile((stage / "ai-vault-http").read_text(), "ai-vault-http", "exec")
-        for relative in ("tools/run-live-canary", "tools/verify-live-soak"):
+        for relative in ("tools/run-live-canary", "tools/report-canary-failure", "tools/verify-live-soak"):
             optional = stage / relative
             if optional.is_file():
                 compile(optional.read_text(), relative, "exec")

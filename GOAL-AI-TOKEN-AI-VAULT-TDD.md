@@ -186,10 +186,12 @@ Kelvin approved the canonical repository, hermetic laboratory, incident replay,
 broad state-machine coverage, hard CI, production-shaped verification, and
 controlled release phases on 2026-07-20. He designated `canary-claude`, isolated
 homes on farol and agent-1, and the dedicated macOS account/keychain
-`ai-token-canary`. Commit `17743041f1aa44561de190ac5216e8468689b810` is
-installed and verified on all three hosts, and physical rollback/restore was
-exercised on each. The remaining live prerequisite is a genuinely separate
-non-human Claude identity; a human account is not an acceptable substitute.
+`ai-token-canary`. Protected runtime commit
+`6acfa6681e0445f58b791b701edb216c84da7e86` is installed and verified on all
+three hosts, and physical rollback/restore was exercised on each. A separate
+Anthropic account now exists for `ai-token-canary@futarchy.ai`, but Claude Code
+will not authorize it without a paid Pro or Max entitlement. No purchase is
+authorized by this goal text, and a human account remains unacceptable.
 
 The immutable release now includes a fail-closed live-canary runner. It requires
 an explicit designation for a non-human `canary-*` Claude profile,
@@ -216,8 +218,12 @@ next run must begin from the previous final metadata or it fails before release
 verification; the 30-day verifier independently checks the complete per-host
 chain. Existing credentials must be regular mode-0600 files. Scheduler-native
 nonzero exit and `OnFailure`/incident wiring remain the deployment alert path.
-The physical deployment and its deliberately dormant schedules are recorded in
-`evidence/physical-canary-deployment-2026-07-20.md`. Activation starts only
+The follower alert path is authenticated and sanitized; a real agent-1
+fail-closed pull produced a mode-0600 vault alert and a canonical incident.
+The physical deployment, later promotions, and incident-routing correction are
+recorded in `evidence/physical-canary-deployment-2026-07-20.md`,
+`evidence/canonical-release-promotion-2026-07-20.md`, and
+`evidence/canonical-incident-routing-2026-07-20.md`. Activation starts only
 after the separate identity publishes its first fresh credential; failed
 preflights do not count toward the 30-day clock.
 

@@ -30,3 +30,7 @@ checks the same final-to-initial chain, so a defective or bypassed runner cannot
 turn discontinuous evidence into a green soak report. Actual alert delivery
 will use the declarative scheduler's native nonzero-failure hook once the live
 profile and units are authorized.
+
+The clean release gate passed 112 Python tests and four shell integration
+suites without retry. The checksum-verified artifact retained the same 15
+manifested payload files.

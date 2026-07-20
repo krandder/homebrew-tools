@@ -74,7 +74,7 @@ class CredentialStateMachineTest(unittest.TestCase):
     def test_generated_event_histories_preserve_all_invariants(self):
         operations = (
             "owner", "handoff", "takeover", "refresh", "attempt", "rate-limit",
-            "advance", "invalid", "transient", "publish", "follower",
+            "advance", "invalid", "transient", "publish", "follower", "recover",
         )
         for seed in range(100):
             rng = random.Random(seed)
@@ -108,8 +108,14 @@ class CredentialStateMachineTest(unittest.TestCase):
                         state = transient_failure(state)
                     elif operation == "publish":
                         state = publish(state)
-                    else:
+                    elif operation == "follower":
                         state = follower_refresh(state)
+                    else:
+                        generation = (state.canonical.generation if state.canonical else 0) + 1
+                        authority = rng.choice((Authority.OWNER, Authority.VAULT, Authority.FOLLOWER))
+                        state = relogin_recovery(
+                            state, generation, f"recovered-{seed}-{generation}", authority,
+                        )
                 except Rejected:
                     state = before
 

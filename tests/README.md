@@ -39,6 +39,10 @@ daily UTC cadence, Mac login-session dispatcher, exact UID switch, activation
 marker, and dedicated Keychain unlock path. Passwords and host credentials are
 deployment state and never enter the artifact.
 
+`test_ai_token_canary_alerts.py` proves follower failures cross an authenticated,
+sanitized vault route into the incident pipeline, while human profiles and
+credential-bearing evidence fields cannot enter that path.
+
 `test_ai_token_soak_evidence.py` pins the 30-day exit gate: every required
 host/role must have a successful record on every UTC day, all records must use
 the expected profile and commit, and a failed duplicate can never be hidden by

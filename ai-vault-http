@@ -37,6 +37,8 @@ TOKENS_FILE = VAULT_DIR / "tokens.json"
 HTTP_EVENTS_FILE = VAULT_DIR / "http-events.jsonl"
 DEBUG_LOG_DIR = VAULT_DIR / "debug-logs"
 HEARTBEAT_DIR = VAULT_DIR / "client-heartbeats"
+CANARY_ALERT_DIR = VAULT_DIR / "canary-alerts"
+INCIDENT_BIN = os.environ.get("AI_VAULT_INCIDENT_BIN", "")
 LISTEN = os.environ.get("CODEX_VAULT_LISTEN", "127.0.0.1:8231")
 ALLOWED_PROFILE = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.")
 ALLOWED_TOOL = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.")
@@ -77,10 +79,64 @@ def run_vault_anon(args, body=None):
 
 
 def valid_profile(p):
-    return bool(p) and all(c in ALLOWED_PROFILE for c in p)
+    return isinstance(p, str) and bool(p) and all(c in ALLOWED_PROFILE for c in p)
 
 def valid_tool(p):
-    return bool(p) and all(c in ALLOWED_TOOL for c in p)
+    return isinstance(p, str) and bool(p) and all(c in ALLOWED_TOOL for c in p)
+
+def valid_canary_alert(value):
+    keys = {"schema", "host", "role", "profile", "expect_commit", "phase", "returncode", "evidence"}
+    if not isinstance(value, dict) or set(value) != keys or value.get("schema") != 1:
+        return False
+    return (
+        valid_tool(value.get("host"))
+        and value.get("role") in {"leader", "follower"}
+        and bool(re.fullmatch(r"canary-[A-Za-z0-9._-]+", str(value.get("profile", ""))))
+        and bool(re.fullmatch(r"[0-9a-f]{40}", str(value.get("expect_commit", ""))))
+        and valid_tool(value.get("phase"))
+        and isinstance(value.get("returncode"), int)
+        and not isinstance(value.get("returncode"), bool)
+        and 0 < value["returncode"] <= 255
+        and valid_tool(value.get("evidence"))
+    )
+
+def file_canary_alert(user, value):
+    if not valid_profile(user):
+        raise ValueError("invalid vault identity")
+    record = {**value, "vault_user": user}
+    out_dir = CANARY_ALERT_DIR / user
+    out_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
+    out = out_dir / f"{timestamp}-{value['host']}.json"
+    descriptor = os.open(out, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        os.write(descriptor, (json.dumps(record, indent=2, sort_keys=True) + "\n").encode())
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    return out
+
+def notify_canary_alert(user, value):
+    if not INCIDENT_BIN:
+        raise RuntimeError("incident reporter is not configured")
+    detail = (
+        f"role={value['role']} profile={value['profile']} phase={value['phase']} "
+        f"rc={value['returncode']} commit={value['expect_commit']} evidence={value['evidence']}"
+    )
+    result = subprocess.run(
+        [
+            INCIDENT_BIN,
+            "--severity", "error",
+            "--category", "health-check-fail",
+            "--summary", f"ai-token canary failed on {value['host']}",
+            "--source", f"ai-token-canary:{user}",
+            "--detail", detail,
+            "--tags", "ai-token,canary,tdd",
+        ],
+        capture_output=True, text=True, timeout=15,
+    )
+    if result.returncode != 0:
+        raise RuntimeError("incident reporter failed")
 
 def supported_writer_version(value):
     match = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)", value or "")
@@ -239,6 +295,23 @@ class Handler(http.server.BaseHTTPRequestHandler):
         user = self._identity()
         if not user:
             return
+        if self.path == "/canary-alert":
+            if length > 4096:
+                return self._send(413, '{"error":"canary alert too large"}')
+            try:
+                data = json.loads(body) if body else {}
+            except json.JSONDecodeError:
+                return self._send(400, '{"error":"bad json"}')
+            if not valid_canary_alert(data):
+                return self._send(400, '{"error":"invalid canary alert"}')
+            try:
+                stored = file_canary_alert(user, data)
+                notify_canary_alert(user, data)
+            except (OSError, RuntimeError, subprocess.SubprocessError, ValueError) as error:
+                server_event("canary-alert", user, data.get("profile", ""), "failed", type(error).__name__)
+                return self._send(503, '{"error":"canary alert delivery failed"}')
+            server_event("canary-alert", user, data["profile"], "ok", stored.name)
+            return self._send(200, '{"ok":true}')
         if self.path.startswith(("/sync/", "/push/")):
             version = self.headers.get("X-Ai-Token-Version", "")
             if not supported_writer_version(version):

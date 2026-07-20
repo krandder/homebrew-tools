@@ -7,4 +7,9 @@ enabled="$home/.config/ai-token-canary/enabled"
 # The scheduler is installed before credentials by design. Activation is one
 # atomic, canary-owned mode-0600 marker created only after the first live pass.
 [ -f "$enabled" ] || exit 0
-exec "$home/.config/ai-token-canary/run-live"
+status=0
+"$home/.config/ai-token-canary/run-live" || status=$?
+[ "$status" -eq 0 ] && exit 0
+"$home/.local/share/ai-token-release/current/tools/report-canary-failure" \
+    --config "$home/.config/ai-token-canary/canary.json" || :
+exit $status

@@ -13,6 +13,7 @@ class CiContractTest(unittest.TestCase):
             self.assertIn(trigger, workflow)
         self.assertIn('cron: "17 3 * * *"', workflow)
         self.assertEqual(workflow.count("tools/build-release"), 1)
+        self.assertIn("actions/checkout@v6", workflow)
         self.assertIn("actions/upload-artifact@v7", workflow)
         self.assertIn("if-no-files-found: error", workflow)
         self.assertIn("retention-days: 30", workflow)

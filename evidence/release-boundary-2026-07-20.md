@@ -31,5 +31,7 @@ source is rejected before tests or output creation.
 GitHub Actions now invokes this single release gate and retains the resulting
 ZIP and checksum as a workflow artifact. A contract test fixes push, pull
 request, manual, and daily scheduled triggers and forbids `continue-on-error`.
+Checkout uses the current Node-24-based `actions/checkout@v6`; artifact upload
+uses `actions/upload-artifact@v7`.
 The expanded local gate passed 91 Python tests and four shell integration
 suites.

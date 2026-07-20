@@ -38,6 +38,8 @@ class ProxyTest(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             generated = (home / ".claude-token" / "proxy.mjs").read_text()
             self.assertIn('process.env.CLAUDE_PROXY_UPSTREAM', generated)
+            self.assertIn("if (res.headersSent) {", generated)
+            self.assertIn("res.destroy(err);", generated)
 
     def test_proxy_replaces_auth_and_does_not_forward_stale_gzip_metadata(self):
         runtime = shutil.which("node")

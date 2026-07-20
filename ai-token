@@ -36,7 +36,7 @@
 # refreshes an owner-managed token (takeover is an explicit manual publish).
 
 set -euo pipefail
-VERSION="3.0.8"
+VERSION="3.0.9"
 infer_machine_home() {
     case "$1" in
         */.codex-profiles/*) printf '%s\n' "${1%%/.codex-profiles/*}" ;;
@@ -2397,8 +2397,12 @@ function ensureListeners() {
       handle(profile, req, res).catch((err) => {
         try {
           const msg = `token proxy: handler error: ${err.message}`;
-          if (!res.headersSent) res.writeHead(502, { "content-type": "text/plain" });
-          res.end(msg);
+          if (res.headersSent) {
+            res.destroy(err);
+          } else {
+            res.writeHead(502, { "content-type": "text/plain", "content-length": Buffer.byteLength(msg) });
+            res.end(msg);
+          }
         } catch {}
         log(profile, req.method, req.url, "502-handler");
       });

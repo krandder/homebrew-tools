@@ -14,10 +14,10 @@ tests/run full && git diff --check
 
 Result:
 
-- 33 scoped Python tests passed.
-- Six cross-machine cases passed: HTTP and forced-command SSH for complete
+- 78 scoped Python tests passed.
+- Eight cross-machine cases passed: HTTP and forced-command SSH for complete
   owner/leader/follower convergence, follower CLI launch, and legacy-writer
-  rejection.
+  rejection, plus established-follower revocation.
 - Four shell integration suites passed.
 - Formula SHA-256 pins matched all three source artifacts.
 - `git diff --check` passed.
@@ -39,6 +39,9 @@ Assertions cover:
 - follower stores receiving the sentinel refresh token;
 - owner credentials remaining byte-identical for owner-managed sync;
 - ACL denial for an unauthorized machine;
+- ACL revocation during an established lifecycle taking effect on the next
+  HTTP/SSH pull, without mutating either side's credential bytes, while an
+  unrevoked follower continues to converge;
 - real follower CLI launch and selected-profile propagation;
 - Kimi and Codex refresh endpoints being blackholed on followers;
 - Kimi keepfresh child termination and wait;
@@ -75,11 +78,15 @@ Earlier evidence in this goal also covers the broken `sync-receive` argument,
 incorrect backend invocation, formula drift, installed-vs-canonical test drift,
 Claude lifecycle rotation/concurrency, and proxy header/framing behavior.
 
+Revocation prevents subsequent vault pulls and HTTP access-token retrieval. It
+does not revoke a provider access token already issued to a follower; that token
+can remain usable until its provider-side expiry. Immediate session revocation
+would require a provider feature and is not claimed by this test.
+
 ## Still required before the goal is complete
 
 - deterministic disconnect and crash-point fault injection;
 - fake-clock coverage across all lifecycle thresholds;
-- revoked authorization during an established follower lifecycle;
 - systemd, launchd, cron, PATH, wrapper, and obsolete-writer simulations;
 - executable generated state-machine/property tests and mutation testing;
 - clean-checkout blocking CI/release evidence and immutable release bundles;

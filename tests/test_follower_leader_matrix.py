@@ -262,6 +262,41 @@ class FleetLab:
         value = json.loads((home / "codex-profiles" / profile / ".codex" / "auth.json").read_text())
         return value["tokens"]["access_token"], value["tokens"]["refresh_token"]
 
+    def revoke(self, kind, profile, follower):
+        env = {**self.leader_env, "CODEX_VAULT_USER": "admin"}
+        result = subprocess.run(
+            [AI_VAULT, "revoke", f"{kind}:{profile}", follower],
+            env=env,
+            text=True,
+            capture_output=True,
+            timeout=10,
+        )
+        if result.returncode != 0:
+            raise AssertionError(f"revoke {kind}:{profile} failed: {result.stderr}")
+
+    def local_credential(self, home, kind, profile):
+        if kind == "claude":
+            return home / ".claude" / ".credentials.json"
+        if kind == "kimi":
+            return home / ".kimi-code" / "credentials" / "kimi-code.json"
+        return home / "codex-profiles" / profile / ".codex" / "auth.json"
+
+    def leader_credentials(self, kind, profile):
+        if kind == "claude":
+            return (
+                self.leader / "claude-profiles" / profile / ".claude" / "credentials.json",
+                self.leader / "shared" / "claude" / f"{profile}.json",
+            )
+        if kind == "kimi":
+            return (
+                self.leader / "kimi-profiles" / profile / "credentials.json",
+                self.leader / "shared" / "kimi" / f"{profile}.json",
+            )
+        return (
+            self.leader / "codex-profiles" / profile / ".codex" / "auth.json",
+            self.leader / "shared" / "codex" / f"{profile}.json",
+        )
+
 
 class FollowerLeaderMatrixTest(unittest.TestCase):
     def exercise(self, transport):
@@ -381,6 +416,63 @@ class FollowerLeaderMatrixTest(unittest.TestCase):
 
     def test_ssh_follower_launch_matrix(self):
         self.exercise_launch("ssh")
+
+    def exercise_revocation(self, transport):
+        token = {"access_token": "initial", "refresh_token": "initial"}
+        with tempfile.TemporaryDirectory() as temporary, MockOAuthServer(200, token) as oauth:
+            lab = FleetLab(temporary, transport, oauth)
+            try:
+                for kind in ("claude", "kimi", "codex"):
+                    with self.subTest(transport=transport, kind=kind):
+                        lab.owner_sync(kind, "alpha")
+                        lab.follower_pull(kind, "alpha", "follower-a")
+                        follower_home, follower_env = lab.client_env(f"follower-a-{kind}", "follower-a")
+                        survivor_home, _survivor_env = lab.client_env(f"follower-b-{kind}", "follower-b")
+                        local = lab.local_credential(follower_home, kind, "alpha")
+                        local_before = local.read_bytes()
+                        leader_paths = lab.leader_credentials(kind, "alpha")
+                        leader_before = [path.read_bytes() for path in leader_paths]
+
+                        lab.revoke(kind, "alpha", "follower-a")
+                        denied = lab.run(kind, "pull", "alpha", follower_env)
+                        self.assertNotEqual(denied.returncode, 0)
+                        self.assertEqual(local.read_bytes(), local_before)
+                        self.assertEqual([path.read_bytes() for path in leader_paths], leader_before)
+
+                        access, refresh = lab.follower_pull(kind, "alpha", "follower-b")
+                        self.assertTrue(access)
+                        self.assertEqual(refresh, SENTINEL)
+                        self.assertTrue(lab.local_credential(survivor_home, kind, "alpha").exists())
+
+                        if transport == "http":
+                            request = urllib.request.Request(
+                                f"{lab.base_url}/access/{kind}/alpha",
+                                headers={"Authorization": f"Bearer {lab.token('follower-a')}"},
+                            )
+                            with self.assertRaises(urllib.error.HTTPError) as rejected:
+                                urllib.request.urlopen(request, timeout=5)
+                            self.assertEqual(rejected.exception.code, 403)
+
+                audit = [
+                    json.loads(line)
+                    for line in (lab.leader / "vault" / "audit.jsonl").read_text().splitlines()
+                ]
+                self.assertEqual(
+                    sum(event["action"] == "revoke" and event["status"] == "ok" for event in audit),
+                    3,
+                )
+                self.assertGreaterEqual(
+                    sum(event["action"] in {"pull", "access"} and event["status"] == "denied" for event in audit),
+                    3,
+                )
+            finally:
+                lab.close()
+
+    def test_http_revocation_takes_effect_during_follower_lifecycle(self):
+        self.exercise_revocation("http")
+
+    def test_ssh_revocation_takes_effect_during_follower_lifecycle(self):
+        self.exercise_revocation("ssh")
 
     @staticmethod
     def owner_snapshot():

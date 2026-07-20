@@ -22,6 +22,12 @@ class LiveCanaryTest(unittest.TestCase):
         (self.release_root / "current").symlink_to("releases/fixture-release")
         self.home = self.root / "dedicated-canary-home"
         self.home.mkdir()
+        self.credential = (
+            self.home / ".claude-profiles" / "canary-fixture" / ".claude" / "credentials.json"
+        )
+        self.credential.parent.mkdir(parents=True)
+        self.credential.write_text("CREDENTIAL_SECRET")
+        self.credential.chmod(0o600)
         self.evidence = self.root / "evidence"
         self.calls = self.root / "calls.jsonl"
         self.fail_action = self.root / "fail-action"
@@ -65,6 +71,9 @@ class LiveCanaryTest(unittest.TestCase):
             "    print('ACCESS_TOKEN_SECRET')\n"
             "    print('REFRESH_TOKEN_SECRET', file=sys.stderr)\n"
             "    raise SystemExit(7)\n"
+            f"if action == 'publish':\n    credential = pathlib.Path({str(self.credential)!r})\n"
+            "    credential.write_text(credential.read_text() + 'x')\n"
+            "    credential.chmod(0o600)\n"
         )
         token.chmod(0o755)
 
@@ -233,6 +242,43 @@ class LiveCanaryTest(unittest.TestCase):
         self.assertNotIn("VERIFIER_SECRET", result.stdout + result.stderr)
         _path, record = self.evidence_record()
         self.assertEqual(record["steps"], [{"name": "verify-release", "returncode": 9}])
+
+    def test_expected_mutation_is_chained_without_recording_credential_bytes(self):
+        first = self.run_canary("--live")
+        second = self.run_canary("--live")
+        self.assertEqual(first.returncode, 0, first.stderr)
+        self.assertEqual(second.returncode, 0, second.stderr)
+        self.assertEqual(len(self.recorded_calls()), 4)
+        records = [json.loads(path.read_text()) for path in sorted(self.evidence.glob("*.json"))]
+        self.assertEqual(len(records), 2)
+        self.assertEqual(records[0]["state_after"], records[1]["state_before"])
+        for path in self.evidence.glob("*.json"):
+            self.assertNotIn("CREDENTIAL_SECRET", path.read_text())
+
+    def test_unexpected_between_run_writer_fails_before_release_execution(self):
+        first = self.run_canary("--live")
+        self.assertEqual(first.returncode, 0, first.stderr)
+        calls = len(self.recorded_calls())
+        self.credential.write_text("UNEXPECTED_WRITER_SECRET")
+        self.credential.chmod(0o600)
+
+        second = self.run_canary("--live")
+        self.assertNotEqual(second.returncode, 0)
+        self.assertIn("unexpected credential writer", second.stderr)
+        self.assertEqual(len(self.recorded_calls()), calls)
+        records = [json.loads(path.read_text()) for path in sorted(self.evidence.glob("*.json"))]
+        self.assertEqual(records[-1]["status"], "failed")
+        self.assertEqual(records[-1]["steps"], [
+            {"name": "writer-continuity", "returncode": 1},
+        ])
+        self.assertNotIn("UNEXPECTED_WRITER_SECRET", json.dumps(records[-1]))
+
+    def test_credential_state_metadata_rejects_permissive_files(self):
+        self.credential.chmod(0o644)
+        result = self.run_canary("--live")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("credential state path must be mode 0600", result.stderr)
+        self.assertEqual(self.recorded_calls(), [])
 
 
 if __name__ == "__main__":

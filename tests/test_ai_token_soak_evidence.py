@@ -23,7 +23,10 @@ class SoakEvidenceTest(unittest.TestCase):
     def tearDown(self):
         self.temporary.cleanup()
 
-    def write_record(self, day, host, role, *, status="ok", commit=COMMIT, steps=None):
+    def write_record(
+        self, day, host, role, *, status="ok", commit=COMMIT, steps=None,
+        state_before=None, state_after=None,
+    ):
         self.counter += 1
         if steps is None:
             names = ["verify-release", "publish"] if role == "leader" else [
@@ -31,7 +34,7 @@ class SoakEvidenceTest(unittest.TestCase):
             ]
             steps = [{"name": name, "returncode": 0} for name in names]
         record = {
-            "schema": 1,
+            "schema": 2,
             "timestamp": f"{day}T12:00:00+00:00",
             "host": host,
             "kind": "claude",
@@ -41,6 +44,8 @@ class SoakEvidenceTest(unittest.TestCase):
             "release": f"{commit[:12]}-fixture",
             "status": status,
             "steps": steps,
+            "state_before": state_before or {"credential": {"exists": False}},
+            "state_after": state_after or {"credential": {"exists": False}},
         }
         path = self.evidence / f"{day}-{host}-{role}-{self.counter}.json"
         path.write_text(json.dumps(record))
@@ -51,8 +56,16 @@ class SoakEvidenceTest(unittest.TestCase):
         first = datetime.date.fromisoformat(start)
         for offset in range(days):
             day = str(first + datetime.timedelta(days=offset))
-            self.write_record(day, "farol", "leader")
-            self.write_record(day, "agent-1", "follower")
+            before = {"credential": {
+                "exists": True, "size": offset, "mtime_ns": offset,
+                "ctime_ns": offset, "inode": 1, "mode": "0600",
+            }}
+            after = {"credential": {
+                "exists": True, "size": offset + 1, "mtime_ns": offset + 1,
+                "ctime_ns": offset + 1, "inode": 1, "mode": "0600",
+            }}
+            self.write_record(day, "farol", "leader", state_before=before, state_after=after)
+            self.write_record(day, "agent-1", "follower", state_before=before, state_after=after)
 
     def run_verifier(self, *, days="3", through="2026-07-22"):
         command = [
@@ -152,6 +165,17 @@ class SoakEvidenceTest(unittest.TestCase):
         result = self.run_verifier(days=None, through="2026-08-18")
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("2026-07-20", result.stderr)
+
+    def test_soak_independently_rejects_between_run_writer_drift(self):
+        self.populate()
+        drifted = next(self.evidence.glob("2026-07-21-agent-1-follower-*.json"))
+        record = json.loads(drifted.read_text())
+        record["state_before"]["credential"]["mtime_ns"] = 999
+        drifted.write_text(json.dumps(record))
+        drifted.chmod(0o600)
+        result = self.run_verifier()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("writer continuity", result.stderr)
 
 
 if __name__ == "__main__":

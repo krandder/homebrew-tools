@@ -1,0 +1,40 @@
+#!/usr/bin/expect -f
+
+set timeout 180
+set password_file "/Users/kas/.config/ai-token-canary/bootstrap-password"
+
+if {[llength $argv] != 1} {
+    puts stderr "usage: run-as-ai-token-canary.expect command"
+    exit 64
+}
+
+set handle [open $password_file r]
+set password [string trim [read $handle]]
+close $handle
+
+# A non-login shell avoids macOS login-session initialization, which can block
+# indefinitely over a headless SSH transport even after authentication succeeds.
+spawn /usr/bin/su ai-token-canary -c [lindex $argv 0]
+expect {
+    -nocase -re "password:" {
+        send -- "$password\r"
+    }
+    timeout {
+        puts stderr "timed out waiting for su password prompt"
+        exit 124
+    }
+    eof {
+        set result [wait]
+        exit [lindex $result 3]
+    }
+}
+expect {
+    eof {
+        set result [wait]
+        exit [lindex $result 3]
+    }
+    timeout {
+        puts stderr "timed out waiting for command completion"
+        exit 124
+    }
+}

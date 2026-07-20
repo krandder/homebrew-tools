@@ -1,0 +1,11 @@
+#!/bin/sh
+set -eu
+
+home=/Users/ai-token-canary
+keychain="$home/Library/Keychains/ai-token-canary.keychain-db"
+password_file="$home/.config/ai-token-canary/keychain-password"
+release_root="$home/.local/share/ai-token-release"
+
+/usr/bin/security unlock-keychain -p "$(/bin/cat "$password_file")" "$keychain"
+exec "$release_root/current/tools/run-live-canary" \
+    --config "$home/.config/ai-token-canary/canary.json" --live

@@ -1,0 +1,9 @@
+[Unit]
+Description=Daily ai-token leader lifecycle canary
+After=network-online.target ai-token-canary-vault.service
+Wants=network-online.target ai-token-canary-vault.service
+OnFailure=ai-token-canary-alert@%n.service
+
+[Service]
+Type=oneshot
+ExecStart=/home/kelvin/.ai-token-canary/release/current/tools/run-live-canary --config /home/kelvin/.ai-token-canary/canary.json --live

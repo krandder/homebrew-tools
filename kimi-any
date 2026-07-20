@@ -2,6 +2,11 @@
 # kimi-any — kimi CLI on the healthiest kimi profile, chosen PER REQUEST by the
 # kimi-any-proxy (127.0.0.1:7812). Per-request failover + freshness live there.
 set -euo pipefail
+# Ctrl-V image paste on headless Linux: kimi's Linux clipboard reader only
+# runs in a "wayland session" (WAYLAND_DISPLAY non-empty); an xclip shim can
+# then serve a remote clipboard (farol: the Mac's, via reverse tunnel).
+# No-op on macOS, where native clipboard paste works regardless.
+export WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}"
 ANY_URL="http://127.0.0.1:7812/coding/v1"
 ( exec 3<>"/dev/tcp/127.0.0.1/7812" ) 2>/dev/null || { echo "kimi-any: proxy down (7812); run kimi directly" >&2; exit 1; }
 exec 3>&- 3<&-

@@ -36,8 +36,15 @@
 # refreshes an owner-managed token (takeover is an explicit manual publish).
 
 set -euo pipefail
-VERSION="3.0.5"
-AI_TOKEN_REAL_HOME="${AI_TOKEN_REAL_HOME:-$HOME}"
+VERSION="3.0.6"
+infer_machine_home() {
+    case "$1" in
+        */.codex-profiles/*) printf '%s\n' "${1%%/.codex-profiles/*}" ;;
+        */.claude-profiles/*) printf '%s\n' "${1%%/.claude-profiles/*}" ;;
+        *) printf '%s\n' "$1" ;;
+    esac
+}
+AI_TOKEN_REAL_HOME="${AI_TOKEN_REAL_HOME:-$(infer_machine_home "$HOME")}"
 
 # ---- tool selection (arg or shim name) ----
 TOOL="${AI_TOKEN_TOOL:-}"
@@ -1147,8 +1154,8 @@ CLAUDE_TOKEN_EP="${CLAUDE_TOKEN_EP:-https://platform.claude.com/v1/oauth/token}"
 CLAUDE_DEFAULT_SCOPE="user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload"
 CLAUDE_PROFILE_EP="${CLAUDE_PROFILE_EP:-https://api.anthropic.com/api/oauth/profile}"
 
-CLAUDE_PROFILES_DIR="${CLAUDE_PROFILES_DIR:-$HOME/.claude-profiles}"
-CLAUDE_SHARED_DIR="${CLAUDE_SHARED_DIR:-$HOME/shared/claude-tokens}"
+CLAUDE_PROFILES_DIR="${CLAUDE_PROFILES_DIR:-$AI_TOKEN_REAL_HOME/.claude-profiles}"
+CLAUDE_SHARED_DIR="${CLAUDE_SHARED_DIR:-$AI_TOKEN_REAL_HOME/shared/claude-tokens}"
 
 
 
@@ -2231,7 +2238,7 @@ PY
 }
 
 claude_cmd_diagnose() {
-    say "claude-token $VERSION"; say "VAULT_DIR_CLIENT=$VAULT_DIR_CLIENT"; say "LEADER_HOST=$LEADER_HOST"; say "CLAUDE_SHARED_DIR=$CLAUDE_SHARED_DIR"
+    say "claude-token $VERSION"; say "VAULT_DIR_CLIENT=$VAULT_DIR_CLIENT"; say "LEADER_HOST=$LEADER_HOST"; say "PROFILES_DIR=$CLAUDE_PROFILES_DIR"; say "CLAUDE_SHARED_DIR=$CLAUDE_SHARED_DIR"
     say "is_mac=$(is_mac && echo yes || echo no)  kc_account=$(kc_account)"
     read_oauth_json >/dev/null 2>&1 && say "local creds: present" || say "local creds: none"
 }

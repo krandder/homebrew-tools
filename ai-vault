@@ -304,7 +304,7 @@ PYK
 
     set +e
     python3 - "$tmp" "$af" "$(kind_of "$p")" <<'PY'
-import datetime, fcntl, json, os, sys, tempfile
+import datetime, fcntl, glob, json, os, sys, tempfile
 
 incoming_path, auth_path, kind = sys.argv[1:4]
 sentinel = "__follower_no_refresh__"
@@ -347,7 +347,14 @@ elif kind == "codex":
         sys.exit("ai-vault: Codex vault handoff requires ISO-8601 last_refresh")
 
 def atomic_json(path, value):
-    fd, temporary = tempfile.mkstemp(prefix=".token-", dir=os.path.dirname(path))
+    directory = os.path.dirname(path)
+    prefix = "." + os.path.basename(path) + ".token-"
+    for stale in glob.glob(os.path.join(directory, prefix + "*")):
+        try:
+            os.unlink(stale)
+        except FileNotFoundError:
+            pass
+    fd, temporary = tempfile.mkstemp(prefix=prefix, dir=directory)
     try:
         with os.fdopen(fd, "w") as handle:
             json.dump(value, handle, indent=2)
@@ -355,7 +362,11 @@ def atomic_json(path, value):
             handle.flush()
             os.fsync(handle.fileno())
         os.chmod(temporary, 0o600)
+        if os.environ.get("AI_VAULT_TEST_CRASH_AT") == "before-replace":
+            os._exit(86)
         os.replace(temporary, path)
+        if os.environ.get("AI_VAULT_TEST_CRASH_AT") == "after-replace":
+            os._exit(87)
     finally:
         if os.path.exists(temporary):
             os.unlink(temporary)

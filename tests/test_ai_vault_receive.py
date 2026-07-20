@@ -69,11 +69,11 @@ class VaultReceiveTest(unittest.TestCase):
             }
         }
 
-    def receive(self, value):
+    def receive(self, value, **environment):
         return subprocess.run(
             [AI_VAULT, "receive", "claude:fixture"],
             input=json.dumps(value),
-            env=self.env,
+            env={**self.env, **environment},
             text=True,
             capture_output=True,
             timeout=10,
@@ -153,6 +153,29 @@ class VaultReceiveTest(unittest.TestCase):
         stored = json.loads(self.canonical.read_text())
         self.assertEqual(stored["claudeAiOauth"]["refreshToken"], "second-refresh")
         self.assertEqual(stored["claudeTokenSync"]["refreshAuthority"], "vault")
+
+    def test_crashes_around_atomic_replace_leave_a_valid_recoverable_generation(self):
+        old = self.credentials("old", "old-refresh", 4_102_444_800_000)
+        newer = self.credentials("new", "new-refresh", 4_102_444_900_000)
+        newest = self.credentials("newest", "newest-refresh", 4_102_445_000_000)
+        self.assertEqual(self.receive(old).returncode, 0)
+        old_bytes = self.canonical.read_bytes()
+
+        before = self.receive(newer, AI_VAULT_TEST_CRASH_AT="before-replace")
+        self.assertNotEqual(before.returncode, 0)
+        self.assertEqual(self.canonical.read_bytes(), old_bytes)
+        leftovers = list(self.canonical.parent.glob(f".{self.canonical.name}.token-*"))
+        self.assertEqual(len(leftovers), 1)
+        self.assertEqual(leftovers[0].stat().st_mode & 0o777, 0o600)
+        self.assertEqual(self.receive(newer).returncode, 0)
+        self.assertFalse(list(self.canonical.parent.glob(f".{self.canonical.name}.token-*")))
+        self.assertEqual(json.loads(self.canonical.read_text())["claudeAiOauth"]["refreshToken"], "new-refresh")
+
+        after = self.receive(newest, AI_VAULT_TEST_CRASH_AT="after-replace")
+        self.assertNotEqual(after.returncode, 0)
+        stored = json.loads(self.canonical.read_text())
+        self.assertEqual(stored["claudeAiOauth"]["refreshToken"], "newest-refresh")
+        self.assertEqual(self.receive(newest).returncode, 0)
 
     def test_follower_sentinel_is_rejected(self):
         result = self.receive(self.credentials("access", "__follower_no_refresh__", 4102444800000))

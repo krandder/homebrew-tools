@@ -2,8 +2,8 @@ class AiVault < Formula
   desc "Leader-side token vault: owner-gated push, ACL-gated pull, audit"
   homepage "https://github.com/krandder/homebrew-tools"
   url "https://raw.githubusercontent.com/krandder/homebrew-tools/main/ai-vault"
-  version "1.3.5"
-  sha256 "5bc6a1f94ab945f3b67f8322cbc01f0d49f4aa2d60bef2ab4e9375f67ba7d9e9"
+  version "1.3.6"
+  sha256 "9243a323ee8f6abd4e8324591204490ae17dbdcb044efc3a00e8ac7ac98d7c15"
   depends_on "ai-token"
   def install
     bin.install "ai-vault"

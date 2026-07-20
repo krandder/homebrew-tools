@@ -2,7 +2,7 @@ class AiToken < Formula
   desc "One credential-sync tool for AI CLIs (claude, codex, kimi) via the vault"
   homepage "https://github.com/krandder/homebrew-tools"
   url "https://raw.githubusercontent.com/krandder/homebrew-tools/7f2279643b0c09d34030547de99c4d9d23a62117/ai-token"
-  version "3.1.0"
+  version "3.1.1"
   sha256 "841b52e895b6c672c22386028001e51d4e7677e638169970bde4ae0356a5598a"
 
   # The whole formula installs from the same immutable merge commit so all
@@ -18,8 +18,8 @@ class AiToken < Formula
   end
 
   resource "kimi-any" do
-    url "https://raw.githubusercontent.com/krandder/homebrew-tools/7f2279643b0c09d34030547de99c4d9d23a62117/kimi-any"
-    sha256 "7e8fc15338b05d4e81eab3dd5cafad534c65f4cf0dd50650db1cee0654134e0a"
+    url "https://raw.githubusercontent.com/krandder/homebrew-tools/4ba77acf0a3a28a79be86b47c4517ce2fda9ec6e/kimi-any"
+    sha256 "69fcc3dfaf56be656658fef1463d1e06f808f5777dca05a6c05e174244de78b8"
   end
 
   resource "claude-any-mirror" do
@@ -33,7 +33,7 @@ class AiToken < Formula
   end
 
   resource "kimi-any-mirror" do
-    url "https://raw.githubusercontent.com/krandder/homebrew-tools/7f2279643b0c09d34030547de99c4d9d23a62117/kimi-any-mirror"
+    url "https://raw.githubusercontent.com/krandder/homebrew-tools/4ba77acf0a3a28a79be86b47c4517ce2fda9ec6e/kimi-any-mirror"
     sha256 "ade12fdee0278712cb357922fdbe016fe00d3fcd267b646291f539d609e8b42b"
   end
 
@@ -63,7 +63,7 @@ class AiToken < Formula
   end
 
   resource "kimi-any-proxy.mjs" do
-    url "https://raw.githubusercontent.com/krandder/homebrew-tools/7f2279643b0c09d34030547de99c4d9d23a62117/kimi-any-proxy.mjs"
+    url "https://raw.githubusercontent.com/krandder/homebrew-tools/4ba77acf0a3a28a79be86b47c4517ce2fda9ec6e/kimi-any-proxy.mjs"
     sha256 "1abd4c4b376b79fd12c2124eb4aad55bb1ca4486cbe9f73cacb30d3ea70ca8f0"
   end
 

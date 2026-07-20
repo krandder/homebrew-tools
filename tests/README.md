@@ -43,6 +43,10 @@ deployment state and never enter the artifact.
 sanitized vault route into the incident pipeline, while human profiles and
 credential-bearing evidence fields cannot enter that path.
 
+`test_tdd_history.py` proves a production-changing pull request cannot pass the
+release gate unless an earlier `test:` commit changed only runnable tests and
+the complete suite actually failed at that commit.
+
 `test_ai_token_soak_evidence.py` pins the 30-day exit gate: every required
 host/role must have a successful record on every UTC day, all records must use
 the expected profile and commit, and a failed duplicate can never be hidden by

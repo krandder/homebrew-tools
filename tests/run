@@ -15,7 +15,7 @@ for script in ("ai-vault-http", "ai-any"):
     compile(Path(script).read_text(encoding="utf-8"), script, "exec")
 PY
 
-for pattern in 'test_ai_any.py' 'test_ai_token*.py' 'test_ai_vault*.py' 'test_compatibility_shims.py' 'test_follower_leader*.py' 'test_formula_integrity.py' 'test_release*.py' 'test_service_environment.py'; do
+for pattern in 'test_ai_any.py' 'test_ai_token*.py' 'test_ai_vault*.py' 'test_ci_contract.py' 'test_compatibility_shims.py' 'test_follower_leader*.py' 'test_formula_integrity.py' 'test_release*.py' 'test_service_environment.py'; do
     python3 -m unittest discover -s tests -p "$pattern"
 done
 for test_file in tests/test-*.sh; do

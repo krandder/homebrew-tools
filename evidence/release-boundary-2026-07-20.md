@@ -29,5 +29,7 @@ external SHA-256 file. Rebuilding the same commit is byte-identical; dirty
 source is rejected before tests or output creation.
 
 GitHub Actions now invokes this single release gate and retains the resulting
-ZIP and checksum as a workflow artifact. The expanded local gate passed 69
-Python tests and four shell integration suites.
+ZIP and checksum as a workflow artifact. A contract test fixes push, pull
+request, manual, and daily scheduled triggers and forbids `continue-on-error`.
+The expanded local gate passed 91 Python tests and four shell integration
+suites.

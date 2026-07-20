@@ -19,6 +19,7 @@ import zipfile
 
 CORE = {"ai-token", "ai-vault", "ai-vault-http"}
 HEX40 = re.compile(r"^[0-9a-f]{40}$")
+HEX_PREFIX = re.compile(r"^[0-9a-f]{7,40}$")
 
 
 def fail(message):
@@ -121,12 +122,66 @@ def write_stage(releases, manifest, payload):
 def verify_installed(target, manifest, payload):
     for name, (content, mode) in payload.items():
         path = target / name
-        if not path.is_file() or sha256(path.read_bytes()) != sha256(content):
+        if path.is_symlink() or not path.is_file() or sha256(path.read_bytes()) != sha256(content):
             fail(f"existing immutable release was modified: {target}")
         if stat.S_IMODE(path.stat().st_mode) != mode:
             fail(f"existing immutable release mode changed: {path}")
     if (target / "MANIFEST.json").read_bytes() != manifest_bytes(manifest):
         fail(f"existing immutable release manifest changed: {target}")
+
+
+def verify_selected(root, expected_commit=None):
+    with deployment_lock(root):
+        target = release_target(root, "current")
+        if target is None:
+            fail("no current release is selected")
+        manifest_path = target / "MANIFEST.json"
+        if manifest_path.is_symlink() or not manifest_path.is_file():
+            fail("current release has no regular manifest")
+        try:
+            manifest = json.loads(manifest_path.read_text())
+        except (OSError, json.JSONDecodeError) as error:
+            fail(f"invalid installed manifest: {error}")
+        files = manifest.get("files") or {}
+        commit = str(manifest.get("commit", ""))
+        if (manifest.get("schema") != 1 or not HEX40.match(commit)
+                or not HEX40.match(str(manifest.get("tree", ""))) or not isinstance(files, dict)):
+            fail("invalid installed manifest")
+        if not CORE.issubset(files):
+            fail("installed manifest is missing a canonical service")
+        if expected_commit is not None:
+            if not HEX_PREFIX.match(expected_commit) or not commit.startswith(expected_commit):
+                fail(f"expected commit {expected_commit}, selected {commit}")
+        expected_paths = set(files) | {"MANIFEST.json"}
+        actual_paths = {
+            path.relative_to(target).as_posix()
+            for path in target.rglob("*")
+            if path.is_file() or path.is_symlink()
+        }
+        if actual_paths != expected_paths:
+            fail("installed payload and manifest differ")
+        for name, metadata in files.items():
+            if not safe_name(name) or not isinstance(metadata, dict):
+                fail(f"invalid installed payload path: {name}")
+            path = target / name
+            if path.is_symlink() or not path.is_file():
+                fail(f"installed payload is not a regular file: {name}")
+            if not hmac.compare_digest(sha256(path.read_bytes()), str(metadata.get("sha256", ""))):
+                fail(f"installed payload checksum mismatch: {name}")
+            try:
+                mode = int(metadata.get("mode", ""), 8)
+            except (TypeError, ValueError):
+                fail(f"invalid installed payload mode: {name}")
+            if stat.S_IMODE(path.stat().st_mode) != mode:
+                fail(f"installed payload mode mismatch: {name}")
+        audit(root, "verify", target)
+    print(json.dumps({
+        "status": "ok",
+        "target": target.name,
+        "commit": commit,
+        "tree": manifest["tree"],
+        "files": len(files),
+    }, separators=(",", ":")))
 
 
 def atomic_symlink(root, link_name, target):
@@ -222,14 +277,19 @@ def main():
     install_parser.add_argument("--root", type=pathlib.Path, required=True)
     rollback_parser = subparsers.add_parser("rollback")
     rollback_parser.add_argument("--root", type=pathlib.Path, required=True)
+    verify_parser = subparsers.add_parser("verify")
+    verify_parser.add_argument("--root", type=pathlib.Path, required=True)
+    verify_parser.add_argument("--expect-commit")
     args = parser.parse_args()
     root = args.root.resolve()
     if root == pathlib.Path("/"):
         fail("installation root may not be /")
     if args.command == "install":
         install(root, args.archive.resolve())
-    else:
+    elif args.command == "rollback":
         rollback(root)
+    else:
+        verify_selected(root, args.expect_commit)
 
 
 if __name__ == "__main__":

@@ -22,7 +22,10 @@ artifact. `test_release_artifact.py` proves clean-tree rejection, deterministic
 packaging, embedded file hashes, and an external bundle checksum.
 `test_release_install.py` verifies fail-closed archive validation, atomic
 content-addressed selection, durable intent/completion audit records, and a
-reversible rollback without touching live installation paths.
+reversible rollback without touching live installation paths. It also proves
+post-deploy commit convergence and detects modified, extra, or symlinked
+installed payloads. `test_ci_contract.py` pins the hard release gate, daily
+schedule, and 30-day artifact retention policy.
 
 Every bug fix starts with a deterministic failing test and ends with that test
 in this directory. A flake, retry-to-green result, or unexplained skip fails the

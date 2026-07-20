@@ -103,6 +103,62 @@ class ReleaseInstallTest(unittest.TestCase):
         self.assertIn("unsafe archive path", result.stderr)
         self.assertFalse((self.directory / "escape").exists())
 
+    def test_verify_proves_selected_commit_and_detects_installed_drift(self):
+        archive, commit, _digest = self.make_release(4)
+        self.assertEqual(self.run_installer("install", archive).returncode, 0)
+
+        verified = subprocess.run(
+            [INSTALLER, "verify", "--root", self.install_root, "--expect-commit", commit],
+            text=True,
+            capture_output=True,
+            timeout=15,
+        )
+        self.assertEqual(verified.returncode, 0, verified.stderr)
+        report = json.loads(verified.stdout)
+        self.assertEqual(report["status"], "ok")
+        self.assertEqual(report["commit"], commit)
+        self.assertEqual(report["target"], (self.install_root / "current").resolve().name)
+        events = [json.loads(line) for line in (self.install_root / "deployments.jsonl").read_text().splitlines()]
+        self.assertEqual(events[-1]["action"], "verify")
+
+        active = (self.install_root / "current").resolve()
+        (active / "ai-token").write_text("tampered\n")
+        drift = self.run_installer("verify")
+        self.assertNotEqual(drift.returncode, 0)
+        self.assertIn("checksum", drift.stderr)
+        self.assertEqual((self.install_root / "current").resolve(), active)
+
+    def test_verify_rejects_the_wrong_expected_commit(self):
+        archive, _commit, _digest = self.make_release(5)
+        self.assertEqual(self.run_installer("install", archive).returncode, 0)
+        result = subprocess.run(
+            [INSTALLER, "verify", "--root", self.install_root, "--expect-commit", "f" * 40],
+            text=True,
+            capture_output=True,
+            timeout=15,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("expected commit", result.stderr)
+
+    def test_verify_rejects_unmanifested_and_symlinked_payloads(self):
+        archive, _commit, _digest = self.make_release(6)
+        self.assertEqual(self.run_installer("install", archive).returncode, 0)
+        active = (self.install_root / "current").resolve()
+
+        rogue = active / "rogue-writer"
+        rogue.write_text("unversioned\n")
+        result = self.run_installer("verify")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("payload and manifest differ", result.stderr)
+        rogue.unlink()
+
+        token = active / "ai-token"
+        token.unlink()
+        token.symlink_to("/bin/true")
+        result = self.run_installer("verify")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("regular file", result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

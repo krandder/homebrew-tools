@@ -24,6 +24,8 @@ PAYLOAD = (
     "Formula/ai-vault-http.rb",
     "Formula/claude-token.rb",
     "Formula/codex-token.rb",
+    "tools/build-release",
+    "tools/install-release",
 )
 
 

@@ -24,7 +24,7 @@ repositories.
 and creates a deterministic ZIP containing the three canonical services,
 compatibility entrypoints, onboarding shim, and matching Homebrew formulae.
 `MANIFEST.json` records the commit, tree, commit time, modes, and SHA-256 of
-every payload file. The bundle receives a content-addressed name and an
+every payload file, including the build/install tooling. The bundle receives a content-addressed name and an
 external SHA-256 file. Rebuilding the same commit is byte-identical; dirty
 source is rejected before tests or output creation.
 

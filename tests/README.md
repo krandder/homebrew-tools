@@ -20,6 +20,9 @@ independent credential writers again, including under a stale shadowing PATH.
 `test_service_environment.py` pins generated services to the invoked canonical
 artifact. `test_release_artifact.py` proves clean-tree rejection, deterministic
 packaging, embedded file hashes, and an external bundle checksum.
+`test_release_install.py` verifies fail-closed archive validation, atomic
+content-addressed selection, durable intent/completion audit records, and a
+reversible rollback without touching live installation paths.
 
 Every bug fix starts with a deterministic failing test and ends with that test
 in this directory. A flake, retry-to-green result, or unexplained skip fails the

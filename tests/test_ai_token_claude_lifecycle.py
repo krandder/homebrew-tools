@@ -68,6 +68,65 @@ class ClaudeLifecycleTest(unittest.TestCase):
             timeout=15,
         )
 
+    def test_crash_before_config_replace_preserves_previous_config(self):
+        config = self.home / ".claude-token" / "config"
+        config.parent.mkdir()
+        config.write_text("user=fixture\ntoken=previous-token\n")
+        config.chmod(0o600)
+        before = config.read_bytes()
+
+        result = subprocess.run(
+            [AI_TOKEN, "claude", "set-token", "replacement-token"],
+            env={
+                **self.env,
+                "AI_TOKEN_TEST_CRASH_AT": "before-config-replace",
+            },
+            text=True,
+            capture_output=True,
+            timeout=10,
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(config.read_bytes(), before)
+        self.assertEqual(config.stat().st_mode & 0o777, 0o600)
+
+    def test_crash_before_local_replace_preserves_previous_credentials(self):
+        local = self.home / ".claude" / ".credentials.json"
+        local.parent.mkdir()
+        local.write_text(json.dumps({
+            "claudeAiOauth": {
+                "accessToken": "previous-access",
+                "refreshToken": "__follower_no_refresh__",
+                "expiresAt": 4_102_444_800_000,
+            }
+        }))
+        local.chmod(0o600)
+        self.shared.mkdir()
+        (self.shared / f"{self.profile}.json").write_text(json.dumps({
+            "claudeAiOauth": {
+                "accessToken": "published-access",
+                "refreshToken": "__follower_no_refresh__",
+                "expiresAt": 4_102_444_800_000,
+            }
+        }))
+        before = local.read_bytes()
+
+        result = subprocess.run(
+            [AI_TOKEN, "claude", "pull", "--profile", self.profile],
+            env={
+                **self.env,
+                "AI_TOKEN_TEST_NOW": "4102440000",
+                "AI_TOKEN_TEST_CRASH_AT": "before-claude-local-replace",
+            },
+            text=True,
+            capture_output=True,
+            timeout=10,
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(local.read_bytes(), before)
+        json.loads(local.read_text())
+
     def test_invalid_grant_marks_once_and_stops_retrying(self):
         self.write_credentials()
         with MockOAuthServer(400, {"error": "invalid_grant"}) as server:

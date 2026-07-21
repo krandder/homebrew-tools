@@ -27,6 +27,7 @@
 #                                          allows `receive`/`serve`.
 
 set -euo pipefail
+umask 077
 
 if [ -n "${CODEX_VAULT_DIR:-}" ]; then
     VAULT_DIR="$CODEX_VAULT_DIR"
@@ -115,6 +116,98 @@ PY
 }
 
 require_admin() { is_admin || die "'$(current_user)' is not an admin (need: $*)"; }
+
+mutate_state() { # file operation [arguments...]
+    python3 - "$@" <<'PY'
+import fcntl, glob, hashlib, json, os, sys, tempfile, time
+
+path, operation, *arguments = sys.argv[1:]
+directory = os.path.dirname(path) or "."
+os.makedirs(directory, exist_ok=True)
+lock_path = path + ".lock"
+with open(lock_path, "a+") as lock:
+    os.chmod(lock_path, 0o600)
+    ready = os.environ.get("AI_VAULT_TEST_STATE_LOCK_READY")
+    if ready:
+        with open(ready, "w") as handle:
+            handle.write("ready\n")
+        os.chmod(ready, 0o600)
+    fcntl.flock(lock, fcntl.LOCK_EX)
+    if os.path.exists(path):
+        with open(path) as handle:
+            data = json.load(handle)
+    else:
+        data = {}
+    if not isinstance(data, dict):
+        raise SystemExit("ai-vault: state JSON must be an object")
+
+    message = None
+    if operation == "enroll":
+        profile, owner, kind = arguments
+        data.setdefault("profiles", {})[profile] = {
+            "owner": owner, "pullers": [owner], "kind": kind,
+        }
+        message = f"enrolled {profile} (owner={owner})"
+    elif operation == "token":
+        user, plain = arguments
+        data[hashlib.sha256(plain.encode()).hexdigest()] = user
+    elif operation == "pair-create":
+        user, code, secret_hash, raw_ttl = arguments
+        now = time.time()
+        ttl = int(raw_ttl)
+        data = {
+            key: value for key, value in data.items()
+            if now - float(value.get("created_at", 0)) < ttl
+        }
+        data[code] = {
+            "user": user, "secret_hash": secret_hash,
+            "status": "pending", "created_at": now,
+        }
+    elif operation == "pair-approve":
+        code, token = arguments
+        data[code]["status"] = "approved"
+        data[code]["token"] = token
+    elif operation == "grant":
+        profile, user = arguments
+        info = data.setdefault("profiles", {}).setdefault(
+            profile, {"owner": "", "pullers": []},
+        )
+        if user not in info["pullers"]:
+            info["pullers"].append(user)
+        message = f"granted {user} pull on {profile}"
+    elif operation == "revoke":
+        profile, user = arguments
+        info = data.get("profiles", {}).get(profile, {})
+        info["pullers"] = [value for value in info.get("pullers", []) if value != user]
+        data["profiles"][profile] = info
+        message = f"revoked {user} on {profile}"
+    else:
+        raise SystemExit("ai-vault: unknown state mutation")
+
+    prefix = "." + os.path.basename(path) + ".state-"
+    for stale in glob.glob(os.path.join(directory, prefix + "*")):
+        try:
+            os.unlink(stale)
+        except FileNotFoundError:
+            pass
+    fd, temporary = tempfile.mkstemp(prefix=prefix, dir=directory)
+    try:
+        with os.fdopen(fd, "w") as handle:
+            json.dump(data, handle, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temporary, 0o600)
+        if os.environ.get("AI_VAULT_TEST_STATE_CRASH_AT") == "before-replace":
+            os._exit(86)
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+    if message:
+        print(message)
+PY
+}
 
 # ---- core ops ----
 cmd_receive() { # profile   (stdin = token JSON)
@@ -488,14 +581,7 @@ cmd_enroll() { # kind name [owner]
     local kind="$1" p="$2" owner="${3:-$2}"
     case "$kind" in codex|claude|kimi) ;; *) die "enroll: first arg must be kind (codex|claude|kimi)" ;; esac
     local id="$kind:$p"
-    python3 - "$ACL_FILE" "$id" "$owner" "$kind" <<'PY'
-import json,sys
-f,id,owner,kind=sys.argv[1],sys.argv[2],sys.argv[3],sys.argv[4]
-d=json.load(open(f))
-d.setdefault("profiles",{})[id]={"owner":owner,"pullers":[owner],"kind":kind}
-json.dump(d,open(f,"w"),indent=2)
-print(f"enrolled {id} (owner={owner})")
-PY
+    mutate_state "$ACL_FILE" enroll "$id" "$owner" "$kind"
     audit "$id" enroll ok "owner=$owner"
 }
 
@@ -506,14 +592,7 @@ cmd_token() { # user
     local user="$1" plain
     [ -n "$user" ] || die "token: specify a user"
     plain="$(python3 -c 'import secrets;print(secrets.token_urlsafe(32))')"
-    python3 - "$VAULT_DIR" "$user" "$plain" <<'PY'
-import json,sys,hashlib,os
-vd,user,plain=sys.argv[1],sys.argv[2],sys.argv[3]
-f=os.path.join(vd,"tokens.json")
-d=json.load(open(f)) if os.path.exists(f) else {}
-d[hashlib.sha256(plain.encode()).hexdigest()]=user
-json.dump(d,open(f,"w"),indent=2); os.chmod(f,0o600)
-PY
+    mutate_state "$VAULT_DIR/tokens.json" token "$user" "$plain"
     audit "$user" token ok "issued by $(current_user)"
     printf '%s\n' "$plain"
 }
@@ -563,15 +642,7 @@ PAIR_TTL=600
 cmd_pair_create() { # user code secret_hash   (no auth — pairing entry point)
     local user="$1" code="$2" sh="$3"
     [ -n "$user" ] && [ -n "$code" ] && [ -n "$sh" ] || die "pair-create: need user code secret_hash"
-    python3 - "$PAIRING_FILE" "$user" "$code" "$sh" "$PAIR_TTL" <<'PY'
-import json,sys,os,time
-f,user,code,sh,ttl=sys.argv[1],sys.argv[2],sys.argv[3],sys.argv[4],int(sys.argv[5])
-d=json.load(open(f)) if os.path.exists(f) else {}
-now=time.time()
-d={k:v for k,v in d.items() if now-float(v.get("created_at",0))<ttl}   # expire old
-d[code]={"user":user,"secret_hash":sh,"status":"pending","created_at":now}
-json.dump(d,open(f,"w"),indent=2); os.chmod(f,0o600)
-PY
+    mutate_state "$PAIRING_FILE" pair-create "$user" "$code" "$sh" "$PAIR_TTL"
     say "pairing request: code=$code user=$user"
 }
 
@@ -617,12 +688,7 @@ PY
     ensure_pair_profile claude "$user"
     ensure_pair_profile kimi "$user"
     token="$(cmd_token "$user")"
-    python3 - "$PAIRING_FILE" "$code" "$token" <<'PY'
-import json,sys,os
-f,code,token=sys.argv[1],sys.argv[2],sys.argv[3]
-d=json.load(open(f)); d[code]["status"]="approved"; d[code]["token"]=token
-json.dump(d,open(f,"w"),indent=2); os.chmod(f,0o600)
-PY
+    mutate_state "$PAIRING_FILE" pair-approve "$code" "$token"
     audit "$user" pair-approve ok "code=$code"
     say "approved pairing code '$code' for user '$user' (codex+claude+kimi enrolled); the follower will auto-complete." >&2
 }
@@ -630,26 +696,14 @@ PY
 cmd_grant() { # profile user
     local p="$1" u="$2"
     { is_admin || [ "$(profile_owner "$p")" = "$(current_user)" ]; } || die "grant: only admin/owner may grant '$p'"
-    python3 - "$ACL_FILE" "$p" "$u" <<'PY'
-import json,sys
-f,p,u=sys.argv[1],sys.argv[2],sys.argv[3]
-d=json.load(open(f)); prof=d.setdefault("profiles",{}).setdefault(p,{"owner":"","pullers":[]})
-if u not in prof["pullers"]: prof["pullers"].append(u)
-json.dump(d,open(f,"w"),indent=2); print(f"granted {u} pull on {p}")
-PY
+    mutate_state "$ACL_FILE" grant "$p" "$u"
     audit "$p" grant ok "to $u"
 }
 
 cmd_revoke() { # profile user
     local p="$1" u="$2"
     { is_admin || [ "$(profile_owner "$p")" = "$(current_user)" ]; } || die "revoke: only admin/owner may revoke"
-    python3 - "$ACL_FILE" "$p" "$u" <<'PY'
-import json,sys
-f,p,u=sys.argv[1],sys.argv[2],sys.argv[3]
-d=json.load(open(f)); prof=d.get("profiles",{}).get(p,{})
-prof["pullers"]=[x for x in prof.get("pullers",[]) if x!=u]
-d["profiles"][p]=prof; json.dump(d,open(f,"w"),indent=2); print(f"revoked {u} on {p}")
-PY
+    mutate_state "$ACL_FILE" revoke "$p" "$u"
     audit "$p" revoke ok "from $u"
 }
 

@@ -187,7 +187,7 @@ broad state-machine coverage, hard CI, production-shaped verification, and
 controlled release phases on 2026-07-20. He designated `canary-claude`, isolated
 homes on farol and agent-1, and the dedicated macOS account/keychain
 `ai-token-canary`. Protected runtime commit
-`bdbd1babd9f8208cd1ff2f40fab4d1016855aca0` is installed and verified on all
+`7269e0bc502c2fba27a191788c42e0a872136df8` is installed and verified on all
 three hosts, and physical rollback/restore was exercised on each. The separate
 Anthropic account is `ai@futarchy.ai` with a Claude Max entitlement. Its OAuth
 credential is canonical only in the isolated farol vault; followers receive a
@@ -229,7 +229,7 @@ three hosts. A real explicit agent-1 pull outside the lifecycle runner was
 retained as a `writer-continuity` failure before the designated runner
 re-established the chain; the consumer wrapper itself reads a temporary vault
 response and does not write the monitored credential. The clean 30-day window
-is pinned to release `bdbd1babd9f8-102ff6b0110f` from
+is pinned to release `7269e0bc502c-061c79a5d0b0` from
 2026-07-22 through
 2026-08-20 UTC, with the final gate eligible on 2026-08-21 UTC.
 
@@ -259,7 +259,7 @@ AppleDouble files, duplicate names, or invalid JSON and writes a mode-0600
 source/count/digest manifest. It is canonical source but not canary runtime, so
 improving the collection boundary does not change the pinned soak release.
 
-The release candidate also contains a daily cumulative audit for the failure
+The protected release also contains a daily cumulative audit for the failure
 mode that lifecycle `OnFailure` cannot observe: a timer or host that never runs.
 At 04:40 UTC, after all three next-day anchors, it uses the existing collector
 and verifier to check every completed qualifying day. A missing record, failed

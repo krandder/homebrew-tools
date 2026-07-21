@@ -259,6 +259,15 @@ AppleDouble files, duplicate names, or invalid JSON and writes a mode-0600
 source/count/digest manifest. It is canonical source but not canary runtime, so
 improving the collection boundary does not change the pinned soak release.
 
+The release candidate also contains a daily cumulative audit for the failure
+mode that lifecycle `OnFailure` cannot observe: a timer or host that never runs.
+At 04:40 UTC, after all three next-day anchors, it uses the existing collector
+and verifier to check every completed qualifying day. A missing record, failed
+record, chain break, writer drift, release mismatch, or missing anchor exits
+nonzero through the existing canonical incident unit. Before the first day is
+complete it is a no-op. This adds no credential access or alternate evidence
+writer.
+
 Canary evidence schema 3 measures unexpected writers without reading or
 hashing credential contents. Each run records whether its entrypoint was
 scheduled or manual, a SHA-256 link to the previous sanitized evidence record,

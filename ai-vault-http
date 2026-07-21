@@ -30,6 +30,7 @@ import re
 import socketserver
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -142,6 +143,34 @@ def notify_canary_alert(user, value):
 def supported_writer_version(value):
     match = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)", value or "")
     return bool(match) and tuple(map(int, match.groups())) >= MIN_CLIENT_VERSION
+
+
+def atomic_private_file(path, data):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    lock_fd = os.open(str(path) + ".lock", os.O_RDWR | os.O_CREAT | nofollow, 0o600)
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        descriptor, temporary = tempfile.mkstemp(
+            prefix="." + path.name + ".state-", dir=path.parent,
+        )
+        try:
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(data)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.chmod(temporary, 0o600)
+            os.replace(temporary, path)
+            directory_fd = os.open(path.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
+    finally:
+        os.close(lock_fd)
 
 def server_event(event, user="", profile="", status="", detail=""):
     try:
@@ -354,8 +383,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             out_dir = HEARTBEAT_DIR / user
             out_dir.mkdir(parents=True, exist_ok=True)
             out = out_dir / f"claude-token-{host}.json"
-            out.write_text(json.dumps(data, indent=2) + "\n")
-            os.chmod(out, 0o600)
+            atomic_private_file(out, (json.dumps(data, indent=2) + "\n").encode())
             server_event("heartbeat", user, "", "ok", f"claude-token/{data.get('version','?')} host={host} status={data.get('status','?')}")
             return self._send(200, '{"ok":true}')
         if self.path.startswith("/debug-logs/"):
@@ -368,8 +396,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             out_dir = DEBUG_LOG_DIR / user
             out_dir.mkdir(parents=True, exist_ok=True)
             out = out_dir / f"{ts}-{tool}.json"
-            out.write_text(body)
-            os.chmod(out, 0o600)
+            atomic_private_file(out, body.encode())
             server_event("debug-logs", user, "", "ok", str(out))
             return self._send(200, json.dumps({"ok": True, "stored": str(out)}))
         # Transparent OAuth refresh broker: a follower's refresh (routed here by

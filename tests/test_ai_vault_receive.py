@@ -154,6 +154,35 @@ class VaultReceiveTest(unittest.TestCase):
         self.assertEqual(stored["claudeAiOauth"]["refreshToken"], "second-refresh")
         self.assertEqual(stored["claudeTokenSync"]["refreshAuthority"], "vault")
 
+    def test_receive_normalizes_missing_or_incorrect_authority_markers(self):
+        expires = 4_102_444_800_000
+        vault_handoff = self.credentials("access", "refresh", expires)
+        vault_handoff["claudeTokenSync"] = {"refreshAuthority": "owner"}
+        result = self.receive(vault_handoff)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            json.loads(self.canonical.read_text())["claudeTokenSync"]["refreshAuthority"],
+            "vault",
+        )
+
+        owner_sync = self.credentials("access", "refresh", expires)
+        owner_sync["claudeTokenSync"] = {"refreshAuthority": "vault"}
+        result = self.claude_sync(owner_sync)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            json.loads(self.canonical.read_text())["claudeTokenSync"]["refreshAuthority"],
+            "owner",
+        )
+
+        kimi_sync = self.kimi_credentials("access", "refresh", int(time.time()) + 900)
+        kimi_sync["kimiTokenSync"] = {"refreshAuthority": "vault"}
+        result = self.kimi_sync(kimi_sync)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            json.loads(self.kimi_canonical.read_text())["kimiTokenSync"]["refreshAuthority"],
+            "owner",
+        )
+
     def test_crashes_around_atomic_replace_leave_a_valid_recoverable_generation(self):
         old = self.credentials("old", "old-refresh", 4_102_444_800_000)
         newer = self.credentials("new", "new-refresh", 4_102_444_900_000)

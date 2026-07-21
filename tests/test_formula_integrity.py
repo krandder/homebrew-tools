@@ -2,6 +2,7 @@
 import hashlib
 import pathlib
 import re
+import subprocess
 import unittest
 
 
@@ -18,6 +19,32 @@ class FormulaIntegrityTest(unittest.TestCase):
                 match = re.search(r'^\s*sha256 "([0-9a-f]{64})"$', formula, re.MULTILINE)
                 self.assertIsNotNone(match, "formula must pin a sha256")
                 self.assertEqual(hashlib.sha256(source.read_bytes()).hexdigest(), match.group(1))
+
+    def test_formula_urls_pin_the_exact_current_sources(self):
+        for name in ARTIFACTS:
+            with self.subTest(artifact=name):
+                source = (ROOT / name).read_bytes()
+                formula = (ROOT / "Formula" / f"{name}.rb").read_text()
+                match = re.search(
+                    r'url "https://raw\.githubusercontent\.com/krandder/homebrew-tools/'
+                    r'([0-9a-f]{40})/' + re.escape(name) + r'"\s*'
+                    r'version "[^"]+"\s*sha256 "([0-9a-f]{64})"',
+                    formula,
+                )
+                self.assertIsNotNone(
+                    match, "formula must use an immutable canonical commit URL",
+                )
+                commit, pinned = match.groups()
+                subprocess.run(
+                    ["git", "cat-file", "-e", f"{commit}^{{commit}}"],
+                    cwd=ROOT,
+                    check=True,
+                )
+                downloaded = subprocess.check_output(
+                    ["git", "show", f"{commit}:{name}"], cwd=ROOT,
+                )
+                self.assertEqual(hashlib.sha256(downloaded).hexdigest(), pinned)
+                self.assertEqual(downloaded, source)
 
     def test_ai_token_and_compatibility_formula_versions_match_canonical_source(self):
         source = (ROOT / "ai-token").read_text()

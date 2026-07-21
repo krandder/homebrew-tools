@@ -224,6 +224,90 @@ class ClaudeLifecycleTest(unittest.TestCase):
         self.assertEqual(json.loads(post[3])["refresh_token"], "old-refresh")
         self.assertEqual(get[2]["Authorization"], "Bearer new-access")
 
+    def test_crashes_before_refresh_replacements_never_truncate_credentials(self):
+        self.write_credentials()
+        self.shared.mkdir()
+        published_path = self.shared / f"{self.profile}.json"
+        published_path.write_text(json.dumps({
+            "claudeAiOauth": {
+                "accessToken": "previous-access",
+                "refreshToken": "__follower_no_refresh__",
+            },
+        }))
+        published_path.chmod(0o600)
+        old_auth = self.auth.read_bytes()
+        old_published = published_path.read_bytes()
+        token = {
+            "access_token": "new-access",
+            "refresh_token": "new-refresh",
+            "expires_in": 28_800,
+        }
+
+        with MockOAuthServer(200, token, 200, {}) as server:
+            canonical_crash = self.run_publish(
+                server, AI_TOKEN_TEST_CRASH_AT="before-claude-canonical-replace",
+            )
+            self.assertNotEqual(canonical_crash.returncode, 0)
+            self.assertEqual(self.auth.read_bytes(), old_auth)
+            self.assertEqual(published_path.read_bytes(), old_published)
+            json.loads(self.auth.read_text())
+            json.loads(published_path.read_text())
+
+            shared_crash = self.run_publish(
+                server, AI_TOKEN_TEST_CRASH_AT="before-claude-shared-replace",
+            )
+            self.assertNotEqual(shared_crash.returncode, 0)
+            self.assertEqual(
+                json.loads(self.auth.read_text())["claudeAiOauth"]["refreshToken"],
+                "new-refresh",
+            )
+            self.assertEqual(published_path.read_bytes(), old_published)
+            json.loads(published_path.read_text())
+
+            recovered = self.run_publish(server)
+
+        self.assertEqual(recovered.returncode, 0, recovered.stderr)
+        self.assertEqual(
+            json.loads(published_path.read_text())["claudeAiOauth"]["accessToken"],
+            "new-access",
+        )
+        self.assertFalse(list(self.auth.parent.glob(f".{self.auth.name}.token-*")))
+        self.assertFalse(list(self.shared.glob(f".{published_path.name}.token-*")))
+        self.assertEqual(sum(request[0] == "POST" for request in server.requests), 2)
+        records = [
+            json.loads(line)
+            for line in (self.logs / "events.jsonl").read_text().splitlines()
+        ]
+        self.assertNotIn(
+            ("refresh", "ok"),
+            [(record["event"], record["status"]) for record in records],
+        )
+
+    def test_crash_before_fresh_publish_preserves_previous_shared_credential(self):
+        self.write_credentials(expires_at=4_102_454_800_000)
+        self.shared.mkdir()
+        published_path = self.shared / f"{self.profile}.json"
+        published_path.write_text(json.dumps({
+            "claudeAiOauth": {
+                "accessToken": "previous-access",
+                "refreshToken": "__follower_no_refresh__",
+            },
+        }))
+        published_path.chmod(0o600)
+        before = published_path.read_bytes()
+
+        with MockOAuthServer(200, {}) as server:
+            result = self.run_publish(
+                server,
+                AI_TOKEN_TEST_NOW="4102444800",
+                AI_TOKEN_TEST_CRASH_AT="before-claude-shared-replace",
+            )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(published_path.read_bytes(), before)
+        json.loads(published_path.read_text())
+        self.assertEqual(server.requests, [])
+
     def test_concurrent_publish_performs_one_rotation(self):
         self.write_credentials()
         token = {"access_token": "new-access", "refresh_token": "new-refresh", "expires_in": 28800}

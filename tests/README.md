@@ -70,6 +70,20 @@ a source/digest manifest. Path traversal, nested files, symlinks, AppleDouble
 metadata, permissive modes, duplicate filenames, invalid/non-JSON members, and
 an existing destination all fail without leaving partial output.
 
+`test_ai_token_soak_audit.py` proves the daily auditor derives every completed
+UTC soak day cumulatively, collects all three hosts atomically, runs the strict
+soak verifier, and exits successfully before any qualifying day exists. The
+farol timer runs only after all daily host anchors and routes a failure through
+the existing sanitized incident unit.
+
+`test_formula_integrity.py` verifies each scoped formula uses an immutable,
+reachable canonical commit and that the bytes at that commit match both its
+checksum and the current source. `test_release_artifact.py` additionally
+proves untracked umask/group-write differences cannot change release bytes.
+
+The exact executable mapping for every recurring Kimi incident class is in
+`evidence/kimi-incident-replay-audit-2026-07-21.md`.
+
 Every bug fix starts with a deterministic failing test and ends with that test
 in this directory. A flake, retry-to-green result, or unexplained skip fails the
 suite.

@@ -187,7 +187,7 @@ broad state-machine coverage, hard CI, production-shaped verification, and
 controlled release phases on 2026-07-20. He designated `canary-claude`, isolated
 homes on farol and agent-1, and the dedicated macOS account/keychain
 `ai-token-canary`. Protected runtime commit
-`3da9ee56e98d47c840038f76f545e31ff054f888` is installed and verified on all
+`9ccdf7408f6b555bd76c02d3e5dd653b0ec2db12` is installed and verified on all
 three hosts, and physical rollback/restore was exercised on each. The separate
 Anthropic account is `ai@futarchy.ai` with a Claude Max entitlement. Its OAuth
 credential is canonical only in the isolated farol vault; followers receive a
@@ -241,8 +241,13 @@ red-before-green cycles, made every identified credential and authority state
 writer atomic and every read-modify-write state mutation locked, passed the
 complete and protected gates, and repeated exact three-host rollback/restore
 plus live lifecycle verification.
+One final static pass then found that missing-ACL bootstrap still occurred
+before the ACL lock. PR #42 preserved the deterministic failing lock-race test,
+routed initialization through the same atomic state mutator, passed the full
+and protected gates, and repeated exact three-host rollback/restore plus live
+lifecycle verification.
 The clean 30-day window is pinned to release
-`3da9ee56e98d-daf055d6c532` from
+`9ccdf7408f6b-ed61d7a9cf29` from
 2026-07-22 through
 2026-08-20 UTC, with the final gate eligible on 2026-08-21 UTC.
 
@@ -312,7 +317,9 @@ clean window. The exact Kimi replay mapping and final pre-soak atomic promotion
 are recorded in `evidence/kimi-incident-replay-audit-2026-07-21.md` and
 `evidence/atomic-credential-promotion-2026-07-21.md`. The exhaustive state
 writer closure and final protected promotion are recorded in
-`evidence/all-state-writer-promotion-2026-07-21.md`.
+`evidence/all-state-writer-promotion-2026-07-21.md`. The locked ACL bootstrap
+correction and superseding final soak pin are recorded in
+`evidence/locked-acl-bootstrap-promotion-2026-07-21.md`.
 
 ## Post-characterization implementation language
 

@@ -48,17 +48,19 @@ release gate unless an earlier `test:` commit changed only runnable tests and
 the complete suite actually failed at that commit.
 
 `test_ai_token_soak_evidence.py` pins the 30-day exit gate: every required
-host/role must have a successful record on every UTC day, all records must use
-one expected profile, commit, and immutable release artifact ID, and a failed
-duplicate can never be hidden by a later success. Malformed, symlinked,
-permissively readable, or fabricated evidence fails closed.
+host/role must have a scheduler-marked successful record on every UTC day, all
+records must use one expected profile, commit, and immutable release artifact
+ID, and a failed duplicate can never be hidden by a later success. A
+post-window scheduled anchor closes each retained chain. Malformed, symlinked,
+permissively readable, omitted, or fabricated evidence fails closed.
 
-Canary evidence schema 2 carries credential-file metadata before and after each
-run. `test_ai_token_live_canary.py` proves an expected canary mutation chains
-cleanly, while a between-run writer or permissive credential file stops before
-release execution. `test_ai_token_soak_evidence.py` independently rechecks the
-same continuity across the retained host histories. No credential bytes or
-hashes enter evidence.
+Canary evidence schema 3 carries scheduler provenance, a SHA-256 link to the
+previous sanitized evidence record, and credential-file metadata before and
+after each run. `test_ai_token_live_canary.py` proves an expected canary
+mutation chains cleanly, while a between-run writer or permissive credential
+file stops before release execution. `test_ai_token_soak_evidence.py`
+independently rechecks the same continuity across the retained host histories.
+No credential bytes or credential hashes enter evidence.
 
 Every bug fix starts with a deterministic failing test and ends with that test
 in this directory. A flake, retry-to-green result, or unexplained skip fails the

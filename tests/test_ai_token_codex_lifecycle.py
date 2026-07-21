@@ -22,6 +22,117 @@ def jwt(expires_at, marker):
 
 
 class CodexLifecycleTest(unittest.TestCase):
+    def test_remote_pull_never_follows_a_predictable_staging_symlink(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            home = pathlib.Path(temporary)
+            profile = home / "profiles" / "fixture"
+            auth = profile / ".codex" / "auth.json"
+            binary = home / "bin"
+            payload = home / "vault-response.json"
+            auth.parent.mkdir(parents=True)
+            binary.mkdir()
+            now = int(time.time())
+            auth.write_text(json.dumps({
+                "auth_mode": "chatgpt",
+                "tokens": {
+                    "access_token": jwt(now + 300, "previous"),
+                    "refresh_token": "__follower_no_refresh__",
+                },
+            }))
+            (profile / ".role").write_text("follower")
+            payload.write_text(json.dumps({
+                "auth_mode": "chatgpt",
+                "tokens": {
+                    "access_token": jwt(now + 3600, "published"),
+                    "refresh_token": "__follower_no_refresh__",
+                },
+            }))
+            victim = home / "unrelated-state"
+            victim.write_text("must-remain-unchanged")
+            pathlib.Path(f"{auth}.tmp").symlink_to(victim)
+            ssh = binary / "ssh"
+            ssh.write_text("#!/bin/sh\ncat \"$CODEX_TEST_VAULT_PAYLOAD\"\n")
+            ssh.chmod(0o755)
+
+            result = subprocess.run(
+                [AI_TOKEN, "codex", "pull", "--profile", "fixture"],
+                env={
+                    **os.environ,
+                    "HOME": str(home),
+                    "AI_TOKEN_REAL_HOME": str(home),
+                    "CODEX_PROFILES_DIR": str(home / "profiles"),
+                    "CODEX_SHARED_DIR": str(home / "shared"),
+                    "CODEX_TEST_VAULT_PAYLOAD": str(payload),
+                    "AI_TOKEN_TEST_NOW": str(now),
+                    "PATH": f"{binary}:/usr/bin:/bin",
+                },
+                text=True,
+                capture_output=True,
+                timeout=10,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(victim.read_text(), "must-remain-unchanged")
+            self.assertFalse(auth.is_symlink())
+            self.assertEqual(
+                json.loads(auth.read_text())["tokens"]["access_token"],
+                json.loads(payload.read_text())["tokens"]["access_token"],
+            )
+
+    def test_refresh_never_follows_a_predictable_generation_symlink(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            home = pathlib.Path(temporary)
+            profile = home / "profiles" / "fixture"
+            auth = profile / ".codex" / "auth.json"
+            auth.parent.mkdir(parents=True)
+            auth.write_text(json.dumps({
+                "auth_mode": "chatgpt",
+                "tokens": {
+                    "access_token": "expired-access",
+                    "refresh_token": "old-refresh",
+                },
+            }))
+            (profile / ".role").write_text("leader")
+            victim = home / "unrelated-state"
+            victim.write_text("must-remain-unchanged")
+            pathlib.Path(f"{auth}.tmp").symlink_to(victim)
+            token = {"access_token": "new-access", "refresh_token": "new-refresh"}
+
+            with MockOAuthServer(200, token) as server:
+                result = subprocess.run(
+                    [AI_TOKEN, "codex", "publish", "--profile", "fixture"],
+                    env={
+                        **os.environ,
+                        "HOME": str(home),
+                        "AI_TOKEN_REAL_HOME": str(home),
+                        "AI_TOKEN_REFRESH_STATE_DIR": str(home / "refresh-state"),
+                        "CODEX_PROFILES_DIR": str(home / "profiles"),
+                        "CODEX_SHARED_DIR": str(home / "shared"),
+                        "CODEX_TOKEN_EP": server.token_url,
+                        "PATH": "/usr/bin:/bin",
+                    },
+                    text=True,
+                    capture_output=True,
+                    timeout=10,
+                )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(victim.read_text(), "must-remain-unchanged")
+            self.assertFalse(auth.is_symlink())
+            self.assertEqual(json.loads(auth.read_text())["tokens"]["refresh_token"], "new-refresh")
+
+    def test_credential_paths_do_not_use_predictable_dot_tmp_staging(self):
+        source = AI_TOKEN.read_text()
+        for fragment in (
+            'path + ".tmp"',
+            'tmp = af + ".tmp"',
+            'local tmp="$af.tmp"',
+            '"$CODEX_LEGACY_AUTH.tmp"',
+            'tmp=f+".tmp"',
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertNotIn(fragment, source)
+
     def test_refresh_endpoint_can_be_replaced_by_the_hermetic_lab(self):
         with tempfile.TemporaryDirectory() as temporary:
             home = pathlib.Path(temporary)

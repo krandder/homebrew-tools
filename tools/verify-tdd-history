@@ -92,24 +92,26 @@ def main():
         fail("base is not an ancestor of head")
     commits = git("rev-list", "--reverse", "--no-merges", f"{base}..{head}").splitlines()
     candidate = None
-    production = None
+    pairs = []
     for commit in commits:
         paths = paths_at(commit)
         changes_production = any(is_production(path) for path in paths)
         changes_tests = any(is_test(path) for path in paths)
         if changes_production:
-            production = commit
-            break
-        subject = git("show", "-s", "--format=%s", commit)
-        if changes_tests and subject.startswith("test:"):
-            candidate = commit
-    if production is None:
+            if candidate is None:
+                fail(f"production change has no preceding test-only red commit: {commit}")
+            pairs.append((candidate, commit))
+            candidate = None
+        elif changes_tests:
+            subject = git("show", "-s", "--format=%s", commit)
+            candidate = commit if subject.startswith("test:") and all(map(is_test, paths)) else None
+    if not pairs:
         print("verify-tdd-history: no production change; red proof not required")
         return
-    if candidate is None:
-        fail(f"production commit has no preceding test-only red commit: {production}")
-    prove_red(candidate, command)
-    print(f"verify-tdd-history: verified red-before-green ({candidate} -> {production})")
+    for red, production in pairs:
+        prove_red(red, command)
+    proofs = ", ".join(f"{red} -> {production}" for red, production in pairs)
+    print(f"verify-tdd-history: verified red-before-green cycles: {len(pairs)} ({proofs})")
 
 
 if __name__ == "__main__":

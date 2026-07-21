@@ -9,16 +9,12 @@ path execs ai-any; the proxy-up path exports
 ANTHROPIC_BASE_URL=http://127.0.0.1:7800 and ANTHROPIC_AUTH_TOKEN=token-proxy-managed
 and prefers $HOME/bin/claude.real.
 
-The 127.0.0.1:7800 probe is environment-dependent: on a host already running
-the real any-proxy the port is open, so the proxy-down path is exercised
-inside an unprivileged network namespace (unshare -Urn, where nothing listens
-on 7800); the proxy-up path uses the real listener or a throwaway socket
-bound by the test itself. No upstream traffic: the wrapper only opens and
+The tests select a private loopback port through AI_ANY_PROXY_PORT, so neither
+path depends on a real proxy. No upstream traffic: the wrapper only opens and
 closes the probe connection before exec, and the stubs never speak to it.
 """
 
 import os
-import shutil
 import socket
 import subprocess
 import tempfile
@@ -27,7 +23,6 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 WRAPPER = ROOT / "claude-any"
-ANY_PORT = 7800
 
 CAPTURE_STUB = """#!/usr/bin/env bash
 { env
@@ -44,20 +39,6 @@ PROVIDER_ALLOWLIST = {
 }
 # exported by claude-any itself, not inherited noise
 WRAPPER_OWN_EXPORTS = {"CLAUDE_CONFIG_DIR"}
-
-
-def port_open(port=ANY_PORT):
-    try:
-        with socket.create_connection(("127.0.0.1", port), timeout=0.3):
-            return True
-    except OSError:
-        return False
-
-
-def userns_net_available():
-    if not shutil.which("unshare"):
-        return False
-    return subprocess.run(["unshare", "-Urn", "true"], capture_output=True).returncode == 0
 
 
 class ClaudeAnyTest(unittest.TestCase):
@@ -79,13 +60,13 @@ class ClaudeAnyTest(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def run_wrapper(self, netns=False):
-        cmd = ["unshare", "-Urn"] if netns else []
-        cmd += [
+    def run_wrapper(self, port):
+        cmd = [
             "env", "-i",
             f"HOME={self.home}",
             f"PATH={self.stubbin}:/usr/bin:/bin",
             f"CAP_DIR={self.cap}",
+            f"AI_ANY_PROXY_PORT={port}",
             "CLAUDECODE=1",
             "CLAUDE_CODE_SSE_PORT=9",
             "CLAUDE_CODE_USE_BEDROCK=1",
@@ -112,31 +93,27 @@ class ClaudeAnyTest(unittest.TestCase):
         self.assertEqual(env.get("CLAUDE_CODE_SKIP_VERTEX_AUTH"), "1")
 
     def test_proxy_up_path(self):
-        listener = None
-        if not port_open():
-            listener = socket.socket()
-            listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            listener.bind(("127.0.0.1", ANY_PORT))
-            listener.listen(1)
+        listener = socket.socket()
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        port = listener.getsockname()[1]
         try:
-            self.run_wrapper()
+            self.run_wrapper(port)
         finally:
-            if listener is not None:
-                listener.close()
+            listener.close()
         env, argv = self.captured("claude.real")
         self.assertEqual(argv, ["--version"])
-        self.assertEqual(env.get("ANTHROPIC_BASE_URL"), f"http://127.0.0.1:{ANY_PORT}")
+        self.assertEqual(env.get("ANTHROPIC_BASE_URL"), f"http://127.0.0.1:{port}")
         self.assertEqual(env.get("ANTHROPIC_AUTH_TOKEN"), "token-proxy-managed")
         self.assertEqual(env.get("CLAUDE_CONFIG_DIR"), f"{self.home}/.claude")
         self.assert_env_hygiene(env)
 
     def test_proxy_down_falls_back_to_ai_any(self):
-        netns = False
-        if port_open():
-            if not userns_net_available():
-                self.skipTest("127.0.0.1:7800 is occupied and unshare -Urn is unavailable")
-            netns = True
-        self.run_wrapper(netns=netns)
+        unused = socket.socket()
+        unused.bind(("127.0.0.1", 0))
+        port = unused.getsockname()[1]
+        unused.close()
+        self.run_wrapper(port)
         env, argv = self.captured("ai-any")
         self.assertEqual(argv, ["--version"])
         self.assertNotIn("ANTHROPIC_BASE_URL", env)

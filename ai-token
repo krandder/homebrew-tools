@@ -109,7 +109,7 @@ config_mode() {
 }
 atomic_state_text() { # operation destination crash-label [operation args]; literal value on stdin
     python3 - "$@" 3<&0 <<'PY'
-import fcntl, glob, os, sys, tempfile
+import fcntl, glob, os, re, shutil, stat, sys, tempfile
 
 operation, destination, crash_label, *arguments = sys.argv[1:]
 directory = os.path.dirname(destination) or "."
@@ -119,6 +119,9 @@ lock_fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
 os.chmod(lock_path, 0o600)
 try:
     fcntl.flock(lock_fd, fcntl.LOCK_EX)
+    mode = 0o600
+    message = ""
+    replace_destination = destination
     if operation == "config":
         key, value = arguments
         lines = []
@@ -135,28 +138,50 @@ try:
             lines.append(f"{key}={value}")
         output = "\n".join(lines) + "\n"
     elif operation == "literal":
+        if arguments:
+            mode = int(arguments[0], 8)
         with os.fdopen(3) as source:
             output = source.read()
+    elif operation == "remove-alias":
+        name = arguments[0]
+        with open(destination) as source:
+            lines = source.readlines()
+        kept = [
+            line for line in lines
+            if not re.match(r"^\s*alias\s+" + re.escape(name) + r"=", line)
+        ]
+        if kept == lines:
+            raise SystemExit(0)
+        mode = stat.S_IMODE(os.stat(destination).st_mode)
+        backup_fd, message = tempfile.mkstemp(
+            prefix=os.path.basename(destination) + ".pre-claude-token.", dir=directory,
+        )
+        os.close(backup_fd)
+        shutil.copy2(destination, message)
+        output = "".join(kept)
+        if os.path.islink(destination):
+            replace_destination = os.path.realpath(destination)
     else:
         raise SystemExit("unknown text-state operation")
 
-    prefix = "." + os.path.basename(destination) + ".state-"
-    for stale in glob.glob(os.path.join(directory, prefix + "*")):
+    replace_directory = os.path.dirname(replace_destination) or "."
+    prefix = "." + os.path.basename(replace_destination) + ".state-"
+    for stale in glob.glob(os.path.join(replace_directory, prefix + "*")):
         try:
             os.unlink(stale)
         except FileNotFoundError:
             pass
-    fd, temporary = tempfile.mkstemp(prefix=prefix, dir=directory)
+    fd, temporary = tempfile.mkstemp(prefix=prefix, dir=replace_directory)
     try:
         with os.fdopen(fd, "w") as handle:
             handle.write(output)
             handle.flush()
             os.fsync(handle.fileno())
-        os.chmod(temporary, 0o600)
+        os.chmod(temporary, mode)
         if os.environ.get("AI_TOKEN_TEST_CRASH_AT") == f"before-{crash_label}-replace":
             os._exit(86)
-        os.replace(temporary, destination)
-        directory_fd = os.open(directory, os.O_RDONLY)
+        os.replace(temporary, replace_destination)
+        directory_fd = os.open(replace_directory, os.O_RDONLY)
         try:
             os.fsync(directory_fd)
         finally:
@@ -164,6 +189,8 @@ try:
     finally:
         if os.path.exists(temporary):
             os.unlink(temporary)
+    if message:
+        print(message)
 finally:
     os.close(lock_fd)
 PY
@@ -1214,14 +1241,15 @@ codex_cmd_run() { # [args...] follower launcher: freshen ~/.codex then exec code
 
 codex_cmd_install_wrapper() {
     mkdir -p "$AI_TOKEN_REAL_HOME/bin"
-    local w="$AI_TOKEN_REAL_HOME/bin/codex" bin
+    local w="$AI_TOKEN_REAL_HOME/bin/codex" backup="$AI_TOKEN_REAL_HOME/bin/codex.pre-codex-token" bin
     bin="$(shell_quote "$AI_TOKEN_SELF")"
-    if [ -e "$w" ] && [ ! -e "$w.pre-codex-token" ]; then mv "$w" "$w.pre-codex-token"; say "backed up existing wrapper -> $w.pre-codex-token"; fi
-    cat > "$w" <<EOF
+    if [ -f "$w" ] && [ ! -L "$w" ] && [ ! -e "$backup" ] && [ ! -L "$backup" ]; then
+        cp "$w" "$backup"; say "backed up existing wrapper -> $backup"
+    fi
+    atomic_state_text literal "$w" entrypoint 0755 <<EOF
 #!/usr/bin/env bash
 exec $bin codex run "\$@"
 EOF
-    chmod +x "$w"
     say "installed $w -> ai-token codex run"
     case ":$PATH:" in *":$AI_TOKEN_REAL_HOME/bin:"*) ;; *) say "NOTE: add \$HOME/bin to your PATH for 'codex' to resolve to the wrapper." ;; esac
 }
@@ -2088,14 +2116,15 @@ claude_cmd_run() { # [claude args...]  — follower launcher; falls back to norm
 
 claude_cmd_install_wrapper() {
     mkdir -p "$HOME/bin"
-    local w="$HOME/bin/claude" bin
+    local w="$HOME/bin/claude" backup="$HOME/bin/claude.pre-claude-token" bin
     bin="$(shell_quote "$AI_TOKEN_SELF")"
-    [ -e "$w" ] && [ ! -e "$w.pre-claude-token" ] && { mv "$w" "$w.pre-claude-token"; say "backed up existing -> $w.pre-claude-token"; }
-    cat > "$w" <<EOF
+    if [ -f "$w" ] && [ ! -L "$w" ] && [ ! -e "$backup" ] && [ ! -L "$backup" ]; then
+        cp "$w" "$backup"; say "backed up existing -> $backup"
+    fi
+    atomic_state_text literal "$w" entrypoint 0755 <<EOF
 #!/usr/bin/env bash
 exec $bin claude run "\$@"
 EOF
-    chmod +x "$w"
     say "installed $w -> ai-token claude run"
 }
 
@@ -2145,37 +2174,26 @@ write_follower_wrapper() { # profile path
         && grep -qF "$invocation" "$w" 2>/dev/null; then
         return
     fi
-    if [ -e "$w" ] && ! grep -qF "$marker" "$w" 2>/dev/null; then
+    if [ -f "$w" ] && [ ! -L "$w" ] && ! grep -qF "$marker" "$w" 2>/dev/null; then
         backup="$w.pre-claude-token"
-        [ ! -e "$backup" ] || backup="$backup.$(date +%s).$$"
-        mv "$w" "$backup"
+        if [ -e "$backup" ] || [ -L "$backup" ]; then
+            backup="$(mktemp "$backup.XXXXXXXX")"
+        fi
+        cp "$w" "$backup"
         say "backed up existing -> $backup"
     fi
-    cat > "$w" <<EOF
+    atomic_state_text literal "$w" entrypoint 0755 <<EOF
 #!/usr/bin/env bash
 $marker
 $invocation
 EOF
-    chmod +x "$w"
     say "installed $w"
 }
 remove_shadowing_aliases() { # profile
     local p="$1" rc backup
     for rc in "$CLAUDE_TOKEN_REAL_HOME/.zshrc" "$CLAUDE_TOKEN_REAL_HOME/.bashrc" "$CLAUDE_TOKEN_REAL_HOME/.bash_profile"; do
         [ -f "$rc" ] || continue
-        backup="$(python3 - "$rc" "claude-$p" <<'PY'
-import os, re, shutil, sys, time
-path, name = sys.argv[1:]
-lines = open(path).readlines()
-kept = [line for line in lines if not re.match(r"^\s*alias\s+" + re.escape(name) + r"=", line)]
-if kept != lines:
-    backup = f"{path}.pre-claude-token.{int(time.time())}"
-    shutil.copy2(path, backup)
-    with open(path, "w") as fh:
-        fh.writelines(kept)
-    print(backup)
-PY
-        )"
+        backup="$(atomic_state_text remove-alias "$rc" shell-rc "claude-$p" </dev/null)"
         [ -z "$backup" ] || say "removed shadowing alias from $rc (backup: $backup)"
     done
 }
@@ -2196,8 +2214,7 @@ claude_cmd_reinstall_follower_wrapper() { # profile
     if [ ! -f "$follower_config" ]; then
         [ -f "$main_config" ] || die "no vault configuration (run: claude-token add-follower $p)"
         mkdir -p "$(dirname "$follower_config")"
-        cp "$main_config" "$follower_config"
-        chmod 600 "$follower_config"
+        atomic_state_text literal "$follower_config" follower-config 0600 < "$main_config"
     fi
     use_follower_context "$p"
     set_config user "$p"
@@ -2298,15 +2315,15 @@ claude_cmd_install_maintenance() {
         label="com.krandder.claude-token-maintain"
         domain="gui/$(id -u)"
         mkdir -p "$plist_dir" "$CLAUDE_TOKEN_REAL_HOME/.claude-token/logs"
-        python3 - "$plist" "$label" "$bin" "$dir:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin" "$CLAUDE_TOKEN_REAL_HOME/.claude-token/logs/maintenance.log" "${CLAUDE_TOKEN_VAULT_AUTHORITY:-no}" <<'PY'
-import os, plistlib, sys
-path, label, binary, path_env, log, vault_authority = sys.argv[1:]
+        python3 - "$label" "$bin" "$dir:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin" "$CLAUDE_TOKEN_REAL_HOME/.claude-token/logs/maintenance.log" "${CLAUDE_TOKEN_VAULT_AUTHORITY:-no}" <<'PY' \
+            | atomic_state_text literal "$plist" entrypoint 0644
+import plistlib, sys
+label, binary, path_env, log, vault_authority = sys.argv[1:]
 data = {"Label": label, "ProgramArguments": [binary, "claude", "maintain"],
         "EnvironmentVariables": {"PATH": path_env}, "RunAtLoad": True,
         "StartInterval": 7200, "StandardOutPath": log, "StandardErrorPath": log}
 if vault_authority == "yes": data["EnvironmentVariables"]["CLAUDE_TOKEN_VAULT_AUTHORITY"] = "yes"
-with open(path, "wb") as fh: plistlib.dump(data, fh)
-os.chmod(path, 0o644)
+sys.stdout.buffer.write(plistlib.dumps(data))
 PY
         launchctl bootout "$domain/$label" >/dev/null 2>&1 || true
         launchctl bootstrap "$domain" "$plist"
@@ -2604,7 +2621,7 @@ claude_cmd_proxy_install() {
     unit_dir="$CLAUDE_TOKEN_REAL_HOME/.config/systemd/user"
     unit="$unit_dir/claude-token-proxy.service"
     mkdir -p "$unit_dir"
-    cat > "$unit" <<EOF
+    atomic_state_text literal "$unit" entrypoint 0644 <<EOF
 [Unit]
 Description=claude-token proxy (per-profile fresh OAuth token injection)
 After=network-online.target
@@ -2630,13 +2647,13 @@ claude_cmd_install_profile_wrapper() { # profile — standard wrapper with proxy
     validate_profile_name "$p"
     bin="$(shell_quote "$AI_TOKEN_SELF")"
     w="$CLAUDE_TOKEN_REAL_HOME/.local/bin/claude-$p"
-    if [ -e "$w" ]; then
-        backup="$w.bak-$(date +%Y%m%dT%H%M%S)"
+    if [ -f "$w" ] && [ ! -L "$w" ]; then
+        backup="$(mktemp "$(dirname "$w")/.$(basename "$w").bak-XXXXXXXX")"
         cp "$w" "$backup"
         say "backed up existing -> $backup"
     fi
     mkdir -p "$(dirname "$w")"
-    cat > "$w" <<EOF
+    atomic_state_text literal "$w" entrypoint 0755 <<EOF
 #!/bin/bash
 # Claude wrapper - $p profile (generated by claude-token install-profile-wrapper)
 
@@ -2662,7 +2679,6 @@ CLAUDE_BIN="\$REAL_HOME/bin/claude.real"
 
 exec env HOME="\$PROFILE_HOME" "\$CLAUDE_BIN" "\$@"
 EOF
-    chmod +x "$w"
     say "installed $w (auth: $(claude_cmd_proxy_url "$p"))"
 }
 

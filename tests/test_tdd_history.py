@@ -118,6 +118,45 @@ class TddHistoryTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("no preceding test-only red commit", result.stderr)
 
+    def test_rejects_a_production_commit_that_rewrites_the_red_test(self):
+        (self.repo / "tests" / "test_check.py").write_text(
+            "import pathlib\n"
+            "assert pathlib.Path('ai-token').read_text() == 'new\\n'\n"
+        )
+        self.commit("test: require real implementation")
+        (self.repo / "ai-token").write_text("unrelated\n")
+        (self.repo / "tests" / "test_check.py").write_text("assert True\n")
+        self.commit("feat: weaken test while changing production")
+
+        result = self.verify()
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("production commit also changes runnable tests", result.stderr)
+
+    def test_rejects_a_production_change_hidden_in_a_merge_commit(self):
+        original = subprocess.check_output(
+            ["git", "branch", "--show-current"], cwd=self.repo, text=True
+        ).strip()
+        subprocess.run(["git", "switch", "-qc", "side", self.base], cwd=self.repo, check=True)
+        (self.repo / "side.md").write_text("side\n")
+        self.commit("docs: side")
+        subprocess.run(["git", "switch", "-q", original], cwd=self.repo, check=True)
+        (self.repo / "main.md").write_text("main\n")
+        self.commit("docs: main")
+        subprocess.run(
+            ["git", "merge", "--no-ff", "--no-commit", "side"],
+            cwd=self.repo,
+            check=True,
+            stdout=subprocess.DEVNULL,
+        )
+        (self.repo / "ai-vault").write_text("hidden production\n")
+        self.commit("merge: hide production change")
+
+        result = self.verify()
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("merge commits are forbidden", result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -187,7 +187,7 @@ broad state-machine coverage, hard CI, production-shaped verification, and
 controlled release phases on 2026-07-20. He designated `canary-claude`, isolated
 homes on farol and agent-1, and the dedicated macOS account/keychain
 `ai-token-canary`. Protected runtime commit
-`9ccdf7408f6b555bd76c02d3e5dd653b0ec2db12` is installed and verified on all
+`21e16f96c654bd768c99053f7fd1be4fadd98f91` is installed and verified on all
 three hosts, and physical rollback/restore was exercised on each. The separate
 Anthropic account is `ai@futarchy.ai` with a Claude Max entitlement. Its OAuth
 credential is canonical only in the isolated farol vault; followers receive a
@@ -246,8 +246,14 @@ before the ACL lock. PR #42 preserved the deterministic failing lock-race test,
 routed initialization through the same atomic state mutator, passed the full
 and protected gates, and repeated exact three-host rollback/restore plus live
 lifecycle verification.
+The final follower-concurrency pass then proved that Kimi's predictable shared
+temporary paths could follow a stale symlink, overwrite unrelated state, and
+replace a credential with that symlink. PR #44 preserved the behavioral red
+test, routed all Kimi lifecycle writes through private locked generations,
+passed the complete and protected gates, and repeated the exact three-host
+promotion and live matrix.
 The clean 30-day window is pinned to release
-`9ccdf7408f6b-ed61d7a9cf29` from
+`21e16f96c654-d4de30c4a5f1` from
 2026-07-22 through
 2026-08-20 UTC, with the final gate eligible on 2026-08-21 UTC.
 
@@ -319,7 +325,9 @@ are recorded in `evidence/kimi-incident-replay-audit-2026-07-21.md` and
 writer closure and final protected promotion are recorded in
 `evidence/all-state-writer-promotion-2026-07-21.md`. The locked ACL bootstrap
 correction and superseding final soak pin are recorded in
-`evidence/locked-acl-bootstrap-promotion-2026-07-21.md`.
+`evidence/locked-acl-bootstrap-promotion-2026-07-21.md`. The private Kimi
+generation correction and final follower-safe soak pin are recorded in
+`evidence/private-kimi-generation-promotion-2026-07-21.md`.
 
 ## Post-characterization implementation language
 

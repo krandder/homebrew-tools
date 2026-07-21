@@ -18,7 +18,16 @@ PAYLOAD = (
     "claude-token",
     "codex-token",
     "setup-claude-token",
+    "ai-any",
     "claude-any",
+    "codex-any",
+    "kimi-any",
+    "claude-any-mirror",
+    "codex-any-mirror",
+    "kimi-any-mirror",
+    "any-proxy.mjs",
+    "codex-any-proxy.mjs",
+    "kimi-any-proxy.mjs",
     "Formula/ai-token.rb",
     "Formula/ai-vault.rb",
     "Formula/ai-vault-http.rb",
@@ -80,6 +89,9 @@ class ReleaseArtifactTest(unittest.TestCase):
             timeout=30,
         )
 
+    def test_ai_any_is_an_executable_release_entrypoint(self):
+        self.assertTrue((ROOT / "ai-any").stat().st_mode & 0o100)
+
     def test_clean_commit_build_is_deterministic_and_self_verifying(self):
         first = self.build()
         self.assertEqual(first.returncode, 0, first.stderr)
@@ -99,6 +111,7 @@ class ReleaseArtifactTest(unittest.TestCase):
                     manifest["files"][relative]["sha256"],
                     hashlib.sha256((self.source / relative).read_bytes()).hexdigest(),
                 )
+            self.assertEqual(manifest["files"]["ai-any"]["mode"], "0755")
 
         second = self.build()
         self.assertEqual(second.returncode, 0, second.stderr)

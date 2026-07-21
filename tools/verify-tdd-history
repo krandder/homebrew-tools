@@ -19,7 +19,16 @@ PRODUCTION = (
     "claude-token",
     "codex-token",
     "setup-claude-token",
+    "ai-any",
     "claude-any",
+    "codex-any",
+    "kimi-any",
+    "claude-any-mirror",
+    "codex-any-mirror",
+    "kimi-any-mirror",
+    "any-proxy.mjs",
+    "codex-any-proxy.mjs",
+    "kimi-any-proxy.mjs",
 )
 
 

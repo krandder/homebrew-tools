@@ -1,4 +1,5 @@
 import pathlib
+import runpy
 import subprocess
 import sys
 import tempfile
@@ -111,6 +112,23 @@ class TddHistoryTest(unittest.TestCase):
 
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("no preceding test-only red commit", result.stderr)
+
+    def test_treats_every_scoped_any_interface_as_production(self):
+        is_production = runpy.run_path(str(VERIFIER))["is_production"]
+        for path in (
+            "ai-any",
+            "claude-any",
+            "codex-any",
+            "kimi-any",
+            "claude-any-mirror",
+            "codex-any-mirror",
+            "kimi-any-mirror",
+            "any-proxy.mjs",
+            "codex-any-proxy.mjs",
+            "kimi-any-proxy.mjs",
+        ):
+            with self.subTest(path=path):
+                self.assertTrue(is_production(path), path)
 
     def test_rejects_a_red_candidate_that_also_changes_non_test_files(self):
         (self.repo / "tests" / "test_check.py").write_text(

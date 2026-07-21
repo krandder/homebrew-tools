@@ -349,6 +349,8 @@ predictable-path closure and superseding soak pin are recorded in
 generated-entrypoint, audit-writer, and HTTP-snapshot closure and superseding
 soak pin are recorded in
 `evidence/atomic-generated-state-promotion-2026-07-21.md`.
+The current requirement-by-requirement completion disposition is recorded in
+`evidence/completion-audit-2026-07-21-v3.md`.
 
 ## Post-characterization implementation language
 

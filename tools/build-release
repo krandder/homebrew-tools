@@ -95,7 +95,7 @@ def main():
     for relative in PAYLOAD:
         path = source / relative
         data = path.read_bytes()
-        mode = stat.S_IMODE(path.stat().st_mode)
+        mode = 0o755 if path.stat().st_mode & stat.S_IXUSR else 0o644
         contents[relative] = (data, mode)
         files[relative] = {"sha256": hashlib.sha256(data).hexdigest(), "mode": f"{mode:04o}"}
     manifest = {

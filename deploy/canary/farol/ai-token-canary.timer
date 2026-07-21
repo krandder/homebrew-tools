@@ -1,8 +1,8 @@
 [Unit]
-Description=Schedule daily ai-token leader lifecycle canary
+Description=Schedule ai-token leader lifecycle canary every two hours
 
 [Timer]
-OnCalendar=*-*-* 04:00:00 UTC
+OnCalendar=*-*-* 00/2:00:00 UTC
 Persistent=true
 AccuracySec=1min
 

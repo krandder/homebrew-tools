@@ -197,7 +197,12 @@ agent-1 inference through the isolated launcher also passed.
 
 M0 through M5 are complete. M6 is active: the Linux timers and the macOS
 dispatcher activation marker were enabled on 2026-07-21 UTC, and each scheduled
-entrypoint passed once. The first Mac run found a fresh-Keychain failure before
+entrypoint passed once. The farol leader publishes every two hours so the
+approved 15-minute agent-1 consumer cannot outlive an access-token generation;
+publishes with more than 2.5 hours remaining make no refresh request, and all
+actual refresh attempts remain behind the provider-wide cooldown. The agent-1
+and macOS lifecycle canaries remain daily. The first Mac run found a
+fresh-Keychain failure before
 the intended fallback account could create the Claude item. Pull transport had
 already returned a fresh sentinel-only credential; `security` then exited 44
 for the expected missing item and `set -euo pipefail` aborted. PR #19 preserved

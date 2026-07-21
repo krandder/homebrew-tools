@@ -46,8 +46,7 @@ def is_production(path):
 
 
 def is_test(path):
-    name = pathlib.PurePosixPath(path).name
-    return path.startswith("tests/") and name.startswith("test") and name.endswith((".py", ".sh"))
+    return path.startswith("tests/")
 
 
 def prove_red(commit, command):
@@ -104,7 +103,7 @@ def main():
             if changes_tests:
                 fail(
                     "production change has no preceding test-only red commit; "
-                    f"production commit also changes runnable tests: {commit}"
+                    f"production commit also changes test files: {commit}"
                 )
             if candidate is None:
                 fail(f"production change has no preceding test-only red commit: {commit}")

@@ -187,7 +187,7 @@ broad state-machine coverage, hard CI, production-shaped verification, and
 controlled release phases on 2026-07-20. He designated `canary-claude`, isolated
 homes on farol and agent-1, and the dedicated macOS account/keychain
 `ai-token-canary`. Protected runtime commit
-`253597d3255e1edb508e4f05ab79c1f201a146eb` is installed and verified on all
+`bdbd1babd9f8208cd1ff2f40fab4d1016855aca0` is installed and verified on all
 three hosts, and physical rollback/restore was exercised on each. The separate
 Anthropic account is `ai@futarchy.ai` with a Claude Max entitlement. Its OAuth
 credential is canonical only in the isolated farol vault; followers receive a
@@ -222,8 +222,14 @@ Keychain. Release `253597d3255e-052616a82b39` was installed, selected, and
 manually live-checked on all three hosts; the Mac passed both the one-time
 legacy snapshot migration and a subsequent Keychain-to-Keychain continuity
 cycle. The first genuinely unattended scheduler-native matrix then passed at
-04:00, 04:10, and 04:20 UTC on the same release. Therefore the clean 30-day
-window is
+04:00, 04:10, and 04:20 UTC on the same release. PR #34 then corrected the
+farol failure unit's unsupported incident category, passed protected CI, and
+repeated exact rollback/restore plus manual lifecycle verification on all
+three hosts. A real explicit agent-1 pull outside the lifecycle runner was
+retained as a `writer-continuity` failure before the designated runner
+re-established the chain; the consumer wrapper itself reads a temporary vault
+response and does not write the monitored credential. The clean 30-day window
+is pinned to release `bdbd1babd9f8-102ff6b0110f` from
 2026-07-22 through
 2026-08-20 UTC, with the final gate eligible on 2026-08-21 UTC.
 
@@ -275,8 +281,12 @@ recorded in `evidence/physical-canary-deployment-2026-07-20.md`,
 `evidence/canonical-release-promotion-2026-07-20.md`, and
 `evidence/canonical-incident-routing-2026-07-20.md`. Credential activation and
 the M6 clock are recorded in
-`evidence/live-canary-activation-2026-07-21.md`. Failed pre-activation and
-pre-fix records remain retained and do not count toward the clean window.
+`evidence/live-canary-activation-2026-07-21.md`; the post-unattended alert audit,
+taxonomy fix, final pre-window promotion, and real writer-continuity detection
+are recorded in
+`evidence/post-unattended-incident-audit-2026-07-21.md`. Failed pre-activation,
+pre-fix, and activation-day records remain retained and do not count toward the
+clean window.
 
 ## Post-characterization implementation language
 

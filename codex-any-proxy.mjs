@@ -49,6 +49,21 @@ function jwtExp(token) {
 
 const SHARED_DIR = process.env.CODEX_SHARED_DIR || `${HOME}/shared/codex-tokens`;
 
+function jwtClaims(token) {
+  try {
+    const part = token.split(".")[1].replace(/-/g, "+").replace(/_/g, "/");
+    return JSON.parse(Buffer.from(part, "base64").toString());
+  } catch { return {}; }
+}
+
+function planOf(d) {
+  // plan from the id_token's own claims (no static list): "plus" / "pro" /
+  // "free" / null when undecodable. Free is excluded; undecodable fails open.
+  const claims = jwtClaims((d.tokens || {}).id_token || "");
+  const auth = claims["https://api.openai.com/auth"] || {};
+  return auth.chatgpt_plan_type || auth.plan_type || null;
+}
+
 function freshToken(profile) {
   // leader layout first, then the published shared file (vault-enrolled
   // profiles with no local dir still serve once published).
@@ -58,7 +73,9 @@ function freshToken(profile) {
   if (!d || !d.tokens || !d.tokens.access_token) return null;
   const at = d.tokens.access_token;
   if (jwtExp(at) - nowS() < MIN_FRESH_S) return null;
-  return { token: at, accountId: d.tokens.account_id || null };
+  const plan = planOf(d);
+  if (plan === "free" || plan === "chatgptfreeplan") return null;  // unpaid accounts never serve
+  return { token: at, accountId: d.tokens.account_id || null, plan };
 }
 
 function profiles() {

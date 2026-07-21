@@ -44,8 +44,10 @@ sanitized vault route into the incident pipeline, while human profiles and
 credential-bearing evidence fields cannot enter that path.
 
 `test_tdd_history.py` proves a production-changing pull request cannot pass the
-release gate unless an earlier `test:` commit changed only runnable tests and
-the complete suite actually failed at that commit.
+release gate unless an earlier `test:` commit changed only the `tests/` tree
+and the complete suite actually failed at that commit. The paired production
+commit cannot rewrite any test, fixture, helper, or runner. `run-unittest`
+makes skips and expected failures nonzero suite results.
 
 `test_ai_token_soak_evidence.py` pins the 30-day exit gate: every required
 host/role must have a scheduler-marked successful record on every UTC day, all

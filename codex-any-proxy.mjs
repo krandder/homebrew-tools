@@ -47,8 +47,14 @@ function jwtExp(token) {
   } catch { return 0; }
 }
 
+const SHARED_DIR = process.env.CODEX_SHARED_DIR || `${HOME}/shared/codex-tokens`;
+
 function freshToken(profile) {
-  const d = readJson(`${PROFILES_DIR}/${profile}/.codex/auth.json`);
+  // leader layout first, then the published shared file (vault-enrolled
+  // profiles with no local dir still serve once published).
+  let d = readJson(`${PROFILES_DIR}/${profile}/.codex/auth.json`);
+  if (!d || !d.tokens || !d.tokens.access_token)
+    d = readJson(`${SHARED_DIR}/${profile}.json`);
   if (!d || !d.tokens || !d.tokens.access_token) return null;
   const at = d.tokens.access_token;
   if (jwtExp(at) - nowS() < MIN_FRESH_S) return null;
@@ -56,10 +62,19 @@ function freshToken(profile) {
 }
 
 function profiles() {
+  // profile universe: local leader layout ∪ published shared files
+  const names = new Set();
   try {
-    return readdirSync(PROFILES_DIR).filter((p) =>
-      !p.startsWith(".") && existsSync(`${PROFILES_DIR}/${p}/.codex/auth.json`));
-  } catch { return []; }
+    readdirSync(PROFILES_DIR).forEach((p) => {
+      if (!p.startsWith(".") && existsSync(`${PROFILES_DIR}/${p}/.codex/auth.json`)) names.add(p);
+    });
+  } catch {}
+  try {
+    readdirSync(SHARED_DIR).forEach((fn) => {
+      if (fn.endsWith(".json") && !fn.includes(".sync-conflict-")) names.add(fn.slice(0, -5));
+    });
+  } catch {}
+  return [...names];
 }
 
 function pickAny(state, exclude) {
@@ -153,14 +168,55 @@ function relayHeaders(up) {
   return outHeaders;
 }
 
-async function streamBack(res, up) {
+async function streamBack(res, up, profile, reqUrl) {
   res.writeHead(up.status, relayHeaders(up));
+  // usage tap: buffer successful responses so per-request token counts land in
+  // any-usage.jsonl with the TRUE serving profile.
+  const tap = (up.status === 200 && profile) ? [] : null;
   if (up.body) {
     for await (const chunk of up.body) {
+      if (tap) tap.push(chunk);
       if (!res.write(chunk)) await new Promise((resolve) => res.once("drain", resolve));
     }
   }
   res.end();
+  if (tap) recordUsage(profile, Buffer.concat(tap).toString("utf8"), up.headers.get("content-type") || "");
+}
+
+const USAGE_LOG = `${PROFILES_DIR}/any-usage.jsonl`;
+
+function usageFromResponsesAPI(text, isSSE) {
+  // codex backend (Responses API): SSE ends with response.completed carrying
+  // the full response object; non-stream returns it directly.
+  let resp = null;
+  if (isSSE) {
+    for (const line of text.split("\n")) {
+      if (!line.startsWith("data:")) continue;
+      let ev; try { ev = JSON.parse(line.slice(5).trim()); } catch { continue; }
+      if (ev.type === "response.completed" && ev.response) resp = ev.response;
+    }
+  } else {
+    try { resp = JSON.parse(text); } catch { resp = null; }
+  }
+  if (!resp || !resp.usage || !resp.id) return null;
+  const u = resp.usage;
+  const cached = (u.input_tokens_details || {}).cached_tokens || 0;
+  return { id: resp.id, model: resp.model,
+           input_tokens: Math.max(0, (u.input_tokens || 0) - cached),
+           output_tokens: u.output_tokens || 0,
+           cache_read: cached, cache_write_5m: 0, cache_write_1h: 0 };
+}
+
+function recordUsage(profile, text, contentType) {
+  try {
+    const u = usageFromResponsesAPI(text, contentType.includes("text/event-stream"));
+    if (!u) return;
+    appendFileSync(USAGE_LOG, JSON.stringify({
+      source: "codex-proxy", profile, ts: Date.now() / 1000, request_id: u.id,
+      model: u.model, input_tokens: u.input_tokens, output_tokens: u.output_tokens,
+      cache_read: u.cache_read, cache_write_5m: 0, cache_write_1h: 0,
+    }) + "\n");
+  } catch {}
 }
 
 function log(profile, method, path, status) {
@@ -194,7 +250,7 @@ async function handleAny(req, res) {
       continue;
     }
     markUsed(pick.profile);
-    await streamBack(res, up);
+    await streamBack(res, up, pick.profile, req.url);
     log(`any(${pick.profile})`, req.method, req.url, up.status);
     return;
   }
@@ -202,6 +258,19 @@ async function handleAny(req, res) {
     ? `codex-any-proxy: upstream error: ${lastErr.message || lastErr}`
     : "codex-any-proxy: no healthy profile available";
   const status = lastErr ? 502 : 503;
+  if (!lastErr) {
+    anyLog("pool-empty", { tried: [...tried] });
+    const s = loadState();
+    const last = s.pool_alert_last || 0;
+    if (nowS() - last > 1800) {
+      s.pool_alert_last = nowS();
+      saveState(s);
+      execFile(`${HOME}/.local/bin/fleet-msg`, ["send", "--to", "kelvin",
+        "--from", "codex-any-proxy", "--kind", "notify", "--create-actor",
+        "--body", `codex any-proxy pool EMPTY (503): no healthy profile available; tried=[${[...tried].join(",")}]`],
+        () => {});
+    }
+  }
   res.writeHead(status, { "content-type": "text/plain", "content-length": Buffer.byteLength(msg) });
   res.end(msg);
   log("any", req.method, req.url, status);

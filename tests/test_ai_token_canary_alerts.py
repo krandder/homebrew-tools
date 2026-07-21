@@ -141,7 +141,10 @@ class CanaryAlertTest(unittest.TestCase):
                 self.assertEqual(len(stored), 1)
                 self.assertEqual(json.loads(stored[0].read_text()), {**alert, "vault_user": "follower-a"})
                 self.assertTrue(calls.is_file())
-                self.assertIn("ai-token canary failed on agent-1", calls.read_text())
+                incident_args = json.loads(calls.read_text().splitlines()[0])
+                self.assertIn("ai-token canary failed on agent-1", incident_args)
+                category = incident_args.index("--category")
+                self.assertEqual(incident_args[category + 1], "health-check-fail")
 
                 alert["profile"] = "human-profile"
                 rejected = urllib.request.Request(

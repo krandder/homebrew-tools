@@ -63,6 +63,11 @@ class CanaryDeploymentAssetsTest(unittest.TestCase):
             unit,
         )
 
+    def test_farol_on_failure_uses_the_canonical_incident_category(self):
+        unit = (ROOT / "deploy/canary/farol/ai-token-canary-alert@.service").read_text()
+        self.assertIn("--category health-check-fail", unit)
+        self.assertNotIn("--category auth-credential", unit)
+
     def test_macos_dispatch_switches_uid_and_unlocks_only_canary_keychain(self):
         root = ROOT / "deploy" / "canary" / "macos"
         dispatcher = (root / "com.futarchy.ai-token-canary-dispatch.plist").read_text()

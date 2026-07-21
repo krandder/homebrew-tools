@@ -137,6 +137,27 @@ class ReleaseArtifactTest(unittest.TestCase):
         self.assertIn("tracked worktree is dirty", result.stderr)
         self.assertFalse(self.output.exists())
 
+    def test_checksum_replacement_never_follows_a_destination_symlink(self):
+        first = self.build()
+        self.assertEqual(first.returncode, 0, first.stderr)
+        archive = next(self.output.glob("*.zip"))
+        checksum = pathlib.Path(f"{archive}.sha256")
+        checksum.unlink()
+        victim = self.root / "unrelated-checksum-target"
+        victim.write_text("do-not-touch\n")
+        checksum.symlink_to(victim)
+        before = victim.read_bytes()
+
+        second = self.build()
+
+        self.assertEqual(second.returncode, 0, second.stderr)
+        self.assertEqual(victim.read_bytes(), before)
+        self.assertFalse(checksum.is_symlink())
+        self.assertEqual(
+            checksum.read_text(),
+            f"{hashlib.sha256(archive.read_bytes()).hexdigest()}  {archive.name}\n",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

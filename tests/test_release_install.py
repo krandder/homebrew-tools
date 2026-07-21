@@ -159,6 +159,24 @@ class ReleaseInstallTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("regular file", result.stderr)
 
+    def test_deployment_audit_never_follows_a_destination_symlink(self):
+        self.install_root.mkdir()
+        victim = self.directory / "unrelated-deployment-audit-target"
+        victim.write_text("do-not-touch\n")
+        audit = self.install_root / "deployments.jsonl"
+        audit.symlink_to(victim)
+        before = victim.read_bytes()
+        archive, _commit, _digest = self.make_release(7)
+
+        result = self.run_installer("install", archive)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(victim.read_bytes(), before)
+        self.assertFalse(audit.is_symlink())
+        records = [json.loads(line) for line in audit.read_text().splitlines()]
+        self.assertEqual([record["action"] for record in records], ["install-intent", "install"])
+        self.assertEqual(stat.S_IMODE(audit.stat().st_mode), 0o600)
+
 
 if __name__ == "__main__":
     unittest.main()

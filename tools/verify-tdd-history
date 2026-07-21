@@ -19,6 +19,7 @@ PRODUCTION = (
     "claude-token",
     "codex-token",
     "setup-claude-token",
+    "claude-any",
 )
 
 

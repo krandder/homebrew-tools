@@ -1,0 +1,243 @@
+#!/usr/bin/env python3
+"""Atomically collect every retained ai-token canary record from three hosts."""
+
+import argparse
+import datetime
+import hashlib
+import json
+import os
+import pathlib
+import re
+import secrets
+import shlex
+import shutil
+import stat
+import subprocess
+import sys
+import tarfile
+import tempfile
+
+
+SOURCES = ("farol", "agent-1", "macos")
+NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*\.json$")
+MAX_RECORD_SIZE = 1024 * 1024
+MAX_RECORDS = 100000
+FAROL_DIR = pathlib.Path("/home/kelvin/.ai-token-canary/evidence")
+AGENT_HOST = "box-agent-1"
+AGENT_DIR = "/home/kas/.ai-token-canary/evidence"
+MAC_HOST = "macbook"
+MAC_DIR = "/Users/ai-token-canary/.local/state/ai-token-canary/evidence"
+MAC_SWITCH = "/Users/Shared/run-as-ai-token-canary.expect"
+
+
+def fail(message):
+    print(f"collect-live-soak: {message}", file=sys.stderr)
+    raise SystemExit(1)
+
+
+def archive_argument(value):
+    source, separator, raw_path = value.partition("=")
+    if not separator or source not in SOURCES or not raw_path:
+        raise argparse.ArgumentTypeError("expected farol=PATH, agent-1=PATH, or macos=PATH")
+    return source, pathlib.Path(raw_path)
+
+
+def archive_records(source, archive):
+    if archive.is_symlink() or not archive.is_file():
+        fail(f"{source} archive must be a regular non-symlink file")
+    records = []
+    names = set()
+    try:
+        with tarfile.open(archive, "r:*") as bundle:
+            for member in bundle:
+                raw_name = member.name[2:] if member.name.startswith("./") else member.name
+                if raw_name in {"", "."} and member.isdir():
+                    continue
+                path = pathlib.PurePosixPath(raw_name)
+                if (
+                    not member.isfile()
+                    or len(path.parts) != 1
+                    or not NAME.fullmatch(raw_name)
+                    or raw_name.startswith("._")
+                    or stat.S_IMODE(member.mode) != 0o600
+                    or raw_name in names
+                    or member.size < 0
+                    or member.size > MAX_RECORD_SIZE
+                ):
+                    fail(f"unsafe {source} archive member: {member.name}")
+                handle = bundle.extractfile(member)
+                if handle is None:
+                    fail(f"unreadable {source} archive member: {member.name}")
+                data = handle.read(MAX_RECORD_SIZE + 1)
+                if len(data) != member.size:
+                    fail(f"invalid {source} archive member size: {member.name}")
+                try:
+                    record = json.loads(data)
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    fail(f"invalid JSON evidence: {member.name}")
+                if not isinstance(record, dict):
+                    fail(f"evidence must be a JSON object: {member.name}")
+                names.add(raw_name)
+                records.append((raw_name, data))
+                if len(records) > MAX_RECORDS:
+                    fail(f"too many records in {source} archive")
+    except (OSError, tarfile.TarError) as error:
+        fail(f"cannot read {source} archive: {error}")
+    if not records:
+        fail(f"empty {source} archive")
+    return records
+
+
+def write_file(path, data):
+    with path.open("xb") as handle:
+        handle.write(data)
+        handle.flush()
+        os.fsync(handle.fileno())
+    path.chmod(0o600)
+
+
+def collect(output, archives):
+    if output.exists() or output.is_symlink():
+        fail("output must not already exist")
+    parent = output.parent.resolve()
+    if not parent.is_dir() or output.name in {"", ".", ".."}:
+        fail("output parent must be an existing directory")
+    stage = pathlib.Path(tempfile.mkdtemp(prefix=f".{output.name}.", dir=parent))
+    stage.chmod(0o700)
+    try:
+        files = {}
+        counts = {}
+        for source in SOURCES:
+            records = archive_records(source, archives[source])
+            counts[source] = len(records)
+            for name, data in records:
+                if name in files:
+                    fail(f"duplicate evidence filename across hosts: {name}")
+                write_file(stage / name, data)
+                files[name] = {
+                    "source": source,
+                    "size": len(data),
+                    "sha256": hashlib.sha256(data).hexdigest(),
+                }
+        manifest = {
+            "schema": 1,
+            "collected_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "sources": counts,
+            "files": dict(sorted(files.items())),
+        }
+        write_file(
+            stage / "COLLECTION.manifest",
+            (json.dumps(manifest, indent=2, sort_keys=True) + "\n").encode(),
+        )
+        os.replace(stage, output)
+    except BaseException:
+        shutil.rmtree(stage, ignore_errors=True)
+        raise
+    print(json.dumps({
+        "status": "ok",
+        "output": str(output),
+        "records": len(files),
+        "sources": counts,
+    }, separators=(",", ":"), sort_keys=True))
+
+
+def run(command, *, required=True):
+    try:
+        result = subprocess.run(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=180,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        if required:
+            fail("live evidence transport failed")
+        return False
+    if result.returncode != 0 and required:
+        fail("live evidence transport failed")
+    return result.returncode == 0
+
+
+def make_local_archive(directory, archive):
+    if directory.is_symlink() or not directory.is_dir():
+        fail("farol evidence directory is unavailable")
+    paths = sorted(directory.iterdir())
+    if not paths:
+        fail("farol evidence directory is empty")
+    with tarfile.open(archive, "w") as bundle:
+        for path in paths:
+            metadata = path.lstat()
+            if not stat.S_ISREG(metadata.st_mode):
+                fail(f"unsafe farol evidence entry: {path.name}")
+            info = tarfile.TarInfo(path.name)
+            info.mode = stat.S_IMODE(metadata.st_mode)
+            info.size = metadata.st_size
+            with path.open("rb") as handle:
+                bundle.addfile(info, handle)
+
+
+def remote_command(host, command):
+    run(["ssh", host, command])
+
+
+def remote_copy(host, remote, local):
+    run(["scp", f"{host}:{remote}", str(local)])
+
+
+def live_archives(directory):
+    suffix = secrets.token_hex(8)
+    archives = {
+        "farol": directory / "farol.tar",
+        "agent-1": directory / "agent-1.tar",
+        "macos": directory / "macos.tar",
+    }
+    agent_stage = f"/tmp/ai-token-soak-{suffix}.tar"
+    mac_stage = f"/Users/Shared/ai-token-soak-{suffix}.tar"
+    make_local_archive(FAROL_DIR, archives["farol"])
+    try:
+        agent_create = (
+            f"/usr/bin/tar -C {shlex.quote(AGENT_DIR)} -cf {shlex.quote(agent_stage)} . "
+            f"&& /bin/chmod 600 {shlex.quote(agent_stage)}"
+        )
+        remote_command(AGENT_HOST, agent_create)
+        remote_copy(AGENT_HOST, agent_stage, archives["agent-1"])
+
+        mac_create = (
+            f"/usr/bin/env COPYFILE_DISABLE=1 /usr/bin/tar -C {shlex.quote(MAC_DIR)} "
+            f"-cf {shlex.quote(mac_stage)} . && /usr/bin/chgrp staff {shlex.quote(mac_stage)} "
+            f"&& /bin/chmod 640 {shlex.quote(mac_stage)}"
+        )
+        mac_remote = f"{shlex.quote(MAC_SWITCH)} {shlex.quote(mac_create)}"
+        remote_command(MAC_HOST, mac_remote)
+        remote_copy(MAC_HOST, mac_stage, archives["macos"])
+    finally:
+        run(["ssh", AGENT_HOST, f"/bin/rm -f {shlex.quote(agent_stage)}"], required=False)
+        mac_remove = f"/bin/rm -f {mac_stage}"
+        run(
+            ["ssh", MAC_HOST, f"{shlex.quote(MAC_SWITCH)} {shlex.quote(mac_remove)}"],
+            required=False,
+        )
+    return archives
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--output", required=True, type=pathlib.Path)
+    parser.add_argument("--live-fleet", action="store_true")
+    parser.add_argument("--archive", action="append", type=archive_argument, default=[])
+    args = parser.parse_args()
+    if args.live_fleet == bool(args.archive):
+        fail("choose exactly one of --live-fleet or three --archive arguments")
+    with tempfile.TemporaryDirectory(prefix="ai-token-soak-collect-") as temporary:
+        if args.live_fleet:
+            archives = live_archives(pathlib.Path(temporary))
+        else:
+            archives = dict(args.archive)
+            if set(archives) != set(SOURCES) or len(args.archive) != len(SOURCES):
+                fail("archives must name farol, agent-1, and macos exactly once")
+        collect(args.output, archives)
+
+
+if __name__ == "__main__":
+    main()

@@ -253,6 +253,24 @@ class SoakEvidenceTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("writer continuity", result.stderr)
 
+    def test_keychain_metadata_is_validated_without_credential_contents(self):
+        keychain = {"keychain": {
+            "exists": True,
+            "store": "keychain",
+            "account": "ai-token-canary",
+            "created": "20260721021459Z",
+            "modified": "20260721031743Z",
+        }}
+        self.populate()
+        path = next(self.evidence.glob("2026-07-21-agent-1-follower-*.json"))
+        record = json.loads(path.read_text())
+        record["state_before"] = keychain
+        path.write_text(json.dumps(record))
+        path.chmod(0o600)
+        result = self.run_verifier()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("writer continuity", result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -274,6 +274,56 @@ class LiveCanaryTest(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 runner.load_config(self.config)
 
+    def test_macos_snapshots_real_keychain_metadata_without_reading_password(self):
+        loader = importlib.machinery.SourceFileLoader("keychain_canary_runner", str(RUNNER))
+        spec = importlib.util.spec_from_loader(loader.name, loader)
+        runner = importlib.util.module_from_spec(spec)
+        loader.exec_module(runner)
+        metadata = '''keychain: "/Users/ai-token-canary/Library/Keychains/ai-token-canary.keychain-db"
+attributes:
+    "acct"<blob>="ai-token-canary"
+    "cdat"<timedate>=0x00  "20260721021459Z\\000"
+    "mdat"<timedate>=0x00  "20260721031743Z\\000"
+'''
+        completed = types.SimpleNamespace(returncode=0, stdout=metadata)
+        with mock.patch.object(runner.subprocess, "run", return_value=completed) as execute:
+            snapshot = runner.snapshot_macos_keychain("ai-token-canary")
+        command = execute.call_args.args[0]
+        self.assertEqual(command, [
+            "/usr/bin/security", "find-generic-password",
+            "-s", "Claude Code-credentials",
+        ])
+        self.assertNotIn("-w", command)
+        self.assertNotIn("-g", command)
+        self.assertEqual(snapshot, {"keychain": {
+            "exists": True,
+            "store": "keychain",
+            "account": "ai-token-canary",
+            "created": "20260721021459Z",
+            "modified": "20260721031743Z",
+        }})
+
+    def test_only_legacy_file_to_keychain_snapshot_migration_is_tolerated(self):
+        loader = importlib.machinery.SourceFileLoader("keychain_migration_runner", str(RUNNER))
+        spec = importlib.util.spec_from_loader(loader.name, loader)
+        runner = importlib.util.module_from_spec(spec)
+        loader.exec_module(runner)
+        legacy = {"local": {"exists": False}}
+        keychain = {"keychain": {
+            "exists": True,
+            "store": "keychain",
+            "account": "ai-token-canary",
+            "created": "20260721021459Z",
+            "modified": "20260721031743Z",
+        }}
+        config = {"role": "follower", "os_user": "ai-token-canary"}
+        with mock.patch.object(runner.platform, "system", return_value="Darwin"):
+            self.assertTrue(runner.credential_states_continuous(config, legacy, keychain))
+            self.assertTrue(runner.credential_states_continuous(config, keychain, keychain))
+            changed = json.loads(json.dumps(keychain))
+            changed["keychain"]["modified"] = "20260721040000Z"
+            self.assertFalse(runner.credential_states_continuous(config, keychain, changed))
+
     def test_failure_evidence_discards_command_output_and_stops(self):
         self.write_config("follower")
         self.fail_action.write_text("pull")

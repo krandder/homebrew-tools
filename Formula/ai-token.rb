@@ -1,9 +1,9 @@
 class AiToken < Formula
   desc "One credential-sync tool for AI CLIs (claude, codex, kimi) via the vault"
   homepage "https://github.com/krandder/homebrew-tools"
-  url "https://raw.githubusercontent.com/krandder/homebrew-tools/7469d19215aa8c8256f099f678847e70fd9865eb/ai-token"
-  version "3.1.7"
-  sha256 "8ebf7613d57178182e9a38122b38946b87677da67687fc356d42bb2dc19aa05a"
+  url "https://raw.githubusercontent.com/krandder/homebrew-tools/30e002497a766f24e1e5990698928b37ff41028d/ai-token"
+  version "3.1.8"
+  sha256 "52b74857d9708ad5f502592d6d8a1232c9da0a3d436917675a3118a043f665b3"
 
   # The whole formula installs from the same immutable merge commit so all
   # files are guaranteed to be available together.

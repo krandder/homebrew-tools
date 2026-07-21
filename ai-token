@@ -330,11 +330,52 @@ kimi_expiry_of()   { python3 -c 'import json,sys; print(int(json.load(open(sys.a
 kimi_access_of()   { python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("access_token",""))' "$1" 2>/dev/null; }
 kimi_authority_of() { python3 -c 'import json,sys; print((json.load(open(sys.argv[1])).get("kimiTokenSync") or {}).get("refreshAuthority", "vault"))' "$1" 2>/dev/null; }
 
-kimi_write_store() { # json_str dest — atomic, 0600
-    python3 -c 'import json,os,sys
-d=json.loads(sys.argv[1])
-tmp=sys.argv[2]+".tmp"
-json.dump(d,open(tmp,"w"),indent=2); os.chmod(tmp,0o600); os.replace(tmp,sys.argv[2])' "$1" "$2"
+kimi_write_json() { # operation source destination [operation args]
+    python3 - "$@" <<'PY'
+import datetime, fcntl, glob, json, os, sys, tempfile
+
+operation, source, destination, *arguments = sys.argv[1:]
+directory = os.path.dirname(destination) or "."
+os.makedirs(directory, exist_ok=True)
+with open(destination + ".lock", "a+") as lock:
+    os.chmod(destination + ".lock", 0o600)
+    fcntl.flock(lock, fcntl.LOCK_EX)
+    with open(source) as handle:
+        data = json.load(handle)
+    if not isinstance(data, dict):
+        raise SystemExit("kimi credential must be a JSON object")
+    if operation == "copy":
+        pass
+    elif operation == "follower":
+        sentinel, profile, leader = arguments
+        data["refresh_token"] = sentinel
+        data["profile"] = profile
+        data["leader"] = leader
+        data["published_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    elif operation == "sentinel":
+        data["refresh_token"] = arguments[0]
+    else:
+        raise SystemExit("unknown Kimi JSON operation")
+
+    prefix = "." + os.path.basename(destination) + ".token-"
+    for stale in glob.glob(os.path.join(directory, prefix + "*")):
+        try:
+            os.unlink(stale)
+        except FileNotFoundError:
+            pass
+    fd, temporary = tempfile.mkstemp(prefix=prefix, dir=directory)
+    try:
+        with os.fdopen(fd, "w") as handle:
+            json.dump(data, handle, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, destination)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+PY
 }
 
 kimi_needs_refresh() { # file -> yes/no (60s margin)
@@ -368,7 +409,7 @@ PY
 
 kimi_refresh_store_unlocked() { # creds_file — refresh in place (atomic). Verified endpoint.
     python3 - "$1" "$KIMI_CLIENT_ID" "$(kimi_oauth_host)" <<'PY'
-import datetime, email.utils, json, os, sys, time, urllib.request, urllib.parse, urllib.error
+import datetime, email.utils, json, os, sys, tempfile, time, urllib.request, urllib.parse, urllib.error
 f, client_id, host = sys.argv[1], sys.argv[2], sys.argv[3].rstrip("/")
 creds = json.load(open(f))
 rt = creds.get("refresh_token", "")
@@ -403,8 +444,19 @@ new["expires_in"] = int(tok.get("expires_in", 900))
 new["expires_at"] = int(float(os.environ.get("AI_TOKEN_TEST_NOW") or time.time())) + new["expires_in"]
 if tok.get("scope"): new["scope"] = tok["scope"]
 if tok.get("token_type"): new["token_type"] = tok["token_type"]
-tmp = f + ".tmp"
-json.dump(new, open(tmp, "w"), indent=2); os.chmod(tmp, 0o600); os.replace(tmp, f)
+directory = os.path.dirname(f) or "."
+fd, temporary = tempfile.mkstemp(prefix="." + os.path.basename(f) + ".token-", dir=directory)
+try:
+    with os.fdopen(fd, "w") as handle:
+        json.dump(new, handle, indent=2)
+        handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, f)
+finally:
+    if os.path.exists(temporary):
+        os.unlink(temporary)
 print("refreshed (expires_in=%ds)" % new["expires_in"])
 PY
 }
@@ -443,15 +495,6 @@ kimi_local_refresh_mode() { # owner/follower/missing for the LIVE local store
     [ -f "$KIMI_STORE" ] || { echo missing; return; }
     local rt; rt="$(kimi_rt_of "$KIMI_STORE")"
     case "$rt" in "$SENTINEL_RT"|"") echo follower ;; *) echo owner ;; esac
-}
-
-kimi_make_follower_copy() { # src_file dest — strip RT to sentinel
-    python3 - "$1" "$2" "$SENTINEL_RT" <<'PY'
-import json,os,sys
-s,d,sentinel=sys.argv[1],sys.argv[2],sys.argv[3]
-creds=json.load(open(s)); creds["refresh_token"]=sentinel
-tmp=d+".tmp"; json.dump(creds,open(tmp,"w"),indent=2); os.chmod(tmp,0o600); os.replace(tmp,d)
-PY
 }
 
 # ---- kimi orchestration ----
@@ -503,14 +546,7 @@ kimi_cmd_publish() {
         kimi_refresh_store "$src" "$p" || { log_event refresh "$p" failed "endpoint"; die "publish: kimi refresh failed"; }
         log_event refresh "$p" ok "$src"
     fi
-    kimi_make_follower_copy "$src" "$sf"
-    python3 - "$sf" "$p" "$(short_host)" <<'PY'
-import json,sys,datetime,os
-sf,p,host=sys.argv[1],sys.argv[2],sys.argv[3]
-d=json.load(open(sf)); d["profile"]=p; d["leader"]=host
-d["published_at"]=datetime.datetime.now(datetime.timezone.utc).isoformat()
-tmp=sf+".tmp"; json.dump(d,open(tmp,"w"),indent=2); os.chmod(tmp,0o600); os.replace(tmp,sf)
-PY
+    kimi_write_json follower "$src" "$sf" "$SENTINEL_RT" "$p" "$(short_host)"
     say "published kimi:$p -> $sf"
     log_event publish "$p" ok "shared"
 }
@@ -563,13 +599,7 @@ kimi_cmd_pull() {
         ssh_vault "ai-vault serve kimi:$p" > "$tmp" || { rm -f "$tmp"; die "pull: leader denied/unavailable for kimi:$p"; }
         sf="$tmp"
     fi
-    mkdir -p "$(dirname "$KIMI_STORE")"
-    python3 - "$sf" "$KIMI_STORE" <<'PY'
-import json,os,sys
-s,d=sys.argv[1],sys.argv[2]
-creds=json.load(open(s))
-tmp=d+".tmp"; json.dump(creds,open(tmp,"w"),indent=2); os.chmod(tmp,0o600); os.replace(tmp,d)
-PY
+    kimi_write_json copy "$sf" "$KIMI_STORE"
     [ -z "${tmp:-}" ] || rm -f "$tmp"
     say "pulled kimi:$p into the local store"
     log_event pull "$p" ok ""
@@ -588,12 +618,7 @@ kimi_cmd_push() {
         need_cmd ssh
         kimi_read_store "$KIMI_STORE" | ssh_vault "ai-vault receive kimi:$p" || die "push: leader rejected kimi:$p"
     fi
-    python3 - "$KIMI_STORE" "$SENTINEL_RT" <<'PY'
-import json,os,sys
-f,s=sys.argv[1],sys.argv[2]
-d=json.load(open(f)); d["refresh_token"]=s
-tmp=f+".tmp"; json.dump(d,open(tmp,"w"),indent=2); os.chmod(tmp,0o600); os.replace(tmp,f)
-PY
+    kimi_write_json sentinel "$KIMI_STORE" "$KIMI_STORE" "$SENTINEL_RT"
     kimi_cmd_pull >/dev/null 2>&1 || true
     say "reverted kimi:$p to follower (sentinel RT)"
     log_event push "$p" ok "demoted"

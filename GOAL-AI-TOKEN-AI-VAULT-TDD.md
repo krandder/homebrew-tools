@@ -371,6 +371,8 @@ The strict multi-cycle TDD correction and superseding soak pin are recorded in
 `evidence/strict-multi-cycle-tdd-promotion-2026-07-21.md`.
 The immutable-red-proof correction and final superseding soak pin are recorded
 in `evidence/immutable-red-proof-promotion-2026-07-21.md`.
+The final pin's first unattended leader cycle is recorded in
+`evidence/final-pin-unattended-leader-2026-07-21.md`.
 
 ## Post-characterization implementation language
 

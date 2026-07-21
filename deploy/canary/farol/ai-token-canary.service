@@ -6,4 +6,5 @@ OnFailure=ai-token-canary-alert@%n.service
 
 [Service]
 Type=oneshot
+Environment=AI_TOKEN_CANARY_TRIGGER=scheduled
 ExecStart=/home/kelvin/.ai-token-canary/release/current/tools/run-live-canary --config /home/kelvin/.ai-token-canary/canary.json --live

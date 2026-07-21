@@ -50,13 +50,8 @@ die() { echo "ai-vault: error: $*" >&2; exit 1; }
 say() { echo "ai-vault: $*" >&2; }    # status -> stderr (stdout reserved for token data)
 
 mkdir -p "$VAULT_DIR" "$PROFILES_DIR" "$CLAUDE_PROFILES_DIR" "$SHARED_DIR" "$CLAUDE_SHARED_DIR"
-[ -f "$ACL_FILE" ] || printf '{"profiles":{},"admins":["admin"]}' > "$ACL_FILE"
 
 current_user() { echo "${CODEX_VAULT_USER:-${CODEX_USER:-$OPERATOR}}"; }
-
-# Operator = who runs the vault directly on the leader (admin). Forced-command
-# connections override this with the key-bound identity via `shell`.
-OPERATOR="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("operator","admin"))' "$ACL_FILE" 2>/dev/null || echo admin)"
 
 # Profile ids are composite "<kind>:<name>" (e.g. "codex:operator", "claude:operator") so
 # the same name can exist for both tools. ACL is keyed by the composite id.
@@ -133,6 +128,8 @@ with open(lock_path, "a+") as lock:
             handle.write("ready\n")
         os.chmod(ready, 0o600)
     fcntl.flock(lock, fcntl.LOCK_EX)
+    if operation == "init-acl" and os.path.exists(path):
+        raise SystemExit(0)
     if os.path.exists(path):
         with open(path) as handle:
             data = json.load(handle)
@@ -142,7 +139,9 @@ with open(lock_path, "a+") as lock:
         raise SystemExit("ai-vault: state JSON must be an object")
 
     message = None
-    if operation == "enroll":
+    if operation == "init-acl":
+        data = {"profiles": {}, "admins": ["admin"]}
+    elif operation == "enroll":
         profile, owner, kind = arguments
         data.setdefault("profiles", {})[profile] = {
             "owner": owner, "pullers": [owner], "kind": kind,
@@ -208,6 +207,12 @@ with open(lock_path, "a+") as lock:
         print(message)
 PY
 }
+
+mutate_state "$ACL_FILE" init-acl
+
+# Operator = who runs the vault directly on the leader (admin). Forced-command
+# connections override this with the key-bound identity via `shell`.
+OPERATOR="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("operator","admin"))' "$ACL_FILE" 2>/dev/null || echo admin)"
 
 # ---- core ops ----
 cmd_receive() { # profile   (stdin = token JSON)

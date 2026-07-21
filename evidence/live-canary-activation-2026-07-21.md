@@ -129,6 +129,31 @@ on UID 502.
 - macOS login-session dispatcher: loaded; UID-502 mode-0600 activation marker
   present; canary-owned scheduled wrapper passed; dispatcher last exit zero.
 
+## First unattended scheduler-native matrix
+
+No service was manually started for this matrix. A read-only monitor waited for
+the installed schedules and observed:
+
+- farol leader: 2026-07-21 04:00:00 UTC, systemd exit zero;
+- agent-1 follower: 2026-07-21 04:10:18 UTC, systemd exit zero; and
+- macOS follower: 2026-07-21 04:20:06 UTC, launchd run count advanced to two
+  and last exit remained zero.
+
+Each resulting record is schema 3, mode 0600, `trigger: scheduled`, status
+`ok`, and release `253597d3255e-052616a82b39`. The leader recorded exactly
+`verify-release` then `publish`; each follower recorded exactly
+`verify-release`, `pull`, then `check`. The Mac record began from the previous
+real dedicated-Keychain metadata and advanced only its modification timestamp
+during the expected pull.
+
+An exhaustive collection copied all 29 retained records, not a selected green
+subset: 19 schema-2 historical records and 10 schema-3 records, including all
+five historical failures. All 10 schema-3 predecessor filenames and SHA-256
+links matched the exact prior sanitized file for their host/role chain. The
+one-day soak command correctly rejected 2026-07-21 at the first historical
+commit mismatch; this activation day is evidence of scheduler operation, not a
+qualifying green day.
+
 Activation occurred on 2026-07-21 UTC. That UTC day contains the retained
 pre-fix Mac failure and cannot be counted as green. No evidence is deleted or
 overwritten to hide it. The required clean window is therefore 2026-07-22

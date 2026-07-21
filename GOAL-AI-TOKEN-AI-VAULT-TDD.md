@@ -221,7 +221,9 @@ Mac's nonexistent-file continuity check with metadata from the real dedicated
 Keychain. Release `253597d3255e-052616a82b39` was installed, selected, and
 manually live-checked on all three hosts; the Mac passed both the one-time
 legacy snapshot migration and a subsequent Keychain-to-Keychain continuity
-cycle. Therefore the clean 30-day window is
+cycle. The first genuinely unattended scheduler-native matrix then passed at
+04:00, 04:10, and 04:20 UTC on the same release. Therefore the clean 30-day
+window is
 2026-07-22 through
 2026-08-20 UTC, with the final gate eligible on 2026-08-21 UTC.
 

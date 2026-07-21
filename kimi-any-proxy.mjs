@@ -37,18 +37,30 @@ function anyLog(event, kv) {
 const loadState = () => readJson(STATE_FILE) || {};
 const saveState = (s) => writeJsonAtomic(STATE_FILE, s);
 
+const SHARED_DIR = process.env.KIMI_SHARED_DIR || `${HOME}/shared/kimi-tokens`;
+
 function freshToken(profile) {
-  const d = readJson(`${PROFILES_DIR}/${profile}/credentials.json`);
+  let d = readJson(`${PROFILES_DIR}/${profile}/credentials.json`);
+  if (!d || !d.access_token) d = readJson(`${SHARED_DIR}/${profile}.json`);
   if (!d || !d.access_token) return null;
   if ((d.expires_at || 0) - nowS() < MIN_FRESH_S) return null;
   return { token: d.access_token };
 }
 
 function profiles() {
+  // profile universe: local leader layout ∪ published shared files
+  const names = new Set();
   try {
-    return readdirSync(PROFILES_DIR).filter((p) =>
-      !p.startsWith(".") && existsSync(`${PROFILES_DIR}/${p}/credentials.json`));
-  } catch { return []; }
+    readdirSync(PROFILES_DIR).forEach((p) => {
+      if (!p.startsWith(".") && existsSync(`${PROFILES_DIR}/${p}/credentials.json`)) names.add(p);
+    });
+  } catch {}
+  try {
+    readdirSync(SHARED_DIR).forEach((fn) => {
+      if (fn.endsWith(".json") && !fn.includes(".sync-conflict-")) names.add(fn.slice(0, -5));
+    });
+  } catch {}
+  return [...names];
 }
 
 function pickAny(state, exclude) {
@@ -129,14 +141,55 @@ function relayHeaders(up) {
   return outHeaders;
 }
 
-async function streamBack(res, up) {
+async function streamBack(res, up, profile, reqUrl) {
   res.writeHead(up.status, relayHeaders(up));
+  // usage tap: buffer successful responses so per-request token counts land in
+  // any-usage.jsonl with the TRUE serving profile.
+  const tap = (up.status === 200 && profile) ? [] : null;
   if (up.body) {
     for await (const chunk of up.body) {
+      if (tap) tap.push(chunk);
       if (!res.write(chunk)) await new Promise((resolve) => res.once("drain", resolve));
     }
   }
   res.end();
+  if (tap) recordUsage(profile, Buffer.concat(tap).toString("utf8"), up.headers.get("content-type") || "");
+}
+
+const USAGE_LOG = `${HOME}/.kimi-code/any-usage.jsonl`;
+
+function usageFromChatAPI(text, isSSE) {
+  // kimi (OpenAI-style chat): non-stream JSON carries usage; streams carry it
+  // on the final chunk when the client sets stream_options.include_usage.
+  let last = null;
+  if (isSSE) {
+    for (const line of text.split("\n")) {
+      if (!line.startsWith("data:")) continue;
+      let ev; try { ev = JSON.parse(line.slice(5).trim()); } catch { continue; }
+      if (ev.usage) last = ev;
+    }
+  } else {
+    try { const d = JSON.parse(text); if (d && d.usage) last = d; } catch { last = null; }
+  }
+  if (!last || !last.usage || !last.id) return null;
+  const u = last.usage;
+  const cached = (u.prompt_tokens_details || {}).cached_tokens || 0;
+  return { id: last.id, model: last.model,
+           input_tokens: Math.max(0, (u.prompt_tokens || 0) - cached),
+           output_tokens: u.completion_tokens || 0,
+           cache_read: cached, cache_write_5m: 0, cache_write_1h: 0 };
+}
+
+function recordUsage(profile, text, contentType) {
+  try {
+    const u = usageFromChatAPI(text, contentType.includes("text/event-stream"));
+    if (!u) return;
+    appendFileSync(USAGE_LOG, JSON.stringify({
+      source: "kimi-proxy", profile, ts: Date.now() / 1000, request_id: u.id,
+      model: u.model, input_tokens: u.input_tokens, output_tokens: u.output_tokens,
+      cache_read: u.cache_read, cache_write_5m: 0, cache_write_1h: 0,
+    }) + "\n");
+  } catch {}
 }
 
 function log(profile, method, path, status) {
@@ -170,7 +223,7 @@ async function handleAny(req, res) {
       continue;
     }
     markUsed(pick.profile);
-    await streamBack(res, up);
+    await streamBack(res, up, pick.profile, req.url);
     log(`any(${pick.profile})`, req.method, req.url, up.status);
     return;
   }
@@ -178,6 +231,19 @@ async function handleAny(req, res) {
     ? `kimi-any-proxy: upstream error: ${lastErr.message || lastErr}`
     : "kimi-any-proxy: no healthy profile available";
   const status = lastErr ? 502 : 503;
+  if (!lastErr) {
+    anyLog("pool-empty", { tried: [...tried] });
+    const s = loadState();
+    const last = s.pool_alert_last || 0;
+    if (nowS() - last > 1800) {
+      s.pool_alert_last = nowS();
+      saveState(s);
+      execFile(`${HOME}/.local/bin/fleet-msg`, ["send", "--to", "kelvin",
+        "--from", "kimi-any-proxy", "--kind", "notify", "--create-actor",
+        "--body", `kimi any-proxy pool EMPTY (503): no healthy profile available; tried=[${[...tried].join(",")}]`],
+        () => {});
+    }
+  }
   res.writeHead(status, { "content-type": "text/plain", "content-length": Buffer.byteLength(msg) });
   res.end(msg);
   log("any", req.method, req.url, status);

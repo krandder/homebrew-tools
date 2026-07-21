@@ -12,7 +12,7 @@
 // serves 7801-7806). CLAUDE_PROXY_PROFILES=0 (default here) skips per-profile
 // listeners entirely.
 import http from "node:http";
-import { readFileSync, writeFileSync, renameSync, appendFileSync } from "node:fs";
+import { readFileSync, writeFileSync, renameSync, appendFileSync, readdirSync } from "node:fs";
 import { execFile } from "node:child_process";
 
 const [registryPath, sharedDir] = process.argv.slice(2);
@@ -42,6 +42,19 @@ function anyLog(event, kv) {
 }
 
 const loadRegistry = () => readJson(registryPath) || {};
+// Profile universe: the published shared files are the source of truth (a new
+// vault enrollment appears here with no config change); the registry file is
+// kept only as a backward-compatible superset.
+function candidates() {
+  const names = new Set(Object.keys(loadRegistry()));
+  try {
+    for (const fn of readdirSync(sharedDir)) {
+      if (fn.endsWith(".json") && !fn.includes(".sync-conflict-") && !fn.includes(".suspect"))
+        names.add(fn.slice(0, -5));
+    }
+  } catch {}
+  return names;
+}
 const loadState = () => readJson(STATE_FILE) || {};
 const saveState = (s) => writeJsonAtomic(STATE_FILE, s);
 
@@ -62,7 +75,7 @@ function freshToken(profile) {
 
 function pickAny(state, exclude) {
   let best = null;
-  for (const p of Object.keys(loadRegistry())) {
+  for (const p of candidates()) {
     if (exclude.has(p)) continue;
     const ent = state[p] || {};
     if ((ent.cooldown_401_until || 0) > nowS()) continue;
@@ -156,14 +169,68 @@ function relayHeaders(up) {
   return outHeaders;
 }
 
-async function streamBack(res, up) {
+async function streamBack(res, up, profile, reqUrl) {
   res.writeHead(up.status, relayHeaders(up));
+  // usage tap: buffer only billable message calls (small bodies) so per-request
+  // token counts land in any-usage.jsonl with the TRUE serving profile.
+  const tap = (up.status === 200 && profile && reqUrl.startsWith("/v1/messages")) ? [] : null;
   if (up.body) {
     for await (const chunk of up.body) {
+      if (tap) tap.push(chunk);
       if (!res.write(chunk)) await new Promise((resolve) => res.once("drain", resolve));
     }
   }
   res.end();
+  if (tap) recordUsage(profile, Buffer.concat(tap).toString("utf8"), up.headers.get("content-type") || "");
+}
+
+const USAGE_LOG = `${HOME}/.claude-token/any-usage.jsonl`;
+
+function splitCacheWrites(u) {
+  const cc = u.cache_creation || {};
+  let w5 = cc.ephemeral_5m_input_tokens || 0;
+  const w1 = cc.ephemeral_1h_input_tokens || 0;
+  const tot = u.cache_creation_input_tokens || 0;
+  if (tot > w5 + w1) w5 += tot - w5 - w1;
+  return [w5, w1];
+}
+
+function usageFromSSE(text) {
+  let start = null, out = 0;
+  for (const line of text.split("\n")) {
+    if (!line.startsWith("data:")) continue;
+    let ev; try { ev = JSON.parse(line.slice(5).trim()); } catch { continue; }
+    if (ev.type === "message_start" && ev.message) start = ev.message;
+    else if (ev.type === "message_delta" && ev.usage && ev.usage.output_tokens != null) out = ev.usage.output_tokens;
+  }
+  if (!start || !start.id) return null;
+  const u = start.usage || {};
+  const [w5, w1] = splitCacheWrites(u);
+  return { id: start.id, model: start.model, input_tokens: u.input_tokens || 0,
+           output_tokens: out, cache_read: u.cache_read_input_tokens || 0,
+           cache_write_5m: w5, cache_write_1h: w1 };
+}
+
+function usageFromJSON(text) {
+  let d; try { d = JSON.parse(text); } catch { return null; }
+  if (!d || !d.usage || !d.id) return null;
+  const u = d.usage;
+  const [w5, w1] = splitCacheWrites(u);
+  return { id: d.id, model: d.model, input_tokens: u.input_tokens || 0,
+           output_tokens: u.output_tokens || 0, cache_read: u.cache_read_input_tokens || 0,
+           cache_write_5m: w5, cache_write_1h: w1 };
+}
+
+function recordUsage(profile, text, contentType) {
+  try {
+    const u = contentType.includes("text/event-stream") ? usageFromSSE(text) : usageFromJSON(text);
+    if (!u) return;
+    appendFileSync(USAGE_LOG, JSON.stringify({
+      source: "claude-proxy", profile, ts: Date.now() / 1000, request_id: u.id,
+      model: u.model, input_tokens: u.input_tokens, output_tokens: u.output_tokens,
+      cache_read: u.cache_read, cache_write_5m: u.cache_write_5m, cache_write_1h: u.cache_write_1h,
+    }) + "\n");
+  } catch {}
 }
 
 function log(profile, method, path, status) {
@@ -197,7 +264,7 @@ async function handleAny(req, res) {
       continue;
     }
     markUsed(pick.profile);
-    await streamBack(res, up);
+    await streamBack(res, up, pick.profile, req.url);
     log(`any(${pick.profile})`, req.method, req.url, up.status);
     return;
   }
@@ -205,6 +272,22 @@ async function handleAny(req, res) {
     ? `any-proxy: upstream error: ${lastErr.message || lastErr}`
     : "any-proxy: no healthy profile available";
   const status = lastErr ? 502 : 503;
+  if (!lastErr) {
+    // pool-empty is a fleet-level event: log it, and alert kelvin at most
+    // once per 30 min (a session only ever sees retries; the 503 cause was
+    // invisible until now).
+    anyLog("pool-empty", { tried: [...tried] });
+    const s = loadState();
+    const last = s.pool_alert_last || 0;
+    if (nowS() - last > 1800) {
+      s.pool_alert_last = nowS();
+      saveState(s);
+      execFile(`${HOME}/.local/bin/fleet-msg`, ["send", "--to", "kelvin",
+        "--from", "claude-any-proxy", "--kind", "notify", "--create-actor",
+        "--body", `claude any-proxy pool EMPTY (503): no healthy profile available; tried=[${[...tried].join(",")}]`],
+        () => {});
+    }
+  }
   res.writeHead(status, { "content-type": "text/plain", "content-length": Buffer.byteLength(msg) });
   res.end(msg);
   log("any", req.method, req.url, status);

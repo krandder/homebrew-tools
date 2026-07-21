@@ -187,7 +187,7 @@ broad state-machine coverage, hard CI, production-shaped verification, and
 controlled release phases on 2026-07-20. He designated `canary-claude`, isolated
 homes on farol and agent-1, and the dedicated macOS account/keychain
 `ai-token-canary`. Protected runtime commit
-`f41bcf7bddab9c6af4cd6f277ec1b0cd8e60efc0` is installed and verified on all
+`961817df7012a82fa6ff956ed60f77c542c21c57` is installed and verified on all
 three hosts, and physical rollback/restore was exercised on each. The separate
 Anthropic account is `ai@futarchy.ai` with a Claude Max entitlement. Its OAuth
 credential is canonical only in the isolated farol vault; followers receive a
@@ -259,8 +259,17 @@ deterministic red regressions, moved every remaining state replacement to a
 private atomic generation and every network response to private staging,
 passed both protected PR gates and protected main, and repeated exact
 three-host rollback/restore plus the complete live matrix.
+The strict completion pass then found that generated wrappers, follower
+configuration, shell startup edits, systemd units, launchd plists, append-only
+audits, authorization and deployment records, release checksums, and HTTP
+snapshots still had symlink, truncation, or crash-continuity gaps. PR #48
+preserved three red-first groups covering those boundaries, routed every
+remaining generated-state write through private atomic replacement or a
+locked no-follow appender, passed 205 Python tests and four shell integration
+suites in both protected PR gates and protected main, and repeated exact
+three-host rollback/restore plus the complete live matrix.
 The clean 30-day window is pinned to release
-`f41bcf7bddab-81d3623997b5` from
+`961817df7012-cdcf26652e0e` from
 2026-07-22 through
 2026-08-20 UTC, with the final gate eligible on 2026-08-21 UTC.
 
@@ -336,7 +345,10 @@ correction and superseding final soak pin are recorded in
 generation correction and final follower-safe soak pin are recorded in
 `evidence/private-kimi-generation-promotion-2026-07-21.md`. The remaining
 predictable-path closure and superseding soak pin are recorded in
-`evidence/private-remaining-generation-promotion-2026-07-21.md`.
+`evidence/private-remaining-generation-promotion-2026-07-21.md`. The final
+generated-entrypoint, audit-writer, and HTTP-snapshot closure and superseding
+soak pin are recorded in
+`evidence/atomic-generated-state-promotion-2026-07-21.md`.
 
 ## Post-characterization implementation language
 

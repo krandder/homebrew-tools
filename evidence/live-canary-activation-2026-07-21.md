@@ -69,7 +69,10 @@ first unattended run.
 
 ## Schedules and soak boundary
 
-- Farol systemd timer: enabled and waiting; forced scheduled service passed.
+- Farol systemd timer: enabled every two hours; forced service passed. This
+  keeps the approved 15-minute agent-1 consumer inside a published access-token
+  generation while the publish path and global cooldown prevent refresh
+  hammering.
 - Agent-1 systemd timer: enabled and waiting; forced scheduled service passed.
 - macOS login-session dispatcher: loaded; UID-502 mode-0600 activation marker
   present; canary-owned scheduled wrapper passed; dispatcher last exit zero.

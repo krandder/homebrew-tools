@@ -90,7 +90,10 @@ def main():
         ["git", "merge-base", "--is-ancestor", base, head], capture_output=True
     ).returncode != 0:
         fail("base is not an ancestor of head")
-    commits = git("rev-list", "--reverse", "--no-merges", f"{base}..{head}").splitlines()
+    merges = git("rev-list", "--reverse", "--min-parents=2", f"{base}..{head}").splitlines()
+    if merges:
+        fail(f"merge commits are forbidden in TDD history: {merges[0]}")
+    commits = git("rev-list", "--reverse", f"{base}..{head}").splitlines()
     candidate = None
     pairs = []
     for commit in commits:
@@ -98,6 +101,11 @@ def main():
         changes_production = any(is_production(path) for path in paths)
         changes_tests = any(is_test(path) for path in paths)
         if changes_production:
+            if changes_tests:
+                fail(
+                    "production change has no preceding test-only red commit; "
+                    f"production commit also changes runnable tests: {commit}"
+                )
             if candidate is None:
                 fail(f"production change has no preceding test-only red commit: {commit}")
             pairs.append((candidate, commit))

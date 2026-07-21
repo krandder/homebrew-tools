@@ -187,7 +187,7 @@ broad state-machine coverage, hard CI, production-shaped verification, and
 controlled release phases on 2026-07-20. He designated `canary-claude`, isolated
 homes on farol and agent-1, and the dedicated macOS account/keychain
 `ai-token-canary`. Protected runtime commit
-`9b87f71c21d311678a5ac93b6e71867f55c21c35` is installed and verified on all
+`699237941a26255fb4cec25282479d54387f7eff` is installed and verified on all
 three hosts, and physical rollback/restore was exercised on each. The separate
 Anthropic account is `ai@futarchy.ai` with a Claude Max entitlement. Its OAuth
 credential is canonical only in the isolated farol vault; followers receive a
@@ -207,11 +207,16 @@ the intended fallback account could create the Claude item. Pull transport had
 already returned a fresh sentinel-only credential; `security` then exited 44
 for the expected missing item and `set -euo pipefail` aborted. PR #19 preserved
 the failing regression commit before the one-line fix, passed hard CI, and was
-promoted as the current immutable release. The pre-fix failure remains in the
+promoted as an immutable release. The pre-fix failure remains in the
 evidence chain. PR #21 subsequently proved that the soak verifier accepted
 mixed immutable artifact IDs, then made exact release convergence blocking and
-was promoted across the same three-host matrix. Therefore the clean 30-day
-window is 2026-07-22 through
+was promoted across the same three-host matrix. PR #23 then proved the daily
+leader cadence could not keep the approved 15-minute consumer inside an
+eight-hour access-token generation and changed only the leader timer to every
+two hours. Release `699237941a26-a25d9f0a55dd` was installed, selected, and
+live-checked on all three hosts; a one-day three-record matrix passed the exact
+commit and artifact convergence gate. Therefore the clean 30-day window is
+2026-07-22 through
 2026-08-20 UTC, with the final gate eligible on 2026-08-21 UTC.
 
 The immutable release now includes a fail-closed live-canary runner. It requires

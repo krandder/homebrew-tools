@@ -49,9 +49,9 @@ the complete suite actually failed at that commit.
 
 `test_ai_token_soak_evidence.py` pins the 30-day exit gate: every required
 host/role must have a successful record on every UTC day, all records must use
-the expected profile and commit, and a failed duplicate can never be hidden by
-a later success. Malformed, symlinked, permissively readable, or fabricated
-evidence fails closed.
+one expected profile, commit, and immutable release artifact ID, and a failed
+duplicate can never be hidden by a later success. Malformed, symlinked,
+permissively readable, or fabricated evidence fails closed.
 
 Canary evidence schema 2 carries credential-file metadata before and after each
 run. `test_ai_token_live_canary.py` proves an expected canary mutation chains

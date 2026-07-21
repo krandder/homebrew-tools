@@ -18,6 +18,7 @@ import sys
 
 
 COMMIT = re.compile(r"^[0-9a-f]{40}$")
+RELEASE = re.compile(r"^[0-9a-f]{12}-[0-9a-f]{12}$")
 PROFILE = re.compile(r"^canary-[A-Za-z0-9._-]+$")
 HOST = re.compile(r"^[A-Za-z0-9._-]+$")
 RECORD_KEYS = {
@@ -139,6 +140,7 @@ def main():
     present = set()
     histories = {}
     records = 0
+    selected_release = None
     for path in sorted(args.evidence_dir.glob("*.json")):
         record, timestamp = read_record(path)
         day = timestamp.date()
@@ -148,6 +150,17 @@ def main():
             fail(f"profile mismatch: {path.name}")
         if record["expect_commit"] != args.expect_commit:
             fail(f"commit mismatch: {path.name}")
+        release = record["release"]
+        if (
+            not isinstance(release, str)
+            or not RELEASE.fullmatch(release)
+            or not release.startswith(f"{args.expect_commit[:12]}-")
+        ):
+            fail(f"invalid release: {path.name}")
+        if selected_release is None:
+            selected_release = release
+        elif release != selected_release:
+            fail(f"release mismatch: {path.name}")
         host = record["host"]
         role = record["role"]
         if not isinstance(host, str) or not HOST.fullmatch(host) or role not in {"leader", "follower"}:
@@ -175,6 +188,7 @@ def main():
         "status": "ok",
         "profile": args.profile,
         "commit": args.expect_commit,
+        "release": selected_release,
         "from": str(start),
         "through": str(through),
         "days": args.days,

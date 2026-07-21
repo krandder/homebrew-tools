@@ -226,8 +226,11 @@ CLAUDE_SSE = (
 def claude_responder(token, payload, server=None):
     if token == "AT-A":
         return 401, {"content-type": "application/json"}, b'{"error":{"type":"authentication_error"}}'
-    if (server.modes if server else {}).get(token) == "429":
+    mode = (server.modes if server else {}).get(token)
+    if mode == "429":
         return 429, {"content-type": "application/json"}, b'{"error":{"type":"rate_limit_error"}}'
+    if mode and mode.isdigit():
+        return int(mode), {"content-type": "application/json"}, b'{"error":{"type":"upstream_error","message":"stub 5xx/4xx"}}'
     if payload.get("stream"):
         return 200, {"content-type": "text/event-stream"}, CLAUDE_SSE
     if payload.get("usage"):
@@ -414,6 +417,73 @@ class ClaudeAnyPoolTest(ProxyCase):
                            "429 cooldown must be the 1800s class, not the 401's 900s")
         self.assertLessEqual(delta, 1800 + 5)
 
+    def test_5xx_failover_is_transparent_and_cools_profile(self):
+        self.write_shared("flaky", claude_profile(4, "AT-X"))
+        self.write_shared("beta", claude_profile(4, "AT-B"))
+        self.upstream.server.modes["AT-X"] = "529"
+        (self.statedir / "any-state.json").write_text(
+            json.dumps({"flaky": {"last_used": 1}, "beta": {"last_used": 2}}))
+        status, body = self.post()
+        self.assertEqual(status, 200, "the client must never see the upstream 529")
+        self.assertEqual(json.loads(body)["served_by"], "AT-B",
+                         "flaky 529s -> the SAME request must fail over to beta")
+        delta = self.state()["flaky"]["cooldown_5xx_until"] - time.time()
+        self.assertGreater(delta, 120)
+        self.assertLessEqual(delta, 300 + 5)
+        self.assertLess(delta, 900,
+                        "5xx cooldown is the 300s class, clearly below 401/429 classes")
+        events = [(e["event"], e.get("profile"), e.get("kind"), e.get("status"))
+                  for e in self.anylog()]
+        self.assertIn(("failover", "flaky", "5xx", 529), events)
+
+    def test_5xx_cooldown_skips_then_serves_after_expiry(self):
+        self.write_shared("recovering", claude_profile(4, "AT-R2"))
+        self.write_shared("steady", claude_profile(4, "AT-OK"))
+        self.upstream.server.modes["AT-R2"] = "529"
+        (self.statedir / "any-state.json").write_text(
+            json.dumps({"recovering": {"last_used": 1}, "steady": {"last_used": 2}}))
+        status, body = self.post()
+        self.assertEqual(json.loads(body)["served_by"], "AT-OK")
+        self.assertGreater(self.state()["recovering"]["cooldown_5xx_until"], time.time())
+        status, body = self.post()
+        self.assertEqual(json.loads(body)["served_by"], "AT-OK")
+        self.assertEqual(self.upstream.tokens_seen().count("AT-R2"), 1,
+                         "recovering is 5xx-cooled: the next request must not retry it")
+        st = self.state()
+        st["recovering"]["cooldown_5xx_until"] = time.time() - 1
+        (self.statedir / "any-state.json").write_text(json.dumps(st))
+        self.upstream.server.modes["AT-R2"] = "ok"
+        status, body = self.post()
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["served_by"], "AT-R2",
+                         "an expired 5xx cooldown must make the profile pickable again")
+
+    def test_all_5xx_yields_503_and_pool_empty(self):
+        self.write_shared("xa", claude_profile(4, "AT-XA"))
+        self.write_shared("xb", claude_profile(4, "AT-XB"))
+        self.upstream.server.modes["AT-XA"] = "529"
+        self.upstream.server.modes["AT-XB"] = "529"
+        status, body = self.post()
+        self.assertEqual(status, 503)
+        self.assertIn(b"no healthy profile available", body)
+        self.assertNotIn(b"upstream_error", body,
+                         "the raw upstream 5xx body must never leak to the client")
+        self.assertIn("pool-empty", [e["event"] for e in self.anylog()])
+
+    def test_400_forwards_untouched_without_cooldown(self):
+        self.write_shared("solo", claude_profile(4, "AT-BAD"))
+        self.upstream.server.modes["AT-BAD"] = "400"
+        hits_before = len(self.upstream.tokens_seen())
+        status, body = self.post()
+        self.assertEqual(status, 400, "a client error must be forwarded as-is")
+        self.assertIn(b"upstream_error", body)
+        self.assertEqual(len(self.upstream.tokens_seen()), hits_before + 1,
+                         "no failover retry may happen on a 4xx client error")
+        ent = self.state().get("solo", {})
+        for key in ("cooldown_401_until", "cooldown_429_until", "cooldown_5xx_until"):
+            self.assertNotIn(key, ent, "client errors must never cool a profile")
+        self.assertNotIn("failover", [e["event"] for e in self.anylog()])
+
 
 CODEX_RESPONSE = json.dumps({
     "id": "resp_c", "object": "response", "model": "gpt-test",
@@ -423,6 +493,9 @@ CODEX_RESPONSE = json.dumps({
 
 
 def codex_responder(token, payload, server=None):
+    mode = (server.modes if server else {}).get(token)
+    if mode and mode.isdigit():
+        return int(mode), {"content-type": "application/json"}, b'{"error":{"type":"upstream_error","message":"stub 5xx/4xx"}}'
     body = json.loads(CODEX_RESPONSE)
     body["served_by"] = token
     return 200, {"content-type": "application/json"}, json.dumps(body).encode()
@@ -495,6 +568,29 @@ class CodexAnyPoolTest(ProxyCase):
         self.assertEqual(json.loads(body)["served_by"], at_plus,
                          "a free-plan profile must be excluded even with a fresh access_token")
         self.assertNotIn(at_free, self.upstream.tokens_seen())
+
+    def test_5xx_failover_cools_profile(self):
+        future = int(time.time()) + 3600
+        at_a = jwt_with_payload({"exp": future, "sub": "user-a"})
+        at_b = jwt_with_payload({"exp": future, "sub": "user-b"})
+        self.write_local("p5a", at_a)  # no id_token: plan undecodable fails open
+        self.write_local("p5b", at_b)
+        (self.profiles / "any-state.json").write_text(
+            json.dumps({"p5a": {"last_used": 1}, "p5b": {"last_used": 2}}))
+        self.upstream.server.modes[at_a] = "503"
+        status, body = self.post(path="/responses")
+        self.assertEqual(status, 200, "the client must never see the upstream 503")
+        self.assertEqual(json.loads(body)["served_by"], at_b,
+                         "p5a 503s -> the SAME request must fail over to p5b")
+        state = json.loads((self.profiles / "any-state.json").read_text())
+        delta = state["p5a"]["cooldown_5xx_until"] - time.time()
+        self.assertGreater(delta, 120)
+        self.assertLessEqual(delta, 300 + 5)
+        log_lines = (self.profiles / "any.log").read_text().splitlines()
+        events = [(json.loads(l)["event"], json.loads(l).get("profile"),
+                   json.loads(l).get("kind"), json.loads(l).get("status"))
+                  for l in log_lines]
+        self.assertIn(("failover", "p5a", "5xx", 503), events)
 
 
 KIMI_RESPONSE = json.dumps({

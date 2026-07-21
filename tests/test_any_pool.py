@@ -85,10 +85,14 @@ def wait_jsonl(path, count, timeout=5):
     raise AssertionError(f"{path} did not reach {count} jsonl record(s)")
 
 
-def fake_jwt(exp):
+def jwt_with_payload(payload):
     def b64(d):
         return base64.urlsafe_b64encode(json.dumps(d).encode()).decode().rstrip("=")
-    return f"{b64({'alg': 'none', 'typ': 'JWT'})}.{b64({'exp': exp})}.sig"
+    return f"{b64({'alg': 'none', 'typ': 'JWT'})}.{b64(payload)}.sig"
+
+
+def fake_jwt(exp):
+    return jwt_with_payload({"exp": exp})
 
 
 class _Handler(http.server.BaseHTTPRequestHandler):
@@ -104,7 +108,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             "token": token, "path": self.path,
             "account_id": self.headers.get("chatgpt-account-id"),
         })
-        status, headers, body = self.server.responder(token, payload)
+        status, headers, body = self.server.responder(token, payload, self.server)
         self.send_response(status)
         for k, v in headers.items():
             self.send_header(k, v)
@@ -121,6 +125,7 @@ class StubUpstream:
         self.server = http.server.HTTPServer(("127.0.0.1", 0), _Handler)
         self.server.responder = responder
         self.server.requests = []
+        self.server.modes = {}  # token -> "429" (test-flippable upstream behavior)
         self.port = self.server.server_address[1]
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
@@ -218,9 +223,11 @@ CLAUDE_SSE = (
 ).encode()
 
 
-def claude_responder(token, payload):
+def claude_responder(token, payload, server=None):
     if token == "AT-A":
         return 401, {"content-type": "application/json"}, b'{"error":{"type":"authentication_error"}}'
+    if (server.modes if server else {}).get(token) == "429":
+        return 429, {"content-type": "application/json"}, b'{"error":{"type":"rate_limit_error"}}'
     if payload.get("stream"):
         return 200, {"content-type": "text/event-stream"}, CLAUDE_SSE
     if payload.get("usage"):
@@ -345,6 +352,68 @@ class ClaudeAnyPoolTest(ProxyCase):
                          "SSE output_tokens come from message_delta, not message_start")
         self.assertEqual(sse["cache_read"], 4)
 
+    def test_429_failover_is_transparent_and_cools_profile(self):
+        self.write_shared("quota", claude_profile(4, "AT-Q"))
+        self.write_shared("beta", claude_profile(4, "AT-B"))
+        self.upstream.server.modes["AT-Q"] = "429"
+        (self.statedir / "any-state.json").write_text(
+            json.dumps({"quota": {"last_used": 1}, "beta": {"last_used": 2}}))
+        status, body = self.post()
+        self.assertEqual(status, 200, "the client must never see the upstream 429")
+        self.assertEqual(json.loads(body)["served_by"], "AT-B",
+                         "quota 429s -> the SAME request must fail over to beta")
+        self.assertGreater(self.state()["quota"]["cooldown_429_until"], time.time())
+        events = [(e["event"], e.get("profile"), e.get("kind")) for e in self.anylog()]
+        self.assertIn(("failover", "quota", "429"), events)
+
+    def test_429_cooldown_skips_then_serves_after_expiry(self):
+        self.write_shared("recovering", claude_profile(4, "AT-R"))
+        self.write_shared("steady", claude_profile(4, "AT-OK"))
+        self.upstream.server.modes["AT-R"] = "429"
+        (self.statedir / "any-state.json").write_text(
+            json.dumps({"recovering": {"last_used": 1}, "steady": {"last_used": 2}}))
+        status, body = self.post()
+        self.assertEqual(json.loads(body)["served_by"], "AT-OK")
+        self.assertGreater(self.state()["recovering"]["cooldown_429_until"], time.time())
+        status, body = self.post()
+        self.assertEqual(json.loads(body)["served_by"], "AT-OK")
+        self.assertEqual(self.upstream.tokens_seen().count("AT-R"), 1,
+                         "recovering is 429-cooled: the next request must not retry it")
+        # cooldown passes and upstream recovers: the profile serves again
+        st = self.state()
+        st["recovering"]["cooldown_429_until"] = time.time() - 1
+        (self.statedir / "any-state.json").write_text(json.dumps(st))
+        self.upstream.server.modes["AT-R"] = "ok"
+        status, body = self.post()
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["served_by"], "AT-R",
+                         "an expired 429 cooldown must make the profile pickable again")
+
+    def test_all_429_yields_503_and_pool_empty(self):
+        self.write_shared("qa", claude_profile(4, "AT-QA"))
+        self.write_shared("qb", claude_profile(4, "AT-QB"))
+        self.upstream.server.modes["AT-QA"] = "429"
+        self.upstream.server.modes["AT-QB"] = "429"
+        status, body = self.post()
+        self.assertEqual(status, 503)
+        self.assertIn(b"no healthy profile available", body)
+        self.assertNotIn(b"rate_limit_error", body,
+                         "the raw upstream 429 body must never leak to the client")
+        self.assertIn("pool-empty", [e["event"] for e in self.anylog()])
+
+    def test_429_cooldown_is_the_1800s_class(self):
+        self.write_shared("quota", claude_profile(4, "AT-Q"))
+        self.write_shared("beta", claude_profile(4, "AT-B"))
+        self.upstream.server.modes["AT-Q"] = "429"
+        (self.statedir / "any-state.json").write_text(
+            json.dumps({"quota": {"last_used": 1}, "beta": {"last_used": 2}}))
+        status, body = self.post()
+        self.assertEqual(status, 200)
+        delta = self.state()["quota"]["cooldown_429_until"] - time.time()
+        self.assertGreater(delta, 1200,
+                           "429 cooldown must be the 1800s class, not the 401's 900s")
+        self.assertLessEqual(delta, 1800 + 5)
+
 
 CODEX_RESPONSE = json.dumps({
     "id": "resp_c", "object": "response", "model": "gpt-test",
@@ -353,7 +422,7 @@ CODEX_RESPONSE = json.dumps({
 }).encode()
 
 
-def codex_responder(token, payload):
+def codex_responder(token, payload, server=None):
     body = json.loads(CODEX_RESPONSE)
     body["served_by"] = token
     return 200, {"content-type": "application/json"}, json.dumps(body).encode()
@@ -373,12 +442,14 @@ class CodexAnyPoolTest(ProxyCase):
         return {"CODEX_PROFILES_DIR": str(self.profiles),
                 "CODEX_SHARED_DIR": str(self.shared)}
 
-    def write_local(self, profile, token, account_id=None):
+    def write_local(self, profile, token, account_id=None, id_token=None):
         d = self.profiles / profile / ".codex"
         d.mkdir(parents=True)
         tokens = {"access_token": token, "refresh_token": "sentinel-follower"}
         if account_id:
             tokens["account_id"] = account_id
+        if id_token:
+            tokens["id_token"] = id_token
         (d / "auth.json").write_text(json.dumps({"tokens": tokens}))
 
     def test_local_profile_serves(self):
@@ -406,6 +477,25 @@ class CodexAnyPoolTest(ProxyCase):
         self.assertEqual(json.loads(body)["served_by"], at,
                          "a profile that exists only in the shared dir must still serve")
 
+    def test_free_plan_profile_never_serves(self):
+        future = int(time.time()) + 3600
+        # identical freshness, distinct token strings
+        at_free = jwt_with_payload({"exp": future, "sub": "free-plan-user"})
+        at_plus = jwt_with_payload({"exp": future, "sub": "plus-plan-user"})
+        id_free = jwt_with_payload(
+            {"https://api.openai.com/auth": {"chatgpt_plan_type": "free"}})
+        id_plus = jwt_with_payload(
+            {"https://api.openai.com/auth": {"chatgpt_plan_type": "plus"}})
+        self.write_local("free", at_free, id_token=id_free)
+        self.write_local("plus", at_plus, id_token=id_plus)
+        (self.profiles / "any-state.json").write_text(
+            json.dumps({"free": {"last_used": 1}, "plus": {"last_used": 2}}))
+        status, body = self.post(path="/responses")
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["served_by"], at_plus,
+                         "a free-plan profile must be excluded even with a fresh access_token")
+        self.assertNotIn(at_free, self.upstream.tokens_seen())
+
 
 KIMI_RESPONSE = json.dumps({
     "id": "chatcmpl_k", "object": "chat.completion", "model": "kimi-test",
@@ -414,7 +504,7 @@ KIMI_RESPONSE = json.dumps({
 }).encode()
 
 
-def kimi_responder(token, payload):
+def kimi_responder(token, payload, server=None):
     body = json.loads(KIMI_RESPONSE)
     body["served_by"] = token
     return 200, {"content-type": "application/json"}, json.dumps(body).encode()

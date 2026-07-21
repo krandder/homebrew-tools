@@ -187,7 +187,7 @@ broad state-machine coverage, hard CI, production-shaped verification, and
 controlled release phases on 2026-07-20. He designated `canary-claude`, isolated
 homes on farol and agent-1, and the dedicated macOS account/keychain
 `ai-token-canary`. Protected runtime commit
-`21e16f96c654bd768c99053f7fd1be4fadd98f91` is installed and verified on all
+`f41bcf7bddab9c6af4cd6f277ec1b0cd8e60efc0` is installed and verified on all
 three hosts, and physical rollback/restore was exercised on each. The separate
 Anthropic account is `ai@futarchy.ai` with a Claude Max entitlement. Its OAuth
 credential is canonical only in the isolated farol vault; followers receive a
@@ -252,8 +252,15 @@ replace a credential with that symlink. PR #44 preserved the behavioral red
 test, routed all Kimi lifecycle writes through private locked generations,
 passed the complete and protected gates, and repeated the exact three-host
 promotion and live matrix.
+The final predictable-path audit then proved that Codex remote staging and
+refresh, Claude invalid-grant marking, and refresh-cooldown persistence could
+still follow attacker-planted fixed-name symlinks. PR #46 preserved five
+deterministic red regressions, moved every remaining state replacement to a
+private atomic generation and every network response to private staging,
+passed both protected PR gates and protected main, and repeated exact
+three-host rollback/restore plus the complete live matrix.
 The clean 30-day window is pinned to release
-`21e16f96c654-d4de30c4a5f1` from
+`f41bcf7bddab-81d3623997b5` from
 2026-07-22 through
 2026-08-20 UTC, with the final gate eligible on 2026-08-21 UTC.
 
@@ -327,7 +334,9 @@ writer closure and final protected promotion are recorded in
 correction and superseding final soak pin are recorded in
 `evidence/locked-acl-bootstrap-promotion-2026-07-21.md`. The private Kimi
 generation correction and final follower-safe soak pin are recorded in
-`evidence/private-kimi-generation-promotion-2026-07-21.md`.
+`evidence/private-kimi-generation-promotion-2026-07-21.md`. The remaining
+predictable-path closure and superseding soak pin are recorded in
+`evidence/private-remaining-generation-promotion-2026-07-21.md`.
 
 ## Post-characterization implementation language
 

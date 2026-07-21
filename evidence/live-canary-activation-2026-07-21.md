@@ -23,10 +23,10 @@ provider without copying refresh authority.
 
 ## Protected release and live matrix
 
-- Merged PR: #19
-- Canonical commit: `6b6857b8f93b6e7ff60af6d0038f36efb78ef853`
-- Tree: `eddc0fd5d193992c9e9b79cb08da6fd0e080633e`
-- Artifact: `ai-token-vault-6b6857b8f93b-5bb02b78dc10.zip`
+- Current merged PR: #21
+- Canonical commit: `9b87f71c21d311678a5ac93b6e71867f55c21c35`
+- Tree: `9a8a985d173ec6b191a076c8753ca26027e9ca17`
+- Artifact: `ai-token-vault-9b87f71c21d3-94f3924a38ed.zip`
 - Installed manifest: 28 regular payload files
 
 The artifact passed the complete local gate, protected push and pull-request
@@ -55,6 +55,17 @@ The repair followed the required order:
 
 The original failed evidence is retained. The same dedicated UID/keychain then
 passed pull and check on the protected release.
+
+## Soak convergence hardening
+
+The M6 audit found that the verifier checked the recorded full commit but
+ignored each record's immutable release ID. Commit `8dc212d` first proved that
+two different artifact IDs could pass the convergence gate. Commit `cd6bf13`
+then required every in-window record to carry a valid content-addressed release
+ID with the expected commit prefix and made any cross-host mismatch fatal. PR
+#21 preserved that red-to-green history, passed the complete and protected
+release gates, and was promoted and live-checked on all three hosts before the
+first unattended run.
 
 ## Schedules and soak boundary
 

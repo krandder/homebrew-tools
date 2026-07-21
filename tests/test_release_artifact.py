@@ -104,6 +104,31 @@ class ReleaseArtifactTest(unittest.TestCase):
         self.assertEqual(archive.read_bytes(), first_bytes)
         self.assertEqual(len(list(self.output.glob("*.zip"))), 1)
 
+    def test_untracked_write_bits_cannot_change_the_release_artifact(self):
+        executable = self.source / "ai-token"
+        data = self.source / "deploy/canary/farol/ai-token-canary.service"
+        executable.chmod(0o755)
+        data.chmod(0o644)
+        first = self.build()
+        self.assertEqual(first.returncode, 0, first.stderr)
+        archive = next(self.output.glob("*.zip"))
+        first_bytes = archive.read_bytes()
+
+        executable.chmod(0o775)
+        data.chmod(0o664)
+        second = self.build()
+
+        self.assertEqual(second.returncode, 0, second.stderr)
+        self.assertEqual(len(list(self.output.glob("*.zip"))), 1)
+        self.assertEqual(archive.read_bytes(), first_bytes)
+        with zipfile.ZipFile(archive) as bundle:
+            manifest = json.loads(bundle.read("MANIFEST.json"))
+        self.assertEqual(manifest["files"]["ai-token"]["mode"], "0755")
+        self.assertEqual(
+            manifest["files"]["deploy/canary/farol/ai-token-canary.service"]["mode"],
+            "0644",
+        )
+
     def test_dirty_tracked_source_is_rejected_before_tests_or_packaging(self):
         with (self.source / "ai-token").open("ab") as handle:
             handle.write(b"dirty")

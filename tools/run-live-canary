@@ -154,6 +154,70 @@ def snapshot(paths):
     return result
 
 
+def snapshot_macos_keychain(expected_account):
+    try:
+        result = subprocess.run(
+            [
+                "/usr/bin/security", "find-generic-password",
+                "-s", "Claude Code-credentials",
+            ],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        fail("cannot inspect dedicated Claude Keychain metadata")
+    if result.returncode == 44:
+        return {"keychain": {"exists": False, "store": "keychain"}}
+    if result.returncode != 0:
+        fail("cannot inspect dedicated Claude Keychain metadata")
+    fields = {}
+    for name in ("acct", "cdat", "mdat"):
+        value = r'([0-9]{14}Z)' if name in {"cdat", "mdat"} else r'([^"]+)'
+        match = re.search(rf'"{name}"<[^>]+>.*?"{value}', result.stdout)
+        if match is None:
+            fail("invalid dedicated Claude Keychain metadata")
+        fields[name] = match.group(1)
+    if (
+        fields["acct"] != expected_account
+        or not re.fullmatch(r"[0-9]{14}Z", fields["cdat"])
+        or not re.fullmatch(r"[0-9]{14}Z", fields["mdat"])
+    ):
+        fail("invalid dedicated Claude Keychain metadata")
+    return {"keychain": {
+        "exists": True,
+        "store": "keychain",
+        "account": fields["acct"],
+        "created": fields["cdat"],
+        "modified": fields["mdat"],
+    }}
+
+
+def snapshot_credential_state(config, paths):
+    if platform.system() == "Darwin" and config["role"] == "follower":
+        return snapshot_macos_keychain(config["os_user"])
+    return snapshot(paths)
+
+
+def credential_states_continuous(config, previous, current):
+    if previous == current:
+        return True
+    keychain = current.get("keychain") if isinstance(current, dict) else None
+    return (
+        platform.system() == "Darwin"
+        and config["role"] == "follower"
+        and previous == {"local": {"exists": False}}
+        and isinstance(keychain, dict)
+        and keychain.get("store") == "keychain"
+        and (
+            keychain.get("exists") is False
+            or keychain.get("account") == config["os_user"]
+        )
+    )
+
+
 def previous_evidence(directory, host, profile, role):
     latest = None
     for path in sorted(directory.glob("*.json")) if directory.is_dir() else ():
@@ -239,7 +303,7 @@ def main():
         f"{timestamp.strftime('%Y%m%dT%H%M%S.%fZ')}-{safe_host}-{config['role']}-{os.getpid()}.json"
     )
     paths = credential_paths(config)
-    state_before = snapshot(paths)
+    state_before = snapshot_credential_state(config, paths)
     previous = previous_evidence(
         pathlib.Path(config["evidence_dir"]), host, config["profile"], config["role"]
     )
@@ -265,7 +329,9 @@ def main():
         "state_after": state_before,
     }
     write_evidence(evidence_path, record)
-    if previous_state is not None and previous_state != state_before:
+    if previous_state is not None and not credential_states_continuous(
+        config, previous_state, state_before
+    ):
         record["status"] = "failed"
         record["steps"].append({"name": "writer-continuity", "returncode": 1})
         write_evidence(evidence_path, record)
@@ -281,15 +347,15 @@ def main():
         config["expect_commit"],
     ]
     if not run_step("verify-release", verify, environment, record, 30):
-        record["state_after"] = snapshot(paths)
+        record["state_after"] = snapshot_credential_state(config, paths)
         write_evidence(evidence_path, record)
         fail("canary failed at verify-release; sanitized evidence retained")
-    record["state_after"] = snapshot(paths)
+    record["state_after"] = snapshot_credential_state(config, paths)
     write_evidence(evidence_path, record)
     if selected_release(release_root) != release:
         record["status"] = "failed"
         record["steps"].append({"name": "release-stability", "returncode": 1})
-        record["state_after"] = snapshot(paths)
+        record["state_after"] = snapshot_credential_state(config, paths)
         write_evidence(evidence_path, record)
         fail("selected release changed after verification")
 
@@ -303,10 +369,10 @@ def main():
         ]
     for name, command, timeout in steps:
         if not run_step(name, command, environment, record, timeout):
-            record["state_after"] = snapshot(paths)
+            record["state_after"] = snapshot_credential_state(config, paths)
             write_evidence(evidence_path, record)
             fail(f"canary failed at {name}; sanitized evidence retained")
-        record["state_after"] = snapshot(paths)
+        record["state_after"] = snapshot_credential_state(config, paths)
         write_evidence(evidence_path, record)
 
     record["status"] = "ok"

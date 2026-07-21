@@ -55,12 +55,14 @@ post-window scheduled anchor closes each retained chain. Malformed, symlinked,
 permissively readable, omitted, or fabricated evidence fails closed.
 
 Canary evidence schema 3 carries scheduler provenance, a SHA-256 link to the
-previous sanitized evidence record, and credential-file metadata before and
+previous sanitized evidence record, and credential-store metadata before and
 after each run. `test_ai_token_live_canary.py` proves an expected canary
 mutation chains cleanly, while a between-run writer or permissive credential
 file stops before release execution. `test_ai_token_soak_evidence.py`
 independently rechecks the same continuity across the retained host histories.
-No credential bytes or credential hashes enter evidence.
+On macOS this is the dedicated Keychain item's account and creation/modification
+timestamps; the password is never requested. No credential bytes or credential
+hashes enter evidence.
 
 Every bug fix starts with a deterministic failing test and ends with that test
 in this directory. A flake, retry-to-green result, or unexplained skip fails the

@@ -247,7 +247,11 @@ An omitted record breaks the chain, and one successful scheduled record after
 the window anchors each host/role tail before the gate can pass. The next run
 must begin from the previous final metadata or it fails before release
 verification; the 30-day verifier independently checks the complete per-host
-chain. Existing credentials must be regular mode-0600 files. Scheduler-native
+chain. On macOS the runner inspects only the dedicated Keychain item's account
+and creation/modification timestamps; it never requests the password. The
+legacy nonexistent-file snapshot may transition to this real Keychain metadata
+once, after which any between-run Keychain change fails closed. Existing file
+credentials must be regular mode-0600 files. Scheduler-native
 nonzero exit and `OnFailure`/incident wiring remain the deployment alert path.
 The follower alert path is authenticated and sanitized; a real agent-1
 fail-closed pull produced a mode-0600 vault alert and a canonical incident.

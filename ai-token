@@ -738,14 +738,58 @@ CODEX_PROFILES_DIR="${CODEX_PROFILES_DIR:-$AI_TOKEN_REAL_HOME/.codex-profiles}"
 CODEX_SHARED_DIR="${CODEX_SHARED_DIR:-$AI_TOKEN_REAL_HOME/shared/codex-tokens}"
 CODEX_LEGACY_AUTH="${CODEX_CONFIG_DIR:-$AI_TOKEN_REAL_HOME/.codex}/auth.json"
 
-codex_copy_token() { python3 - "$1" "$2" <<'PY'
-import json,sys,os
-s,d=sys.argv[1],sys.argv[2]
-data=json.load(open(s))
-clean={k:data[k] for k in ("auth_mode","tokens","last_refresh","account_id") if k in data}
-json.dump(clean,open(d,"w"),indent=2); os.chmod(d,0o600)
+codex_write_json() { python3 - "$@" <<'PY'
+import datetime, glob, json, os, sys, tempfile
+
+operation, source, destination, *arguments = sys.argv[1:]
+data = json.load(open(source))
+if operation == "copy":
+    output = {
+        key: data[key]
+        for key in ("auth_mode", "tokens", "last_refresh", "account_id")
+        if key in data
+    }
+    crash_label = "codex-follower"
+elif operation == "sentinel":
+    output = data
+    output.setdefault("tokens", {})["refresh_token"] = arguments[0]
+    crash_label = "codex-sentinel"
+elif operation == "publish":
+    profile, email, sentinel, leader = arguments
+    output = dict(data)
+    output.setdefault("tokens", {})["refresh_token"] = sentinel
+    output["email"] = email
+    output["profile"] = profile
+    output["leader"] = leader
+    output["published_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    crash_label = "codex-shared"
+else:
+    raise SystemExit("unknown Codex JSON operation")
+
+directory = os.path.dirname(destination) or "."
+prefix = "." + os.path.basename(destination) + ".token-"
+for stale in glob.glob(os.path.join(directory, prefix + "*")):
+    try:
+        os.unlink(stale)
+    except FileNotFoundError:
+        pass
+fd, temporary = tempfile.mkstemp(prefix=prefix, dir=directory)
+try:
+    with os.fdopen(fd, "w") as handle:
+        json.dump(output, handle, indent=2)
+        handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.chmod(temporary, 0o600)
+    if os.environ.get("AI_TOKEN_TEST_CRASH_AT") == f"before-{crash_label}-replace":
+        os._exit(86)
+    os.replace(temporary, destination)
+finally:
+    if os.path.exists(temporary):
+        os.unlink(temporary)
 PY
 }
+codex_copy_token() { codex_write_json copy "$1" "$2"; }
 codex_resolve_bin() {
     if [ -n "${CODEX_BIN:-}" ] && command -v "$CODEX_BIN" >/dev/null 2>&1; then echo "$CODEX_BIN"; return; fi
     local cands="$AI_TOKEN_REAL_HOME/bin/codex.real:/opt/homebrew/bin/codex:/usr/local/bin/codex:$(command -v codex 2>/dev/null)" d
@@ -826,15 +870,7 @@ except Exception:
 PY
 }
 codex_rt_is_real() { local rt; rt="$(codex_tokens_get "$1" refresh_token)"; [ -n "$rt" ] && [ "$rt" != "$SENTINEL_RT" ]; }
-codex_revert_sentinel() { python3 - "$1" "$SENTINEL_RT" <<'PY'
-import json,sys,os
-af,s=sys.argv[1],sys.argv[2]
-with open(af) as fh: d=json.load(fh)
-d.setdefault("tokens",{})["refresh_token"]=s
-with open(af,"w") as fh: json.dump(d,fh,indent=2)
-os.chmod(af,0o600)
-PY
-}
+codex_revert_sentinel() { codex_write_json sentinel "$1" "$1" "$SENTINEL_RT"; }
 
 codex_refresh_profile() { # profile -> updates its auth.json with fresh tokens
     local p="$1" af lock output rc retry_after; af="$(codex_auth_file "$p")"
@@ -924,21 +960,8 @@ codex_publish_profile() { # profile -> refresh + write shared file with sentinel
     fi
     email="$(codex_email_of "$af")"
     mkdir -p "$CODEX_SHARED_DIR"
-    python3 - "$af" "$sf" "$p" "$email" "$SENTINEL_RT" "$LEADER_HOST" <<'PY'
-import json,sys,os
-from datetime import datetime,timezone
-af,sf,profile,email,sentinel,leader=sys.argv[1:7]
-d=json.load(open(af))
-out=dict(d)
-out.setdefault("tokens",{})
-out["tokens"]["refresh_token"]=sentinel
-out["email"]=email
-out["profile"]=profile
-out["leader"]=leader
-out["published_at"]=datetime.now(timezone.utc).isoformat()
-json.dump(out,open(sf,"w"),indent=2); os.chmod(sf,0o600)
-print(f"published {profile} ({email}) -> {sf}")
-PY
+    codex_write_json publish "$af" "$sf" "$p" "$email" "$SENTINEL_RT" "$LEADER_HOST"
+    printf 'published %s (%s) -> %s\n' "$p" "$email" "$sf"
 }
 
 codex_pull_profile() { # profile -> local canonical auth from shared file or vault

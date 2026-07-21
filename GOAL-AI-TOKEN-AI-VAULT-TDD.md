@@ -187,7 +187,7 @@ broad state-machine coverage, hard CI, production-shaped verification, and
 controlled release phases on 2026-07-20. He designated `canary-claude`, isolated
 homes on farol and agent-1, and the dedicated macOS account/keychain
 `ai-token-canary`. Protected runtime commit
-`6b6857b8f93b6e7ff60af6d0038f36efb78ef853` is installed and verified on all
+`9b87f71c21d311678a5ac93b6e71867f55c21c35` is installed and verified on all
 three hosts, and physical rollback/restore was exercised on each. The separate
 Anthropic account is `ai@futarchy.ai` with a Claude Max entitlement. Its OAuth
 credential is canonical only in the isolated farol vault; followers receive a
@@ -203,7 +203,10 @@ already returned a fresh sentinel-only credential; `security` then exited 44
 for the expected missing item and `set -euo pipefail` aborted. PR #19 preserved
 the failing regression commit before the one-line fix, passed hard CI, and was
 promoted as the current immutable release. The pre-fix failure remains in the
-evidence chain. Therefore the clean 30-day window is 2026-07-22 through
+evidence chain. PR #21 subsequently proved that the soak verifier accepted
+mixed immutable artifact IDs, then made exact release convergence blocking and
+was promoted across the same three-host matrix. Therefore the clean 30-day
+window is 2026-07-22 through
 2026-08-20 UTC, with the final gate eligible on 2026-08-21 UTC.
 
 The immutable release now includes a fail-closed live-canary runner. It requires

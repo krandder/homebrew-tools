@@ -10,6 +10,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 VERIFIER = ROOT / "tools" / "verify-live-soak"
 COMMIT = "a" * 40
 PROFILE = "canary-fixture"
+RELEASE = f"{COMMIT[:12]}-{'b' * 12}"
 
 
 class SoakEvidenceTest(unittest.TestCase):
@@ -41,7 +42,7 @@ class SoakEvidenceTest(unittest.TestCase):
             "profile": PROFILE,
             "role": role,
             "expect_commit": commit,
-            "release": f"{commit[:12]}-fixture",
+            "release": RELEASE,
             "status": status,
             "steps": steps,
             "state_before": state_before or {"credential": {"exists": False}},
@@ -134,6 +135,17 @@ class SoakEvidenceTest(unittest.TestCase):
         result = self.run_verifier()
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("invalid successful steps", result.stderr)
+
+    def test_mixed_immutable_release_artifact_fails_convergence(self):
+        self.populate()
+        wrong_release = next(self.evidence.glob("2026-07-21-agent-1-follower-*.json"))
+        record = json.loads(wrong_release.read_text())
+        record["release"] = f"{COMMIT[:12]}-{'c' * 12}"
+        wrong_release.write_text(json.dumps(record))
+        wrong_release.chmod(0o600)
+        result = self.run_verifier()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("release mismatch", result.stderr)
 
     def test_malformed_symlinked_or_permissive_evidence_fails_closed(self):
         self.populate()

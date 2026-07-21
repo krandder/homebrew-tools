@@ -246,18 +246,25 @@ mark_refresh_cooldown() { # credential_file seconds
     [ "$seconds" -le 86400 ] || seconds=86400
     global="$(refresh_global_cooldown_file)"
     python3 - "$1.refresh-cooldown" "$global" "$(now_epoch)" "$seconds" <<'PY'
-import json, os, sys
+import json, os, sys, tempfile
 paths, now, seconds = sys.argv[1:3], int(sys.argv[3]), int(sys.argv[4])
 record = {"until": now + seconds, "reason": "rate-limit"}
 for path in paths:
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp = path + ".tmp"
-    with open(tmp, "w") as fh:
-        json.dump(record, fh, separators=(",", ":"))
-        fh.flush()
-        os.fsync(fh.fileno())
-    os.chmod(tmp, 0o600)
-    os.replace(tmp, path)
+    directory = os.path.dirname(path) or "."
+    os.makedirs(directory, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(
+        prefix="." + os.path.basename(path) + ".cooldown-", dir=directory,
+    )
+    try:
+        with os.fdopen(fd, "w") as handle:
+            json.dump(record, handle, separators=(",", ":"))
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
 PY
 }
 retry_after_from_error() { # captured refresh stderr -> seconds
@@ -967,7 +974,7 @@ codex_refresh_profile() { # profile -> updates its auth.json with fresh tokens
     fi
     set +e
     output="$(python3 - "$af" "$rt" "$CODEX_CLIENT_ID" "$CODEX_TOKEN_EP" 2>&1 <<'PY'
-import datetime, email.utils, json, os, sys, urllib.error, urllib.parse, urllib.request
+import datetime, email.utils, json, os, sys, tempfile, urllib.error, urllib.parse, urllib.request
 af, refresh_token, client_id, endpoint = sys.argv[1:5]
 body = urllib.parse.urlencode({"grant_type": "refresh_token", "client_id": client_id,
                                "refresh_token": refresh_token}).encode()
@@ -1002,13 +1009,21 @@ credential["tokens"]["refresh_token"] = token.get("refresh_token") or refresh_to
 if "id_token" in token:
     credential["tokens"]["id_token"] = token["id_token"]
 credential["last_refresh"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
-tmp = af + ".tmp"
-with open(tmp, "w") as fh:
-    json.dump(credential, fh, indent=2)
-    fh.flush()
-    os.fsync(fh.fileno())
-os.chmod(tmp, 0o600)
-os.replace(tmp, af)
+directory = os.path.dirname(af) or "."
+fd, temporary = tempfile.mkstemp(
+    prefix="." + os.path.basename(af) + ".token-", dir=directory,
+)
+try:
+    with os.fdopen(fd, "w") as handle:
+        json.dump(credential, handle, indent=2)
+        handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, af)
+finally:
+    if os.path.exists(temporary):
+        os.unlink(temporary)
 print("refreshed")
 PY
     )"
@@ -1050,7 +1065,7 @@ codex_pull_profile() { # profile -> local canonical auth from shared file or vau
         codex_copy_token "$sf" "$af"
         echo "pulled"
     else
-        local tmp="$af.tmp"
+        local tmp; tmp="$(mktemp)"
         if have_http_vault; then
             vault_http GET "/pull/codex/$p" > "$tmp" || { rm -f "$tmp"; die "pull: vault denied/unavailable for codex:$p"; }
         else
@@ -1173,20 +1188,22 @@ codex_cmd_run() { # [args...] follower launcher: freshen ~/.codex then exec code
     [ "${1:-}" = "--refresh-only" ] && { refresh_only=1; shift; }
     local user; user="$(config_user)"
     [ -n "$user" ] || die "run: no user configured. Run 'ai-token codex pair' first."
-    local sf="$CODEX_SHARED_DIR/$user.json"
+    local sf="$CODEX_SHARED_DIR/$user.json" tmp=""
     mkdir -p "$(dirname "$CODEX_LEGACY_AUTH")"
     if [ -f "$sf" ]; then
         codex_file_is_fresh "$sf" || die "run: published token is stale for codex:$user"
         codex_copy_token "$sf" "$CODEX_LEGACY_AUTH"
     elif have_http_vault; then
-        vault_http GET "/pull/codex/$user" > "$CODEX_LEGACY_AUTH.tmp" || { rm -f "$CODEX_LEGACY_AUTH.tmp"; die "run: cannot reach/authorized for codex:$user"; }
-        codex_file_is_fresh "$CODEX_LEGACY_AUTH.tmp" || { rm -f "$CODEX_LEGACY_AUTH.tmp"; die "run: vault served a stale token for codex:$user"; }
-        codex_copy_token "$CODEX_LEGACY_AUTH.tmp" "$CODEX_LEGACY_AUTH"; rm -f "$CODEX_LEGACY_AUTH.tmp"
+        tmp="$(mktemp)"
+        vault_http GET "/pull/codex/$user" > "$tmp" || { rm -f "$tmp"; die "run: cannot reach/authorized for codex:$user"; }
+        codex_file_is_fresh "$tmp" || { rm -f "$tmp"; die "run: vault served a stale token for codex:$user"; }
+        codex_copy_token "$tmp" "$CODEX_LEGACY_AUTH"; rm -f "$tmp"
     else
         need_cmd ssh
-        ssh_vault "ai-vault serve codex:$user" > "$CODEX_LEGACY_AUTH.tmp" || { rm -f "$CODEX_LEGACY_AUTH.tmp"; die "run: cannot reach/authorized for codex:$user"; }
-        codex_file_is_fresh "$CODEX_LEGACY_AUTH.tmp" || { rm -f "$CODEX_LEGACY_AUTH.tmp"; die "run: vault served a stale token for codex:$user"; }
-        codex_copy_token "$CODEX_LEGACY_AUTH.tmp" "$CODEX_LEGACY_AUTH"; rm -f "$CODEX_LEGACY_AUTH.tmp"
+        tmp="$(mktemp)"
+        ssh_vault "ai-vault serve codex:$user" > "$tmp" || { rm -f "$tmp"; die "run: cannot reach/authorized for codex:$user"; }
+        codex_file_is_fresh "$tmp" || { rm -f "$tmp"; die "run: vault served a stale token for codex:$user"; }
+        codex_copy_token "$tmp" "$CODEX_LEGACY_AUTH"; rm -f "$tmp"
     fi
     [ "$refresh_only" = "1" ] && return 0
     local bin; bin="$(codex_resolve_bin)"
@@ -1504,7 +1521,7 @@ PY
 }
 claude_mark_needs_relogin() { # canonical_file reason
     python3 - "$1" "$2" <<'PY'
-import json,sys,os,datetime
+import datetime, json, os, sys, tempfile
 f,reason=sys.argv[1],sys.argv[2]
 with open(f) as fh:
     d=json.load(fh)
@@ -1512,10 +1529,21 @@ sync=d.setdefault("claudeTokenSync",{})
 sync["needsRelogin"]=True
 sync["needsReloginSince"]=datetime.datetime.now(datetime.timezone.utc).isoformat()
 sync["needsReloginReason"]=reason
-tmp=f+".tmp"
-with open(tmp,"w") as fh:
-    json.dump(d,fh,indent=2)
-os.chmod(tmp,0o600); os.replace(tmp,f)
+directory = os.path.dirname(f) or "."
+fd, temporary = tempfile.mkstemp(
+    prefix="." + os.path.basename(f) + ".token-", dir=directory,
+)
+try:
+    with os.fdopen(fd, "w") as handle:
+        json.dump(d, handle, indent=2)
+        handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, f)
+finally:
+    if os.path.exists(temporary):
+        os.unlink(temporary)
 PY
 }
 claude_alert_relogin() { # profile detail — durable operator alert (best effort)

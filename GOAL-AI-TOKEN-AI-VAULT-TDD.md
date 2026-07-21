@@ -187,7 +187,7 @@ broad state-machine coverage, hard CI, production-shaped verification, and
 controlled release phases on 2026-07-20. He designated `canary-claude`, isolated
 homes on farol and agent-1, and the dedicated macOS account/keychain
 `ai-token-canary`. Protected runtime commit
-`699237941a26255fb4cec25282479d54387f7eff` is installed and verified on all
+`253597d3255e1edb508e4f05ab79c1f201a146eb` is installed and verified on all
 three hosts, and physical rollback/restore was exercised on each. The separate
 Anthropic account is `ai@futarchy.ai` with a Claude Max entitlement. Its OAuth
 credential is canonical only in the isolated farol vault; followers receive a
@@ -215,7 +215,13 @@ leader cadence could not keep the approved 15-minute consumer inside an
 eight-hour access-token generation and changed only the leader timer to every
 two hours. Release `699237941a26-a25d9f0a55dd` was installed, selected, and
 live-checked on all three hosts; a one-day three-record matrix passed the exact
-commit and artifact convergence gate. Therefore the clean 30-day window is
+commit and artifact convergence gate. PR #27 then made scheduler provenance,
+safe-record linkage, and post-window anchors mandatory. PR #28 replaced the
+Mac's nonexistent-file continuity check with metadata from the real dedicated
+Keychain. Release `253597d3255e-052616a82b39` was installed, selected, and
+manually live-checked on all three hosts; the Mac passed both the one-time
+legacy snapshot migration and a subsequent Keychain-to-Keychain continuity
+cycle. Therefore the clean 30-day window is
 2026-07-22 through
 2026-08-20 UTC, with the final gate eligible on 2026-08-21 UTC.
 

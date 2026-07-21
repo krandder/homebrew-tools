@@ -83,6 +83,7 @@ class SoakCollectionTest(unittest.TestCase):
             "nested": [("nested/bad.json", 0o600, b"{}", "file")],
             "appledouble": [("._bad.json", 0o600, b"{}", "file")],
             "non_json": [("bad.txt", 0o600, b"{}", "file")],
+            "invalid_json": [("bad.json", 0o600, b"not-json", "file")],
         }
         for label, members in cases.items():
             with self.subTest(label=label):

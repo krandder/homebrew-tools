@@ -246,6 +246,13 @@ record in the window fails the gate even if a later retry succeeds. This proves
 the eventual soak only after real scheduled evidence exists; it does not start
 or simulate the live 30-day clock.
 
+The operator-only `collect-live-soak` command atomically collects every retained
+record from the fixed farol, agent-1, and dedicated macOS locations before the
+verifier runs. It refuses partial output, unsafe tar members, permissive modes,
+AppleDouble files, duplicate names, or invalid JSON and writes a mode-0600
+source/count/digest manifest. It is canonical source but not canary runtime, so
+improving the collection boundary does not change the pinned soak release.
+
 Canary evidence schema 3 measures unexpected writers without reading or
 hashing credential contents. Each run records whether its entrypoint was
 scheduled or manual, a SHA-256 link to the previous sanitized evidence record,

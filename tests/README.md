@@ -64,6 +64,12 @@ On macOS this is the dedicated Keychain item's account and creation/modification
 timestamps; the password is never requested. No credential bytes or credential
 hashes enter evidence.
 
+`test_ai_token_soak_collection.py` proves the operator collector creates its
+three-host output atomically and copies every regular mode-0600 JSON record with
+a source/digest manifest. Path traversal, nested files, symlinks, AppleDouble
+metadata, permissive modes, duplicate filenames, invalid/non-JSON members, and
+an existing destination all fail without leaving partial output.
+
 Every bug fix starts with a deterministic failing test and ends with that test
 in this directory. A flake, retry-to-green result, or unexplained skip fails the
 suite.

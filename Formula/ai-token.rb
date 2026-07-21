@@ -3,7 +3,7 @@ class AiToken < Formula
   homepage "https://github.com/krandder/homebrew-tools"
   url "https://raw.githubusercontent.com/krandder/homebrew-tools/7f2279643b0c09d34030547de99c4d9d23a62117/ai-token"
   version "3.1.1"
-  sha256 "841b52e895b6c672c22386028001e51d4e7677e638169970bde4ae0356a5598a"
+  sha256 "342e23b09f76a1f5d441f03140af54ac853496b40d3a26c513ebd75dc35dc601"
 
   # The whole formula installs from the same immutable merge commit so all
   # files are guaranteed to be available together.

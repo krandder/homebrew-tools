@@ -25,10 +25,12 @@ import http.server
 import json
 import os
 import datetime
+import fcntl
 import re
 import socketserver
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -142,6 +144,34 @@ def supported_writer_version(value):
     match = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)", value or "")
     return bool(match) and tuple(map(int, match.groups())) >= MIN_CLIENT_VERSION
 
+
+def atomic_private_file(path, data):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    lock_fd = os.open(str(path) + ".lock", os.O_RDWR | os.O_CREAT | nofollow, 0o600)
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        descriptor, temporary = tempfile.mkstemp(
+            prefix="." + path.name + ".state-", dir=path.parent,
+        )
+        try:
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(data)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.chmod(temporary, 0o600)
+            os.replace(temporary, path)
+            directory_fd = os.open(path.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
+    finally:
+        os.close(lock_fd)
+
 def server_event(event, user="", profile="", status="", detail=""):
     try:
         HTTP_EVENTS_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -153,9 +183,30 @@ def server_event(event, user="", profile="", status="", detail=""):
             "status": status,
             "detail": detail,
         }
-        with HTTP_EVENTS_FILE.open("a") as fh:
-            fh.write(json.dumps(rec, separators=(",", ":")) + "\n")
-        os.chmod(HTTP_EVENTS_FILE, 0o600)
+        data = (json.dumps(rec, separators=(",", ":")) + "\n").encode()
+        nofollow = getattr(os, "O_NOFOLLOW", 0)
+        lock_fd = os.open(
+            str(HTTP_EVENTS_FILE) + ".lock", os.O_RDWR | os.O_CREAT | nofollow, 0o600,
+        )
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            if HTTP_EVENTS_FILE.is_symlink():
+                HTTP_EVENTS_FILE.unlink()
+            descriptor = os.open(
+                HTTP_EVENTS_FILE,
+                os.O_WRONLY | os.O_APPEND | os.O_CREAT | nofollow,
+                0o600,
+            )
+            try:
+                view = memoryview(data)
+                while view:
+                    view = view[os.write(descriptor, view):]
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+            os.chmod(HTTP_EVENTS_FILE, 0o600)
+        finally:
+            os.close(lock_fd)
     except Exception as e:
         sys.stderr.write("server_event failed: %s\n" % e)
 
@@ -332,8 +383,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             out_dir = HEARTBEAT_DIR / user
             out_dir.mkdir(parents=True, exist_ok=True)
             out = out_dir / f"claude-token-{host}.json"
-            out.write_text(json.dumps(data, indent=2) + "\n")
-            os.chmod(out, 0o600)
+            atomic_private_file(out, (json.dumps(data, indent=2) + "\n").encode())
             server_event("heartbeat", user, "", "ok", f"claude-token/{data.get('version','?')} host={host} status={data.get('status','?')}")
             return self._send(200, '{"ok":true}')
         if self.path.startswith("/debug-logs/"):
@@ -346,8 +396,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             out_dir = DEBUG_LOG_DIR / user
             out_dir.mkdir(parents=True, exist_ok=True)
             out = out_dir / f"{ts}-{tool}.json"
-            out.write_text(body)
-            os.chmod(out, 0o600)
+            atomic_private_file(out, body.encode())
             server_event("debug-logs", user, "", "ok", str(out))
             return self._send(200, json.dumps({"ok": True, "stored": str(out)}))
         # Transparent OAuth refresh broker: a follower's refresh (routed here by

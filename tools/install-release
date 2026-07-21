@@ -90,6 +90,24 @@ def fsync_directory(path):
         os.close(descriptor)
 
 
+def append_private_line(path, data):
+    if path.is_symlink():
+        path.unlink()
+    descriptor = os.open(
+        path,
+        os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0),
+        0o600,
+    )
+    try:
+        view = memoryview(data)
+        while view:
+            view = view[os.write(descriptor, view):]
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    path.chmod(0o600)
+
+
 def manifest_bytes(manifest):
     return (json.dumps(manifest, indent=2, sort_keys=True) + "\n").encode()
 
@@ -217,11 +235,9 @@ def audit(root, action, target, replaced=None):
     if replaced is not None:
         record["replaced"] = replaced.name
     path = root / "deployments.jsonl"
-    with path.open("a") as handle:
-        handle.write(json.dumps(record, separators=(",", ":")) + "\n")
-        handle.flush()
-        os.fsync(handle.fileno())
-    path.chmod(0o600)
+    append_private_line(
+        path, (json.dumps(record, separators=(",", ":")) + "\n").encode(),
+    )
     fsync_directory(root)
 
 

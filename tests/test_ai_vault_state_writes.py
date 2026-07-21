@@ -128,6 +128,41 @@ class VaultStateWriteTest(unittest.TestCase):
         self.assertIn("codex:fixture", state["profiles"])
         self.assertEqual(self.acl.stat().st_mode & 0o777, 0o600)
 
+    def test_audit_log_never_follows_a_destination_symlink(self):
+        victim = self.home / "unrelated-audit-target"
+        victim.write_text("do-not-touch\n")
+        audit = self.vault / "audit.jsonl"
+        audit.symlink_to(victim)
+        before = victim.read_bytes()
+
+        result = self.run_vault("enroll", "codex", "audited", "owner")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(victim.read_bytes(), before)
+        self.assertFalse(audit.is_symlink())
+        records = [json.loads(line) for line in audit.read_text().splitlines()]
+        self.assertEqual(records[-1]["action"], "enroll")
+        self.assertEqual(audit.stat().st_mode & 0o777, 0o600)
+
+    def test_approve_never_follows_an_authorized_keys_symlink(self):
+        victim = self.home / "unrelated-authorized-keys-target"
+        victim.write_text("do-not-touch\n")
+        authorized = self.home / ".ssh" / "authorized_keys"
+        authorized.parent.mkdir()
+        authorized.symlink_to(victim)
+        before = victim.read_bytes()
+
+        result = self.run_vault(
+            "approve", "fixture-user", "ssh-ed25519 AAAAfixture fixture@example.invalid",
+            CODEX_VAULT_AUTH_KEYS=str(authorized),
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(victim.read_bytes(), before)
+        self.assertFalse(authorized.is_symlink())
+        self.assertIn('command="ai-vault shell fixture-user"', authorized.read_text())
+        self.assertEqual(authorized.stat().st_mode & 0o777, 0o600)
+
 
 if __name__ == "__main__":
     unittest.main()

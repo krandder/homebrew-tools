@@ -284,8 +284,20 @@ merge commits, passed 211 Python tests and four shell integration suites under
 both protected PR gates and protected main, and repeated exact three-host
 rollback/restore plus the complete live matrix. Again, only the packaged
 verifier changed.
+The final test-integrity audit then proved that green production could rewrite
+non-runnable fixtures or helpers under `tests/`, while standard `unittest`
+skips and expected failures still returned success. PR #56 preserved both
+defects, protects the complete `tests/` tree, introduced a strict unittest
+launcher, removed both environment-dependent skip paths, and made wrapper
+routing tests hermetic. Its protected branch, PR, and main gates passed.
+Artifact comparison then caught that the changed `claude-any` wrapper was not
+classified as production, was absent from the immutable release, and remained
+pinned to older bytes by the Homebrew formula. PR #57 preserved all three red
+regressions, added the wrapper to TDD classification and the release payload,
+pinned formula version 3.2.1 to the exact canonical wrapper bytes, and passed
+218 Python tests plus four shell integration suites in protected CI.
 The clean 30-day window is pinned to release
-`0f235c2aecce-e2ce134f3805` from
+`ed994de4434e-5179f403c404` from
 2026-07-22 through
 2026-08-20 UTC, with the final gate eligible on 2026-08-21 UTC.
 

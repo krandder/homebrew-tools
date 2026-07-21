@@ -86,6 +86,38 @@ class TddHistoryTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("candidate red commit unexpectedly passed", result.stderr)
 
+    def test_rejects_a_later_production_commit_without_its_own_red_commit(self):
+        (self.repo / "tests" / "test_check.py").write_text(
+            "import pathlib\n"
+            "assert pathlib.Path('ai-token').read_text() == 'new\\n'\n"
+        )
+        self.commit("test: require first behavior")
+        (self.repo / "ai-token").write_text("new\n")
+        self.commit("fix: implement first behavior")
+        (self.repo / "ai-vault").write_text("unproven\n")
+        self.commit("fix: unrelated later production behavior")
+        later = self.rev()
+
+        result = self.verify()
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(f"no preceding test-only red commit: {later}", result.stderr)
+
+    def test_rejects_a_red_candidate_that_also_changes_non_test_files(self):
+        (self.repo / "tests" / "test_check.py").write_text(
+            "import pathlib\n"
+            "assert pathlib.Path('ai-token').read_text() == 'new\\n'\n"
+        )
+        (self.repo / "notes.md").write_text("not test-only\n")
+        self.commit("test: mixed red commit")
+        (self.repo / "ai-token").write_text("new\n")
+        self.commit("fix: implementation after mixed commit")
+
+        result = self.verify()
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("no preceding test-only red commit", result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

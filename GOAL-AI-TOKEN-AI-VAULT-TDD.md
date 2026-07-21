@@ -187,7 +187,7 @@ broad state-machine coverage, hard CI, production-shaped verification, and
 controlled release phases on 2026-07-20. He designated `canary-claude`, isolated
 homes on farol and agent-1, and the dedicated macOS account/keychain
 `ai-token-canary`. Protected runtime commit
-`5185f09529611695d2cbed52e9bd7c532765cfa4` is installed and verified on all
+`3da9ee56e98d47c840038f76f545e31ff054f888` is installed and verified on all
 three hosts, and physical rollback/restore was exercised on each. The separate
 Anthropic account is `ai@futarchy.ai` with a Claude Max entitlement. Its OAuth
 credential is canonical only in the isolated farol vault; followers receive a
@@ -234,8 +234,15 @@ Claude credential writes, formula URLs whose bytes did not match their pins,
 and umask-dependent release modes. PR #38 preserved deterministic red commits
 for all three defects, passed both protected PR gates and protected main, and
 repeated exact three-host rollback/restore plus live lifecycle verification.
+The follow-up exhaustive writer inventory then found direct Codex lifecycle
+writes, unlocked vault state mutations, and three remaining client-side
+configuration, credential, and role writers. PR #40 preserved two additional
+red-before-green cycles, made every identified credential and authority state
+writer atomic and every read-modify-write state mutation locked, passed the
+complete and protected gates, and repeated exact three-host rollback/restore
+plus live lifecycle verification.
 The clean 30-day window is pinned to release
-`5185f0952961-e72c82006740` from
+`3da9ee56e98d-daf055d6c532` from
 2026-07-22 through
 2026-08-20 UTC, with the final gate eligible on 2026-08-21 UTC.
 
@@ -303,7 +310,9 @@ are recorded in
 pre-fix, and activation-day records remain retained and do not count toward the
 clean window. The exact Kimi replay mapping and final pre-soak atomic promotion
 are recorded in `evidence/kimi-incident-replay-audit-2026-07-21.md` and
-`evidence/atomic-credential-promotion-2026-07-21.md`.
+`evidence/atomic-credential-promotion-2026-07-21.md`. The exhaustive state
+writer closure and final protected promotion are recorded in
+`evidence/all-state-writer-promotion-2026-07-21.md`.
 
 ## Post-characterization implementation language
 

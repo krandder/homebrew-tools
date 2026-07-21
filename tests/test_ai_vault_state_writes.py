@@ -97,6 +97,37 @@ class VaultStateWriteTest(unittest.TestCase):
         self.assertEqual(set(pullers), {"owner", "follower-a", "follower-b"})
         self.assertEqual(self.acl.stat().st_mode & 0o777, 0o600)
 
+    def test_missing_acl_is_initialized_only_after_taking_the_acl_lock(self):
+        self.acl.unlink()
+        lock_path = pathlib.Path(f"{self.acl}.lock")
+        ready = self.home / "bootstrap-ready"
+        with lock_path.open("a+") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            process = subprocess.Popen(
+                [AI_VAULT, "enroll", "codex", "fixture", "owner"],
+                env={
+                    **self.env,
+                    "AI_VAULT_TEST_STATE_LOCK_READY": str(ready),
+                },
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline and not ready.exists():
+                time.sleep(0.01)
+            reached_lock = ready.exists()
+            appeared_while_locked = self.acl.exists()
+            fcntl.flock(lock, fcntl.LOCK_UN)
+
+        stdout, stderr = process.communicate(timeout=10)
+        self.assertTrue(reached_lock, (stdout, stderr, process.returncode))
+        self.assertEqual(process.returncode, 0, (stdout, stderr))
+        self.assertFalse(appeared_while_locked)
+        state = json.loads(self.acl.read_text())
+        self.assertIn("codex:fixture", state["profiles"])
+        self.assertEqual(self.acl.stat().st_mode & 0o777, 0o600)
+
 
 if __name__ == "__main__":
     unittest.main()

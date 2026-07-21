@@ -23,10 +23,10 @@ provider without copying refresh authority.
 
 ## Protected release and live matrix
 
-- Current merged PR: #23
-- Canonical commit: `699237941a26255fb4cec25282479d54387f7eff`
-- Tree: `924e13dbd33abbfd7a11851e76c7f1fe837adeec`
-- Artifact: `ai-token-vault-699237941a26-a25d9f0a55dd.zip`
+- Current merged PR: #28
+- Canonical commit: `253597d3255e1edb508e4f05ab79c1f201a146eb`
+- Tree: `d550c87d05b38a4022e8e49899b8ad03d88bc4c6`
+- Artifact: `ai-token-vault-253597d3255e-052616a82b39.zip`
 - Installed manifest: 28 regular payload files
 
 The artifact passed the complete local gate, protected push and pull-request
@@ -35,11 +35,17 @@ on farol, agent-1, and macOS. The live leader published successfully. Both
 followers pulled and checked successfully. Evidence files are regular mode-0600
 records and contain only lifecycle return codes and credential metadata.
 
-A forced post-promotion matrix retained one successful record from each
+A forced PR-23 post-promotion matrix retained one successful record from each
 required host/role pair. `verify-live-soak --days 1 --through 2026-07-21`
 accepted exactly those three records with the protected commit and immutable
 release ID. This proves deployment convergence; it does not count as the first
 unattended cycle or as a clean soak day.
+
+The current release also passed one explicitly manual lifecycle on every host.
+Those schema-3 records link to each host's prior sanitized evidence and say
+`trigger: manual`; they cannot satisfy scheduled coverage. The Mac passed a
+second manual cycle after migrating from the legacy nonexistent-file snapshot,
+proving normal Keychain-to-Keychain continuity before the scheduler runs.
 
 ## Live defect and TDD disposition
 
@@ -96,6 +102,23 @@ retained as pre-soak evidence. The real deployed wrapper passed immediately on
 the same release, and its successful record is the one used in the convergence
 matrix.
 
+## Scheduled provenance and Keychain continuity
+
+The pre-soak audit found that a forced success could satisfy the old daily gate
+and that deleting a failed JSON record was not always detectable. Commit
+`9c41476` preserved the failing tests; `37a9ff8` added scheduler provenance, a
+SHA-256 chain over sanitized evidence only, and a required post-window
+scheduled anchor for every host/role. PR #27 passed both protected gates before
+three-host promotion.
+
+The first real schema-3 Mac record then exposed that continuity still watched a
+nonexistent credential file instead of Claude's dedicated Keychain. Commit
+`d284b33` preserved the failing regression; `2a5f18f` records only the validated
+Keychain account and creation/modification timestamps, never a password or
+credential hash. PR #28 passed both protected gates. Its exact release passed
+the one-time legacy snapshot migration and a second ordinary continuity cycle
+on UID 502.
+
 ## Schedules and soak boundary
 
 - Farol systemd timer: enabled every two hours; forced service passed. This
@@ -110,8 +133,9 @@ Activation occurred on 2026-07-21 UTC. That UTC day contains the retained
 pre-fix Mac failure and cannot be counted as green. No evidence is deleted or
 overwritten to hide it. The required clean window is therefore 2026-07-22
 through 2026-08-20 UTC. After the latter day is complete, `verify-live-soak`
-may run on 2026-08-21 UTC with all three required host/role pairs and this exact
-profile/commit. Any failure in the window resets the qualifying start date.
+may run after all three 2026-08-21 UTC scheduled anchors exist, with all required
+host/role pairs and this exact profile/commit. Any failure in the window resets
+the qualifying start date.
 
 The final restore/rollback drill and post-soak incident/writer audit remain M6
 exit work.

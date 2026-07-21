@@ -1,0 +1,573 @@
+#!/bin/bash
+# ai-as: Unified account switcher for Claude Code and Codex CLI
+#
+# Usage patterns:
+#   ai-as claude <profile> [args...]  — run claude with profile
+#   ai-as codex <profile> [args...]   — run codex with profile
+#   claude-<profile> [args...]        — via symlink (claude-kas -> ai-as)
+#   codex-<profile> [args...]         — via symlink (codex-kas -> ai-as)
+#
+# Special subcommands:
+#   ai-as <tool> <profile> usage      — show usage/limits
+#   ai-as <tool> <profile> refresh    — refresh auth token (codex only)
+#   ai-as --list [tool]               — list all profiles
+#   ai-as --usage-all [tool]          — show usage for all profiles
+#   ai-as --refresh-all [tool]        — refresh all tokens (codex only)
+#   ai-as --setup [tool]              — create symlinks for profiles
+
+# Base for all profile trees. HOME may be profile-flavored when ai-as is
+# invoked from inside a claude-<profile> session (those set HOME to
+# ~/.claude-profiles/<name>) — strip that suffix, or codex profiles would be
+# resolved (and silently created) under the wrong root (2026-07-20 incident).
+PROFILES_BASE="${HOME%/.claude-profiles/*}"
+SCRIPT_NAME="$(basename "$0")"
+SCRIPT_PATH="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
+
+# Codex OAuth client ID
+CODEX_CLIENT_ID="app_EMoamEEZ73f0CkXaXp7hrann"
+
+# Refresh-endpoint blackhole used by followers so they never rotate the leader's token.
+BLACKHOLE_URL="http://127.0.0.1:9/oauth/token"
+
+# Role of a codex profile: "leader" (owns the real refresh_token) or "follower".
+codex_role_of() {
+    local p="$1"
+    if [ -f "$PROFILES_BASE/.codex-profiles/$p/.role" ]; then
+        cat "$PROFILES_BASE/.codex-profiles/$p/.role"
+    elif [ "$(hostname -s 2>/dev/null || hostname)" = "farol" ]; then
+        echo leader
+    else
+        echo follower
+    fi
+}
+
+# Append-only event log for launches/repairs (JSONL). Local per machine;
+# follower activity is also centrally visible via the vault's pull/push audit.
+AI_AS_LOG="$PROFILES_BASE/.codex-profiles/ai-as.log"
+log_ai_as() { # event detail
+    printf '{"ts":"%s","event":"%s","profile":"%s","detail":"%s"}\n' \
+        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" "${PROFILE:-?}" "$2" >> "$AI_AS_LOG" 2>/dev/null || true
+}
+
+# Resolve the REAL tool binary, skipping this script's own dir (avoids recursion
+# through codex-<profile> symlinks or a ~/bin/codex follower wrapper).
+resolve_real_binary() {
+    local bin="$1" cand scriptdir _ifs="$IFS"
+    scriptdir="$(cd "$(dirname "$0")" && pwd)"
+    IFS=':'
+    for d in $PATH; do
+        IFS="$_ifs"
+        [ -n "$d" ] && [ -x "$d/$bin" ] || continue
+        [ "$d" = "$scriptdir" ] && continue
+        [ "$d" = "$PROFILES_BASE/bin" ] && continue
+        cand="$(readlink "$d/$bin" 2>/dev/null || true)"
+        case "$cand" in *ai-as) continue;; esac
+        echo "$d/$bin"; return 0
+    done
+    IFS="$_ifs"
+    command -v "$bin"
+}
+
+# Detect tool from symlink name or first argument
+detect_tool() {
+    # Check if called via symlink: claude-* or codex-*
+    if [[ "$SCRIPT_NAME" =~ ^claude-(.+)$ ]]; then
+        echo "claude"
+        return 0
+    elif [[ "$SCRIPT_NAME" =~ ^codex-(.+)$ ]]; then
+        echo "codex"
+        return 0
+    fi
+    
+    # Otherwise check first argument
+    if [ -n "${1:-}" ] && [[ "$1" =~ ^(claude|codex)$ ]]; then
+        echo "$1"
+        return 0
+    fi
+    
+    return 1
+}
+
+# Detect profile from symlink name or argument
+detect_profile() {
+    local tool="$1"
+    
+    # Check symlink name first
+    if [[ "$SCRIPT_NAME" =~ ^(claude|codex)-(.+)$ ]]; then
+        echo "${BASH_REMATCH[2]}"
+        return 0
+    fi
+    
+    # Otherwise second argument
+    if [ -n "${2:-}" ] && [[ ! "$2" =~ ^- ]]; then
+        echo "$2"
+        return 0
+    fi
+    
+    return 1
+}
+
+# Get remaining args after tool and profile
+get_remaining_args() {
+    local tool="$1"
+    local profile="$2"
+    shift 2
+    
+    # If we consumed tool and profile from args, return rest
+    # If called via symlink, return all args
+    if [[ "$SCRIPT_NAME" =~ ^(claude|codex)-(.+)$ ]]; then
+        echo "$@"
+    else
+        shift 2 2>/dev/null || true
+        echo "$@"
+    fi
+}
+
+# Setup paths for a tool
+setup_tool_paths() {
+    local tool="$1"
+    local profile="$2"
+    
+    if [ "$tool" = "claude" ]; then
+        PROFILES_DIR="$PROFILES_BASE/.claude-profiles"
+        PROFILE_HOME="$PROFILES_DIR/$profile"
+        AUTH_FILE="$PROFILE_HOME/.claude.json"
+        CONFIG_DIR="$PROFILE_HOME/.claude"
+        BINARY="claude"
+    else
+        PROFILES_DIR="$PROFILES_BASE/.codex-profiles"
+        PROFILE_HOME="$PROFILES_DIR/$profile"
+        AUTH_FILE="$PROFILE_HOME/.codex/auth.json"
+        CONFIG_DIR="$PROFILE_HOME/.codex"
+        BINARY="codex"
+    fi
+}
+
+# Add tool-specific "yolo" flags for profile wrappers.
+get_wrapper_yolo_args() {
+    local tool="$1"
+    shift || true
+
+    case "$tool" in
+        codex)
+            for arg in "$@"; do
+                [ "$arg" = "--dangerously-bypass-approvals-and-sandbox" ] && return 0
+            done
+            echo "--dangerously-bypass-approvals-and-sandbox"
+            ;;
+    esac
+}
+
+# Get email from auth file
+get_email() {
+    local file="$1"
+    local tool="$2"
+    [ -f "$file" ] || return 1
+    
+    if [ "$tool" = "claude" ]; then
+        python3 -c "
+import json
+try:
+    data = json.load(open('$file'))
+    acct = data.get('oauthAccount', {})
+    print(acct.get('emailAddress', 'unknown'))
+except: print('unknown')
+" 2>/dev/null
+    else
+        python3 -c "
+import json, base64
+try:
+    data = json.load(open('$file'))
+    tok = data.get('tokens',{}).get('id_token','')
+    parts = tok.split('.')
+    payload = parts[1] + '=' * (4 - len(parts[1]) % 4)
+    print(json.loads(base64.b64decode(payload)).get('email','unknown'))
+except: print('unknown')
+" 2>/dev/null
+    fi
+}
+
+# Refresh token (codex only)
+do_refresh() {
+    local auth_file="$1"
+    local label="$2"
+    
+    if [ ! -f "$auth_file" ]; then
+        echo "  $label: no auth file"
+        return 1
+    fi
+    
+    python3 - "$auth_file" "$label" "$CODEX_CLIENT_ID" <<'PYEOF'
+import json, sys, subprocess, os
+from datetime import datetime, timezone
+
+auth_file, label, client_id = sys.argv[1], sys.argv[2], sys.argv[3]
+data = json.load(open(auth_file))
+rt = data.get("tokens", {}).get("refresh_token", "")
+
+if not rt:
+    print(f"  {label}: no refresh token")
+    sys.exit(1)
+
+result = subprocess.run([
+    "curl", "-s", "-X", "POST", "https://auth.openai.com/oauth/token",
+    "-H", "Content-Type: application/x-www-form-urlencoded",
+    "-d", f"grant_type=refresh_token&client_id={client_id}&refresh_token={rt}"
+], capture_output=True, text=True)
+
+resp = json.loads(result.stdout)
+
+if "access_token" in resp:
+    data["tokens"]["access_token"] = resp["access_token"]
+    data["tokens"]["refresh_token"] = resp["refresh_token"]
+    if "id_token" in resp:
+        data["tokens"]["id_token"] = resp["id_token"]
+    data["last_refresh"] = datetime.now(timezone.utc).isoformat()
+    with open(auth_file, "w") as fh:
+        json.dump(data, fh, indent=2)
+    os.chmod(auth_file, 0o600)
+    print(f"  {label}: refreshed")
+    sys.exit(0)
+else:
+    err = resp.get("error", {}).get("message", "unknown error")
+    print(f"  {label}: FAILED — {err}")
+    sys.exit(1)
+PYEOF
+}
+
+# List profiles
+cmd_list() {
+    local filter_tool="${1:-}"
+    
+    for tool in claude codex; do
+        [ -n "$filter_tool" ] && [ "$tool" != "$filter_tool" ] && continue
+        
+        if [ "$tool" = "claude" ]; then
+            dir="$PROFILES_BASE/.claude-profiles"
+        else
+            dir="$PROFILES_BASE/.codex-profiles"
+        fi
+        
+        echo "$tool profiles:"
+        if [ -d "$dir" ]; then
+            found=0
+            for profile_dir in "$dir"/*/; do
+                [ -d "$profile_dir" ] || continue
+                name="$(basename "$profile_dir")"
+                if [ "$tool" = "claude" ]; then
+                    auth="$profile_dir/.claude.json"
+                else
+                    auth="$profile_dir/.codex/auth.json"
+                fi
+                if [ -f "$auth" ]; then
+                    email="$(get_email "$auth" "$tool")"
+                    echo "  $name  ($email)"
+                else
+                    echo "  $name  (no auth)"
+                fi
+                found=1
+            done
+            [ "$found" = "0" ] && echo "  (none)"
+        else
+            echo "  (none)"
+        fi
+        echo ""
+    done
+}
+
+# Setup symlinks
+cmd_setup() {
+    local filter_tool="${1:-}"
+    SCRIPT_DIR="$(dirname "$SCRIPT_PATH")"
+    
+    for tool in claude codex; do
+        [ -n "$filter_tool" ] && [ "$tool" != "$filter_tool" ] && continue
+        
+        if [ "$tool" = "claude" ]; then
+            dir="$PROFILES_BASE/.claude-profiles"
+        else
+            dir="$PROFILES_BASE/.codex-profiles"
+        fi
+        
+        mkdir -p "$dir"
+        
+        for profile_dir in "$dir"/*/; do
+            [ -d "$profile_dir" ] || continue
+            name="$(basename "$profile_dir")"
+            link="$SCRIPT_DIR/$tool-$name"
+            if [ ! -e "$link" ]; then
+                ln -s "$SCRIPT_PATH" "$link"
+                echo "Created: $tool-$name"
+            else
+                echo "Exists:  $tool-$name"
+            fi
+        done
+    done
+    
+    echo ""
+    echo "Done. Run 'ai-as --list' to see profiles."
+}
+
+# Refresh all (codex only)
+cmd_refresh_all() {
+    local filter_tool="${1:-}"
+    [ -n "$filter_tool" ] && [ "$filter_tool" != "codex" ] && return
+    
+    dir="$PROFILES_BASE/.codex-profiles"
+    echo "Refreshing codex profiles..."
+    for profile_dir in "$dir"/*/; do
+        [ -d "$profile_dir" ] || continue
+        name="$(basename "$profile_dir")"
+        auth="$profile_dir/.codex/auth.json"
+        [ -f "$auth" ] && do_refresh "$auth" "$name"
+    done
+}
+
+# Usage check
+cmd_usage() {
+    local tool="$1"
+    local profile="$2"
+    
+    setup_tool_paths "$tool" "$profile"
+    
+    if [ ! -f "$AUTH_FILE" ]; then
+        echo "No auth found for '$tool/$profile'."
+        echo "Run: ai-as $tool $profile /login  (or just 'claude-$profile /login')"
+        exit 1
+    fi
+    
+    echo "Profile: $profile"
+    echo "Tool:    $tool"
+    echo "Email:   $(get_email "$AUTH_FILE" "$tool")"
+    echo ""
+    
+    if [ "$tool" = "codex" ]; then
+        # Freshen token: refresh (leader) or pull published token (follower)
+        if [ "$(codex_role_of "$profile")" = "follower" ] && command -v codex-token >/dev/null 2>&1; then
+            codex-token pull --profile "$profile" >/dev/null 2>&1 || true
+        else
+            do_refresh "$AUTH_FILE" "$profile" > /dev/null 2>&1
+        fi
+        
+        ACCESS_TOKEN=$(python3 -c "import json; print(json.load(open('$AUTH_FILE'))['tokens']['access_token'])")
+        RESPONSE=$(curl -s -H "Authorization: Bearer $ACCESS_TOKEN" -H "User-Agent: codex-cli/0.116.0" "https://chatgpt.com/backend-api/wham/usage")
+        
+        python3 - "$RESPONSE" "$profile" <<'PYEOF'
+import json, sys
+data = json.loads(sys.argv[1])
+profile = sys.argv[2]
+
+email = data.get("email", "unknown")
+plan = data.get("plan_type", "unknown")
+rl = data.get("rate_limit") or {}
+primary = rl.get("primary_window") or {}
+secondary = rl.get("secondary_window") or {}
+
+def fmt_reset(seconds):
+    if not seconds: return "?"
+    h, m = divmod(int(seconds), 3600)
+    m = m // 60
+    return f"{h}h {m}m" if h > 0 else f"{m}m"
+
+print(f"Account:        {email}")
+print(f"Plan:           {plan}")
+print(f"Rate limited:   {'YES' if rl.get('limit_reached') else 'no'}")
+print()
+print(f"5-hour window:  {primary.get('used_percent', '?')}% used   (resets in {fmt_reset(primary.get('reset_after_seconds'))})")
+print(f"Weekly window:  {secondary.get('used_percent', '?')}% used   (resets in {fmt_reset(secondary.get('reset_after_seconds'))})")
+
+for extra in (data.get("additional_rate_limits") or []):
+    name = extra.get("limit_name", "?")
+    erl = extra.get("rate_limit", {})
+    ep = erl.get("primary_window", {})
+    es = erl.get("secondary_window", {})
+    print(f"\n{name}:")
+    print(f"  5-hour:       {ep.get('used_percent', '?')}% used   (resets in {fmt_reset(ep.get('reset_after_seconds'))})")
+    if es:
+        print(f"  Weekly:       {es.get('used_percent', '?')}% used   (resets in {fmt_reset(es.get('reset_after_seconds'))})")
+
+credits = data.get("credits", {})
+balance = credits.get("balance", "0")
+if balance != "0":
+    print(f"\nCredits:        ${balance}")
+PYEOF
+    else
+        echo "Note: Claude doesn't expose usage via CLI API."
+        echo "Check usage in the Claude web app or desktop app."
+    fi
+}
+
+# --- Main ---
+
+# Handle global flags
+case "${1:-}" in
+    --list|-l)
+        cmd_list "${2:-}"
+        exit 0
+        ;;
+    --setup)
+        cmd_setup "${2:-}"
+        exit 0
+        ;;
+    --refresh-all)
+        cmd_refresh_all "${2:-}"
+        exit 0
+        ;;
+    --help|-h)
+        cat <<'HELP'
+Usage: ai-as <tool> <profile> [args...]
+       claude-<profile> [args...]
+       codex-<profile> [args...]
+
+Tools: claude, codex
+
+Commands:
+  ai-as --list [tool]           List profiles
+  ai-as --setup [tool]          Create symlinks
+  ai-as --refresh-all [tool]    Refresh all tokens (codex)
+
+Per-profile:
+  ai-as <tool> <profile> usage  Show usage (codex has details)
+  ai-as <tool> <profile> refresh Refresh token (codex only)
+
+Examples:
+  ai-as claude kas              Run Claude as 'kas'
+  claude-kas                    Same (via symlink)
+  codex-kas usage               Show Kas's Codex usage
+HELP
+        exit 0
+        ;;
+esac
+
+# Detect tool and profile
+TOOL=$(detect_tool "$1") || {
+    echo "Error: Cannot detect tool. Use symlink (claude-kas, codex-kas) or specify:"
+    echo "  ai-as claude <profile> [args...]"
+    echo "  ai-as codex <profile> [args...]"
+    exit 1
+}
+
+PROFILE=$(detect_profile "$TOOL" "$2" "$3") || {
+    echo "Error: Cannot detect profile. Run 'ai-as --list' to see profiles."
+    exit 1
+}
+
+# Get remaining args
+if [[ "$SCRIPT_NAME" =~ ^(claude|codex)-(.+)$ ]]; then
+    # Called via symlink - all args are for the tool
+    REMAINING_ARGS=("$@")
+else
+    # Called directly - skip tool and profile args
+    shift 2 2>/dev/null || true
+    REMAINING_ARGS=("$@")
+fi
+
+# Setup paths
+setup_tool_paths "$TOOL" "$PROFILE"
+
+# Create profile dir if needed (codex: only for `login` — anything else must
+# fail loudly on the missing credential instead of minting an empty profile).
+if [ ! -d "$PROFILE_HOME" ]; then
+    if [ "$TOOL" = "codex" ] && [ "${REMAINING_ARGS[0]:-}" != "login" ]; then
+        :
+    else
+        echo "Creating $TOOL profile '$PROFILE' at $PROFILE_HOME"
+        mkdir -p "$PROFILE_HOME"
+    fi
+fi
+
+# Codex sessions live in the SHARED tree ($PROFILES_BASE/.codex/sessions) so
+# `codex-<profile> resume` sees sessions created by any profile or plain codex.
+# Goals db is shared for the same reason (goal-resume broke under per-profile
+# HOME, 2026-07-20). Self-heals drift on every launch.
+if [ "$TOOL" = "codex" ]; then
+    mkdir -p "$PROFILE_HOME/.codex" "$PROFILES_BASE/.codex/sessions"
+    if [ -d "$PROFILE_HOME/.codex/sessions" ] && [ ! -L "$PROFILE_HOME/.codex/sessions" ]; then
+        rsync -a "$PROFILE_HOME/.codex/sessions/" "$PROFILES_BASE/.codex/sessions/" 2>/dev/null
+        rm -rf "$PROFILE_HOME/.codex/sessions"
+        log_ai_as repair "merged per-profile sessions into shared tree"
+    fi
+    [ -e "$PROFILE_HOME/.codex/sessions" ] || { ln -s "$PROFILES_BASE/.codex/sessions" "$PROFILE_HOME/.codex/sessions"; log_ai_as repair "linked sessions to shared tree"; }
+    for f in goals_1.sqlite goals_1.sqlite-shm goals_1.sqlite-wal; do
+        if [ -f "$PROFILE_HOME/.codex/$f" ] && [ ! -L "$PROFILE_HOME/.codex/$f" ]; then
+            mv "$PROFILE_HOME/.codex/$f" "$PROFILE_HOME/.codex/$f.bak-presplit-$(date +%Y%m%d)"
+            log_ai_as repair "moved per-profile $f aside for shared link"
+        fi
+        [ -e "$PROFILE_HOME/.codex/$f" ] || ln -s "$PROFILES_BASE/.codex/$f" "$PROFILE_HOME/.codex/$f"
+    done
+fi
+
+# Handle subcommands
+if [ "${REMAINING_ARGS[0]:-}" = "usage" ]; then
+    cmd_usage "$TOOL" "$PROFILE"
+    exit $?
+fi
+
+if [ "${REMAINING_ARGS[0]:-}" = "refresh" ]; then
+    if [ "$TOOL" = "codex" ]; then
+        if [ "$(codex_role_of "$PROFILE")" = "follower" ] && command -v codex-token >/dev/null 2>&1; then
+            codex-token pull --profile "$PROFILE" && echo "  $PROFILE: pulled (follower; leader owns refresh)"
+        else
+            do_refresh "$AUTH_FILE" "$PROFILE"
+        fi
+        exit $?
+    else
+        echo "Refresh not implemented for Claude (handled internally)"
+        exit 1
+    fi
+fi
+
+# Auto-refresh codex before launch — now role-aware (see launch section below).
+
+YOLO_ARGS=()
+while IFS= read -r arg; do
+    [ -n "$arg" ] && YOLO_ARGS+=("$arg")
+done < <(get_wrapper_yolo_args "$TOOL" "${REMAINING_ARGS[@]}")
+
+# Resolve the REAL binary path (skip our own dir / wrapper to avoid recursion).
+BINARY_PATH="$(resolve_real_binary "$BINARY")"
+
+# Create symlink for the real HOME's .npm-global in profile if needed (claude)
+if [ "$TOOL" = "claude" ] && [ -d "$HOME/.npm-global" ] && [ ! -d "$PROFILE_HOME/.npm-global" ]; then
+    ln -s "$HOME/.npm-global" "$PROFILE_HOME/.npm-global" 2>/dev/null || true
+fi
+
+# Role-aware launch for codex.
+if [ "$TOOL" = "codex" ]; then
+    # Fail loudly on a missing credential: silently creating an empty profile
+    # turns a typo (or a bad HOME) into a mystery 401.
+    if [ ! -f "$PROFILE_HOME/.codex/auth.json" ] && [ "${REMAINING_ARGS[0]:-}" != "login" ]; then
+        echo "ai-as: no codex auth for '$PROFILE' at $PROFILE_HOME/.codex/auth.json" >&2
+        echo "  base root: $PROFILES_BASE (HOME was: $HOME)" >&2
+        echo "  fix: run 'ai-as codex $PROFILE login' or check the profile name." >&2
+        exit 1
+    fi
+    ROLE="$(codex_role_of "$PROFILE")"
+    log_ai_as launch "role=$ROLE"
+    if [ "$ROLE" = "follower" ]; then
+        # Follower: pull the leader's published token; blackhole refresh so we
+        # never rotate the leader's refresh_token.
+        command -v codex-token >/dev/null 2>&1 && codex-token pull --profile "$PROFILE" >/dev/null 2>&1 || true
+        # login subcommand: run it, then push the new token to the leader (auto-sync).
+        if [ "${REMAINING_ARGS[0]:-}" = "login" ]; then
+            env HOME="$PROFILE_HOME" PATH="$PATH" "$BINARY_PATH" "${YOLO_ARGS[@]}" "${REMAINING_ARGS[@]}" || exit $?
+            if command -v codex-token >/dev/null 2>&1; then
+                echo "ai-as: syncing freshly-logged-in '$PROFILE' to leader..."
+                codex-token sync --profile "$PROFILE"
+            fi
+            exit 0
+        fi
+        exec env HOME="$PROFILE_HOME" PATH="$PATH" CODEX_REFRESH_TOKEN_URL_OVERRIDE="$BLACKHOLE_URL" \
+            "$BINARY_PATH" "${YOLO_ARGS[@]}" "${REMAINING_ARGS[@]}"
+    else
+        # Leader: refresh + publish a fresh token for followers, then launch.
+        if [ -f "$AUTH_FILE" ]; then
+            do_refresh "$AUTH_FILE" "$PROFILE" > /dev/null 2>&1 || true
+        fi
+        command -v codex-token >/dev/null 2>&1 && codex-token publish --profile "$PROFILE" >/dev/null 2>&1 || true
+        exec env HOME="$PROFILE_HOME" PATH="$PATH" "$BINARY_PATH" "${YOLO_ARGS[@]}" "${REMAINING_ARGS[@]}"
+    fi
+fi
+
+# Claude (and any non-codex tool): launch as before.
+exec env HOME="$PROFILE_HOME" PATH="$PATH" "$BINARY_PATH" "${YOLO_ARGS[@]}" "${REMAINING_ARGS[@]}"

@@ -22,6 +22,7 @@ COMMIT = re.compile(r"^[0-9a-f]{40}$")
 RELEASE = re.compile(r"^[0-9a-f]{12}-[0-9a-f]{12}$")
 PROFILE = re.compile(r"^canary-[A-Za-z0-9._-]+$")
 HOST = re.compile(r"^[A-Za-z0-9._-]+$")
+MACOS_USER = re.compile(r"^ai-token-canary(?:-[A-Za-z0-9._-]+)?$")
 RECORD_KEYS_V2 = {
     "schema",
     "timestamp",
@@ -96,12 +97,25 @@ def validate_snapshot(snapshot_value, path):
     for metadata in snapshot_value.values():
         if not isinstance(metadata, dict) or metadata.get("exists") not in {True, False}:
             fail(f"invalid credential state metadata: {path.name}")
-        expected = {"exists"} if metadata["exists"] is False else {
-            "exists", "size", "mtime_ns", "ctime_ns", "inode", "mode",
-        }
+        keychain = metadata.get("store") == "keychain"
+        if keychain:
+            expected = {"exists", "store"} if metadata["exists"] is False else {
+                "exists", "store", "account", "created", "modified",
+            }
+        else:
+            expected = {"exists"} if metadata["exists"] is False else {
+                "exists", "size", "mtime_ns", "ctime_ns", "inode", "mode",
+            }
         if set(metadata) != expected:
             fail(f"invalid credential state metadata: {path.name}")
-        if metadata["exists"] is True:
+        if metadata["exists"] is True and keychain:
+            if (
+                not MACOS_USER.fullmatch(str(metadata["account"]))
+                or not re.fullmatch(r"[0-9]{14}Z", str(metadata["created"]))
+                or not re.fullmatch(r"[0-9]{14}Z", str(metadata["modified"]))
+            ):
+                fail(f"invalid credential state metadata: {path.name}")
+        elif metadata["exists"] is True:
             if any(
                 not isinstance(metadata[name], int) or isinstance(metadata[name], bool) or metadata[name] < 0
                 for name in ("size", "mtime_ns", "ctime_ns", "inode")

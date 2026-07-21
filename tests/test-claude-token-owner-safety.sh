@@ -52,7 +52,14 @@ SH
 cat > "$TMP/bin/security" <<'SH'
 #!/usr/bin/env bash
 [ -z "${SECURITY_CALLED:-}" ] || printf called >> "$SECURITY_CALLED"
-exit 99
+case "${1:-}" in
+    find-generic-password) exit "${SECURITY_FIND_STATUS:-99}" ;;
+    add-generic-password)
+        [ -z "${SECURITY_ARGS:-}" ] || printf '%s\n' "$*" > "$SECURITY_ARGS"
+        exit "${SECURITY_ADD_STATUS:-99}"
+        ;;
+    *) exit 99 ;;
+esac
 SH
 cat > "$TMP/bin/sleep" <<'SH'
 #!/usr/bin/env bash
@@ -64,12 +71,13 @@ new_home() {
     HOME="$TMP/$1"
     export HOME
     mkdir -p "$HOME/.claude-token" "$HOME/.claude" "$HOME/shared/claude-tokens"
-    TEST_OUTPUT="$HOME/result" CURL_CALLED="$HOME/curl-called" CURL_BODY="$HOME/curl-body" SECURITY_CALLED="$HOME/security-called" CRONTAB_FILE="$HOME/crontab"
+    TEST_OUTPUT="$HOME/result" CURL_CALLED="$HOME/curl-called" CURL_BODY="$HOME/curl-body" SECURITY_CALLED="$HOME/security-called" SECURITY_ARGS="$HOME/security-args" CRONTAB_FILE="$HOME/crontab"
     CURL_STATUS=0 CURL_RESPONSE=""
+    SECURITY_FIND_STATUS=99 SECURITY_ADD_STATUS=99
     CLAUDE_LOGIN_STATUS=0 CLAUDE_LOGIN_CREDS=""
     FAKE_UNAME=Linux CLAUDE_TOKEN_WRAPPER_DIR="$HOME/bin" CLAUDE_TOKEN_MAINTENANCE_DIR="$HOME/LaunchAgents"
     unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN CLAUDE_CODE_OAUTH_TOKEN CLAUDE_CONFIG_DIR
-    export TEST_OUTPUT CURL_CALLED CURL_BODY SECURITY_CALLED CRONTAB_FILE CURL_STATUS CURL_RESPONSE CLAUDE_LOGIN_STATUS CLAUDE_LOGIN_CREDS FAKE_UNAME CLAUDE_TOKEN_WRAPPER_DIR CLAUDE_TOKEN_MAINTENANCE_DIR
+    export TEST_OUTPUT CURL_CALLED CURL_BODY SECURITY_CALLED SECURITY_ARGS CRONTAB_FILE CURL_STATUS CURL_RESPONSE SECURITY_FIND_STATUS SECURITY_ADD_STATUS CLAUDE_LOGIN_STATUS CLAUDE_LOGIN_CREDS FAKE_UNAME CLAUDE_TOKEN_WRAPPER_DIR CLAUDE_TOKEN_MAINTENANCE_DIR
     printf 'user=owner-a\nurl=https://vault.invalid\ntoken=test-token\n' > "$HOME/.claude-token/config"
     printf '%b' "${2:-}" >> "$HOME/.claude-token/config"
 }
@@ -123,6 +131,17 @@ write_creds real-refresh-token
 run_token run hello
 [ "$(sed -n '1p' "$TEST_OUTPUT")" = unset ]
 [ ! -e "$CURL_CALLED" ]
+
+# A fresh macOS follower keychain has no Claude item yet. `security` reports
+# that absence with exit 44; pull must fall back to the OS account and create
+# the first keychain item instead of aborting under `set -euo pipefail`.
+new_home mac-first-follower-pull 'mode=follower\n'
+FAKE_UNAME=Darwin SECURITY_FIND_STATUS=44 SECURITY_ADD_STATUS=0
+export FAKE_UNAME SECURITY_FIND_STATUS SECURITY_ADD_STATUS
+CURL_RESPONSE="$HOME/follower.json"; export CURL_RESPONSE
+write_shared first-follower-token 4102444800000 "$CURL_RESPONSE"
+run_token pull --profile owner-a >/dev/null
+grep -q '^add-generic-password -U -s Claude Code-credentials -a ' "$SECURITY_ARGS"
 
 # Pull cannot replace owner credentials, and stale follower pulls never write.
 new_home owner-pull 'mode=owner\n'

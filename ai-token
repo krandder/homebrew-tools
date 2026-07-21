@@ -1224,7 +1224,7 @@ claude_local_refresh_mode() {
 write_oauth_json() { # oauth_str  -> keychain (wrapped) or file (flat)
     local oauth="$1"
     if is_mac; then
-        local acct; acct="$(kc_account)"; [ -n "$acct" ] || acct="$(whoami)"
+        local acct; acct="$(kc_account || true)"; [ -n "$acct" ] || acct="$(whoami)"
         local wrapped; wrapped="$(python3 -c 'import json,sys;print(json.dumps({"claudeAiOauth":json.loads(sys.argv[1])}))' "$oauth")"
         security add-generic-password -U -s "$KC_SVC" -a "$acct" -w "$wrapped" >/dev/null
     else

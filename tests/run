@@ -15,7 +15,7 @@ for script in ("ai-vault-http", "ai-any"):
     compile(Path(script).read_text(encoding="utf-8"), script, "exec")
 PY
 
-for pattern in 'test_ai_any.py' 'test_ai_token*.py' 'test_ai_vault*.py' 'test_any_mirrors.py' 'test_any_pool.py' 'test_any_wrappers.py' 'test_ci_contract.py' 'test_compatibility_shims.py' 'test_follower_leader*.py' 'test_formula_any_resources.py' 'test_formula_integrity.py' 'test_img_bridge.py' 'test_release*.py' 'test_service_environment.py' 'test_strict_unittest.py' 'test_tdd_history.py'; do
+for pattern in 'test_ai_any.py' 'test_ai_token*.py' 'test_ai_vault*.py' 'test_any_mirrors.py' 'test_any_pool.py' 'test_any_wrappers.py' 'test_codex_any_resume.py' 'test_wrappers_real_files.py' 'test_ci_contract.py' 'test_compatibility_shims.py' 'test_follower_leader*.py' 'test_formula_any_resources.py' 'test_formula_integrity.py' 'test_img_bridge.py' 'test_release*.py' 'test_service_environment.py' 'test_strict_unittest.py' 'test_tdd_history.py'; do
     tests/run-unittest tests "$pattern"
 done
 for test_file in tests/test-*.sh; do

@@ -13,6 +13,23 @@ fi
 exec 3>&- 3<&-
 
 mkdir -p "$ANY_HOME"
+if [[ "${1:-}" == "resume" && -n "${2:-}" ]]; then
+  rollout="$(find "$ANY_HOME/sessions" -type f -name "*${2}.jsonl" -print -quit 2>/dev/null || :)"
+  if [[ -z "$rollout" ]]; then
+    for sessions in "$HOME/.codex/sessions" "$HOME"/.codex-profiles/*/sessions "$HOME"/.codex-profiles/*/.codex/sessions; do
+      [[ -d "$sessions" ]] || continue
+      rollout="$(find "$sessions" -type f -name "*${2}.jsonl" -print -quit 2>/dev/null || :)"
+      [[ -n "$rollout" ]] || continue
+      destination="$ANY_HOME/sessions/${rollout#"$sessions"/}"
+      mkdir -p "$(dirname "$destination")"
+      ln "$rollout" "$destination" 2>/dev/null || cp -n "$rollout" "$destination"
+      break
+    done
+  fi
+fi
+
+exec 9>"$ANY_HOME/.init.lock"
+flock 9
 # freshest profile AT at launch (sentinel RT: codex must never refresh itself);
 # the proxy owns per-request freshness afterwards.
 python3 - <<'PY'
@@ -41,6 +58,8 @@ name = "any-proxy"
 base_url = "http://127.0.0.1:7810"
 wire_api = "responses"
 TOML
+flock -u 9
+exec 9>&-
 
 export CODEX_HOME="$ANY_HOME"
 export CODEX_REFRESH_TOKEN_URL_OVERRIDE="http://127.0.0.1:9/oauth/token"

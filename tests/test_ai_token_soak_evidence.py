@@ -1,4 +1,5 @@
 import datetime
+import hashlib
 import json
 import pathlib
 import subprocess
@@ -20,13 +21,14 @@ class SoakEvidenceTest(unittest.TestCase):
         self.evidence = self.root / "evidence"
         self.evidence.mkdir()
         self.counter = 0
+        self.latest = {}
 
     def tearDown(self):
         self.temporary.cleanup()
 
     def write_record(
         self, day, host, role, *, status="ok", commit=COMMIT, steps=None,
-        state_before=None, state_after=None,
+        state_before=None, state_after=None, trigger="scheduled",
     ):
         self.counter += 1
         if steps is None:
@@ -34,8 +36,13 @@ class SoakEvidenceTest(unittest.TestCase):
                 "verify-release", "pull", "check",
             ]
             steps = [{"name": name, "returncode": 0} for name in names]
+        previous = self.latest.get((host, role))
+        previous_evidence = None if previous is None else {
+            "name": previous.name,
+            "sha256": hashlib.sha256(previous.read_bytes()).hexdigest(),
+        }
         record = {
-            "schema": 2,
+            "schema": 3,
             "timestamp": f"{day}T12:00:00+00:00",
             "host": host,
             "kind": "claude",
@@ -44,6 +51,8 @@ class SoakEvidenceTest(unittest.TestCase):
             "expect_commit": commit,
             "release": RELEASE,
             "status": status,
+            "trigger": trigger,
+            "previous_evidence": previous_evidence,
             "steps": steps,
             "state_before": state_before or {"credential": {"exists": False}},
             "state_after": state_after or {"credential": {"exists": False}},
@@ -51,9 +60,10 @@ class SoakEvidenceTest(unittest.TestCase):
         path = self.evidence / f"{day}-{host}-{role}-{self.counter}.json"
         path.write_text(json.dumps(record))
         path.chmod(0o600)
+        self.latest[(host, role)] = path
         return path
 
-    def populate(self, start="2026-07-20", days=3):
+    def populate(self, start="2026-07-20", days=3, anchor=True):
         first = datetime.date.fromisoformat(start)
         for offset in range(days):
             day = str(first + datetime.timedelta(days=offset))
@@ -64,6 +74,18 @@ class SoakEvidenceTest(unittest.TestCase):
             after = {"credential": {
                 "exists": True, "size": offset + 1, "mtime_ns": offset + 1,
                 "ctime_ns": offset + 1, "inode": 1, "mode": "0600",
+            }}
+            self.write_record(day, "farol", "leader", state_before=before, state_after=after)
+            self.write_record(day, "agent-1", "follower", state_before=before, state_after=after)
+        if anchor:
+            day = str(first + datetime.timedelta(days=days))
+            before = {"credential": {
+                "exists": True, "size": days, "mtime_ns": days,
+                "ctime_ns": days, "inode": 1, "mode": "0600",
+            }}
+            after = {"credential": {
+                "exists": True, "size": days + 1, "mtime_ns": days + 1,
+                "ctime_ns": days + 1, "inode": 1, "mode": "0600",
             }}
             self.write_record(day, "farol", "leader", state_before=before, state_after=after)
             self.write_record(day, "agent-1", "follower", state_before=before, state_after=after)
@@ -116,6 +138,48 @@ class SoakEvidenceTest(unittest.TestCase):
         result = self.run_verifier()
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("failed canary evidence", result.stderr)
+
+    def test_manual_success_does_not_satisfy_a_scheduled_host_day(self):
+        self.write_record("2026-07-20", "farol", "leader")
+        self.write_record("2026-07-20", "agent-1", "follower", trigger="manual")
+        self.write_record("2026-07-21", "farol", "leader")
+        self.write_record("2026-07-21", "agent-1", "follower")
+        result = self.run_verifier(days="1", through="2026-07-20")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("2026-07-20 agent-1:follower", result.stderr)
+
+    def test_omitted_failure_breaks_the_safe_evidence_chain(self):
+        first = datetime.date(2026, 7, 20)
+        omitted = None
+        for offset in range(3):
+            day = str(first + datetime.timedelta(days=offset))
+            self.write_record(day, "farol", "leader")
+            if offset == 1:
+                omitted = self.write_record(
+                    day,
+                    "agent-1",
+                    "follower",
+                    status="failed",
+                    steps=[
+                        {"name": "verify-release", "returncode": 0},
+                        {"name": "pull", "returncode": 7},
+                    ],
+                )
+            self.write_record(day, "agent-1", "follower")
+        self.write_record("2026-07-23", "farol", "leader")
+        self.write_record("2026-07-23", "agent-1", "follower")
+        omitted.unlink()
+        result = self.run_verifier()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("missing chained evidence", result.stderr)
+
+    def test_post_window_anchor_is_required_for_every_scheduled_role(self):
+        self.populate()
+        anchor = next(self.evidence.glob("2026-07-23-agent-1-follower-*.json"))
+        anchor.unlink()
+        result = self.run_verifier()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("post-window anchor", result.stderr)
 
     def test_mixed_commit_or_fabricated_green_steps_fail_convergence(self):
         self.populate()

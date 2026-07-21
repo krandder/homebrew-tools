@@ -238,10 +238,14 @@ record in the window fails the gate even if a later retry succeeds. This proves
 the eventual soak only after real scheduled evidence exists; it does not start
 or simulate the live 30-day clock.
 
-Canary evidence schema 2 measures unexpected writers without reading or
-hashing credential contents. Each run records only existence, size, inode,
-mtime, ctime, and mode before and after the designated lifecycle command. The
-next run must begin from the previous final metadata or it fails before release
+Canary evidence schema 3 measures unexpected writers without reading or
+hashing credential contents. Each run records whether its entrypoint was
+scheduled or manual, a SHA-256 link to the previous sanitized evidence record,
+and only existence, size, inode, mtime, ctime, and mode before and after the
+designated lifecycle command. A manual success cannot satisfy a scheduled day.
+An omitted record breaks the chain, and one successful scheduled record after
+the window anchors each host/role tail before the gate can pass. The next run
+must begin from the previous final metadata or it fails before release
 verification; the 30-day verifier independently checks the complete per-host
 chain. Existing credentials must be regular mode-0600 files. Scheduler-native
 nonzero exit and `OnFailure`/incident wiring remain the deployment alert path.

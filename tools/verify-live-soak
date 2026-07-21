@@ -10,6 +10,7 @@ exit 127
 
 import argparse
 import datetime
+import hashlib
 import json
 import pathlib
 import re
@@ -21,7 +22,7 @@ COMMIT = re.compile(r"^[0-9a-f]{40}$")
 RELEASE = re.compile(r"^[0-9a-f]{12}-[0-9a-f]{12}$")
 PROFILE = re.compile(r"^canary-[A-Za-z0-9._-]+$")
 HOST = re.compile(r"^[A-Za-z0-9._-]+$")
-RECORD_KEYS = {
+RECORD_KEYS_V2 = {
     "schema",
     "timestamp",
     "host",
@@ -35,6 +36,9 @@ RECORD_KEYS = {
     "state_before",
     "state_after",
 }
+RECORD_KEYS_V3 = RECORD_KEYS_V2 | {"trigger", "previous_evidence"}
+EVIDENCE_NAME = re.compile(r"^[A-Za-z0-9._-]+\.json$")
+SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
 
 def fail(message):
@@ -55,11 +59,26 @@ def read_record(path):
     if not path.is_file() or stat.S_IMODE(path.stat().st_mode) != 0o600:
         fail(f"evidence must be a regular mode 0600 file: {path.name}")
     try:
-        record = json.loads(path.read_text())
+        raw = path.read_bytes()
+        record = json.loads(raw)
     except (OSError, json.JSONDecodeError) as error:
         fail(f"invalid evidence {path.name}: {error}")
-    if not isinstance(record, dict) or set(record) != RECORD_KEYS or record["schema"] != 2:
+    if not isinstance(record, dict) or record.get("schema") not in {2, 3}:
         fail(f"invalid evidence schema: {path.name}")
+    expected_keys = RECORD_KEYS_V2 if record["schema"] == 2 else RECORD_KEYS_V3
+    if set(record) != expected_keys:
+        fail(f"invalid evidence schema: {path.name}")
+    if record["schema"] == 3:
+        if record["trigger"] not in {"manual", "scheduled"}:
+            fail(f"invalid evidence trigger: {path.name}")
+        previous = record["previous_evidence"]
+        if previous is not None and (
+            not isinstance(previous, dict)
+            or set(previous) != {"name", "sha256"}
+            or not EVIDENCE_NAME.fullmatch(str(previous["name"]))
+            or not SHA256.fullmatch(str(previous["sha256"]))
+        ):
+            fail(f"invalid previous evidence link: {path.name}")
     try:
         timestamp = datetime.datetime.fromisoformat(record["timestamp"])
     except (TypeError, ValueError):
@@ -68,7 +87,7 @@ def read_record(path):
         fail(f"evidence timestamp must be UTC: {path.name}")
     validate_snapshot(record["state_before"], path)
     validate_snapshot(record["state_after"], path)
-    return record, timestamp
+    return record, timestamp, hashlib.sha256(raw).hexdigest()
 
 
 def validate_snapshot(snapshot_value, path):
@@ -137,12 +156,18 @@ def main():
 
     requirements = sorted(set(args.require))
     start = through - datetime.timedelta(days=args.days - 1)
+    entries = []
+    by_name = {}
+    for path in sorted(args.evidence_dir.glob("*.json")):
+        record, timestamp, digest = read_record(path)
+        entries.append((path, record, timestamp, digest))
+        by_name[path.name] = (path, record, timestamp, digest)
+
     present = set()
     histories = {}
     records = 0
     selected_release = None
-    for path in sorted(args.evidence_dir.glob("*.json")):
-        record, timestamp = read_record(path)
+    for path, record, timestamp, _digest in entries:
         day = timestamp.date()
         if day < start or day > through:
             continue
@@ -168,7 +193,10 @@ def main():
         if record["status"] != "ok":
             fail(f"failed canary evidence: {path.name}")
         successful_steps(record, path)
-        present.add((day, host, role))
+        if record["schema"] != 3:
+            fail(f"scheduled provenance missing: {path.name}")
+        if record["trigger"] == "scheduled":
+            present.add((day, host, role))
         histories.setdefault((host, role), []).append((timestamp, path, record))
         records += 1
 
@@ -183,6 +211,58 @@ def main():
         for previous, current in zip(ordered, ordered[1:]):
             if previous[2]["state_after"] != current[2]["state_before"]:
                 fail(f"writer continuity mismatch: {current[1].name}")
+
+    for host, role in requirements:
+        anchors = [
+            (path, record, timestamp)
+            for path, record, timestamp, _digest in entries
+            if timestamp.date() > through
+            and record.get("schema") == 3
+            and record.get("host") == host
+            and record.get("role") == role
+            and record.get("kind") == "claude"
+            and record.get("profile") == args.profile
+            and record.get("expect_commit") == args.expect_commit
+            and record.get("release") == selected_release
+            and record.get("trigger") == "scheduled"
+            and record.get("status") == "ok"
+        ]
+        if not anchors:
+            fail(f"missing post-window anchor: {host}:{role}")
+        successful_steps(anchors[0][1], anchors[0][0])
+
+    chain_histories = {}
+    for entry in entries:
+        path, record, timestamp, _digest = entry
+        chain_histories.setdefault((record.get("host"), record.get("role")), []).append(entry)
+        if record.get("schema") != 3:
+            continue
+        previous = record["previous_evidence"]
+        if previous is None:
+            continue
+        target = by_name.get(previous["name"])
+        if target is None:
+            fail(f"missing chained evidence: {previous['name']}")
+        if target[3] != previous["sha256"]:
+            fail(f"chained evidence hash mismatch: {previous['name']}")
+        if (
+            target[1].get("host") != record.get("host")
+            or target[1].get("role") != record.get("role")
+            or target[1].get("profile") != record.get("profile")
+            or target[2] >= timestamp
+        ):
+            fail(f"invalid chained evidence predecessor: {path.name}")
+
+    for history in chain_histories.values():
+        ordered = sorted(history, key=lambda item: (item[2], item[0].name))
+        for index, current in enumerate(ordered):
+            if current[1].get("schema") != 3:
+                continue
+            previous = current[1]["previous_evidence"]
+            expected = None if index == 0 else ordered[index - 1][0].name
+            actual = None if previous is None else previous["name"]
+            if actual != expected:
+                fail(f"nonconsecutive evidence chain: {current[0].name}")
 
     print(json.dumps({
         "status": "ok",

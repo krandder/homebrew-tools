@@ -10,6 +10,7 @@ exit 127
 
 import argparse
 import datetime
+import hashlib
 import json
 import os
 import pathlib
@@ -153,7 +154,7 @@ def snapshot(paths):
     return result
 
 
-def previous_state(directory, host, profile, role):
+def previous_evidence(directory, host, profile, role):
     latest = None
     for path in sorted(directory.glob("*.json")) if directory.is_dir() else ():
         if path.is_symlink() or not path.is_file() or stat.S_IMODE(path.stat().st_mode) != 0o600:
@@ -167,7 +168,7 @@ def previous_state(directory, host, profile, role):
             fail(f"invalid prior canary evidence: {path.name}")
         if record.get("schema") == 1:
             continue
-        if record.get("schema") != 2 or not isinstance(record.get("state_after"), dict):
+        if record.get("schema") not in {2, 3} or not isinstance(record.get("state_after"), dict):
             fail(f"invalid prior canary evidence: {path.name}")
         if (
             record.get("host") == host
@@ -175,8 +176,8 @@ def previous_state(directory, host, profile, role):
             and record.get("role") == role
             and (latest is None or timestamp > latest[0])
         ):
-            latest = timestamp, record["state_after"]
-    return None if latest is None else latest[1]
+            latest = timestamp, path, record["state_after"]
+    return latest
 
 
 def write_evidence(path, record):
@@ -225,6 +226,9 @@ def main():
         fail("provider/vault execution requires --live")
 
     config = load_config(args.config)
+    trigger = os.environ.get("AI_TOKEN_CANARY_TRIGGER", "manual")
+    if trigger not in {"manual", "scheduled"}:
+        fail("AI_TOKEN_CANARY_TRIGGER must be manual or scheduled")
     release_root = pathlib.Path(config["release_root"]).resolve()
     release = selected_release(release_root)
     environment = safe_environment(config, release)
@@ -236,9 +240,16 @@ def main():
     )
     paths = credential_paths(config)
     state_before = snapshot(paths)
-    previous = previous_state(pathlib.Path(config["evidence_dir"]), host, config["profile"], config["role"])
+    previous = previous_evidence(
+        pathlib.Path(config["evidence_dir"]), host, config["profile"], config["role"]
+    )
+    previous_state = None if previous is None else previous[2]
+    previous_link = None if previous is None else {
+        "name": previous[1].name,
+        "sha256": hashlib.sha256(previous[1].read_bytes()).hexdigest(),
+    }
     record = {
-        "schema": 2,
+        "schema": 3,
         "timestamp": timestamp.isoformat(),
         "host": host,
         "kind": "claude",
@@ -247,12 +258,14 @@ def main():
         "expect_commit": config["expect_commit"],
         "release": release.name,
         "status": "running",
+        "trigger": trigger,
+        "previous_evidence": previous_link,
         "steps": [],
         "state_before": state_before,
         "state_after": state_before,
     }
     write_evidence(evidence_path, record)
-    if previous is not None and previous != state_before:
+    if previous_state is not None and previous_state != state_before:
         record["status"] = "failed"
         record["steps"].append({"name": "writer-continuity", "returncode": 1})
         write_evidence(evidence_path, record)

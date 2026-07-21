@@ -42,6 +42,7 @@ class CanaryDeploymentAssetsTest(unittest.TestCase):
                     f"ExecStart={home}/release/current/tools/run-live-canary --config {home}/canary.json --live",
                     unit,
                 )
+                self.assertIn("Environment=AI_TOKEN_CANARY_TRIGGER=scheduled", unit)
                 self.assertIn(f"OnCalendar=*-*-* {schedule}", timer)
                 self.assertIn("Persistent=true", timer)
 
@@ -76,6 +77,7 @@ class CanaryDeploymentAssetsTest(unittest.TestCase):
         self.assertNotIn("su - ai-token-canary", switch)
         self.assertIn('enabled="$home/.config/ai-token-canary/enabled"', scheduled)
         self.assertIn('[ -f "$enabled" ] || exit 0', scheduled)
+        self.assertIn('export AI_TOKEN_CANARY_TRIGGER=scheduled', scheduled)
         self.assertIn('keychain="$home/Library/Keychains/ai-token-canary.keychain-db"', live)
         self.assertIn("security unlock-keychain", live)
         self.assertIn("current/tools/run-live-canary", live)

@@ -107,19 +107,69 @@ config_mode() {
     if [ -z "$mode" ] && [ -f "$CONFIG_FILE" ]; then mode="$(awk -F= '/^mode=/{print $2;exit}' "$CONFIG_FILE")"; fi
     echo "${mode:-auto}"
 }
-set_config() {
-    mkdir -p "$VAULT_DIR_CLIENT"
-    python3 - "$CONFIG_FILE" "$1" "$2" <<'PY'
-import sys,os
-f,k,v=sys.argv[1],sys.argv[2],sys.argv[3]
-lines=[]; found=False
-if os.path.exists(f):
-    for line in open(f):
-        if line.rstrip("\n").startswith(k+"="): lines.append(f"{k}={v}"); found=True
-        else: lines.append(line.rstrip("\n"))
-if not found: lines.append(f"{k}={v}")
-open(f,"w").write("\n".join(lines)+"\n"); os.chmod(f,0o600)
+atomic_state_text() { # operation destination crash-label [operation args]; literal value on stdin
+    python3 - "$@" 3<&0 <<'PY'
+import fcntl, glob, os, sys, tempfile
+
+operation, destination, crash_label, *arguments = sys.argv[1:]
+directory = os.path.dirname(destination) or "."
+os.makedirs(directory, exist_ok=True)
+lock_path = destination + ".lock"
+lock_fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+os.chmod(lock_path, 0o600)
+try:
+    fcntl.flock(lock_fd, fcntl.LOCK_EX)
+    if operation == "config":
+        key, value = arguments
+        lines = []
+        found = False
+        if os.path.exists(destination):
+            with open(destination) as source:
+                for line in source:
+                    if line.rstrip("\n").startswith(key + "="):
+                        lines.append(f"{key}={value}")
+                        found = True
+                    else:
+                        lines.append(line.rstrip("\n"))
+        if not found:
+            lines.append(f"{key}={value}")
+        output = "\n".join(lines) + "\n"
+    elif operation == "literal":
+        with os.fdopen(3) as source:
+            output = source.read()
+    else:
+        raise SystemExit("unknown text-state operation")
+
+    prefix = "." + os.path.basename(destination) + ".state-"
+    for stale in glob.glob(os.path.join(directory, prefix + "*")):
+        try:
+            os.unlink(stale)
+        except FileNotFoundError:
+            pass
+    fd, temporary = tempfile.mkstemp(prefix=prefix, dir=directory)
+    try:
+        with os.fdopen(fd, "w") as handle:
+            handle.write(output)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temporary, 0o600)
+        if os.environ.get("AI_TOKEN_TEST_CRASH_AT") == f"before-{crash_label}-replace":
+            os._exit(86)
+        os.replace(temporary, destination)
+        directory_fd = os.open(directory, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+finally:
+    os.close(lock_fd)
 PY
+}
+set_config() {
+    atomic_state_text config "$CONFIG_FILE" config "$1" "$2" </dev/null
 }
 log_event() { # event profile status detail
     local event="${1:-event}" profile="${2:-}" status="${3:-}" detail="${4:-}"
@@ -810,7 +860,9 @@ codex_role_of() {
     if [ -f "$(codex_role_file "$p")" ]; then cat "$(codex_role_file "$p")"; return; fi
     if [ "$(short_host)" = farol ]; then echo leader; else echo follower; fi
 }
-codex_set_role() { mkdir -p "$(codex_profile_path "$1")"; printf '%s' "$2" > "$(codex_role_file "$1")"; }
+codex_set_role() {
+    printf '%s' "$2" | atomic_state_text literal "$(codex_role_file "$1")" codex-role
+}
 codex_all_profiles() {
     [ -d "$CODEX_PROFILES_DIR" ] || return 0
     local d name
@@ -1251,7 +1303,7 @@ write_oauth_json() { # oauth_str  -> keychain (wrapped) or file (flat)
         local wrapped; wrapped="$(python3 -c 'import json,sys;print(json.dumps({"claudeAiOauth":json.loads(sys.argv[1])}))' "$oauth")"
         security add-generic-password -U -s "$KC_SVC" -a "$acct" -w "$wrapped" >/dev/null
     else
-        mkdir -p "$HOME/.claude"; printf '%s\n' "$oauth" > "$HOME/.claude/.credentials.json"; chmod 600 "$HOME/.claude/.credentials.json"
+        printf '%s\n' "$oauth" | atomic_state_text literal "$HOME/.claude/.credentials.json" claude-local
     fi
 }
 oauth_get() { python3 -c 'import json,sys;o=json.load(open(sys.argv[1]));print(o.get(sys.argv[2],"") or "")' "$1" "$2"; }

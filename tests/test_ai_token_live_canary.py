@@ -1,5 +1,6 @@
 import importlib.machinery
 import importlib.util
+import hashlib
 import json
 import os
 import pathlib
@@ -185,6 +186,9 @@ class LiveCanaryTest(unittest.TestCase):
         path, record = self.evidence_record()
         self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
         self.assertEqual(record["status"], "ok")
+        self.assertEqual(record["schema"], 3)
+        self.assertEqual(record["trigger"], "manual")
+        self.assertIsNone(record["previous_evidence"])
         self.assertEqual(record["profile"], "canary-fixture")
         self.assertEqual(record["steps"], [
             {"name": "verify-release", "returncode": 0},
@@ -295,14 +299,23 @@ class LiveCanaryTest(unittest.TestCase):
         self.assertEqual(record["steps"], [{"name": "verify-release", "returncode": 9}])
 
     def test_expected_mutation_is_chained_without_recording_credential_bytes(self):
-        first = self.run_canary("--live")
+        first = self.run_canary(
+            "--live", extra_env={"AI_TOKEN_CANARY_TRIGGER": "scheduled"},
+        )
         second = self.run_canary("--live")
         self.assertEqual(first.returncode, 0, first.stderr)
         self.assertEqual(second.returncode, 0, second.stderr)
         self.assertEqual(len(self.recorded_calls()), 4)
-        records = [json.loads(path.read_text()) for path in sorted(self.evidence.glob("*.json"))]
+        paths = sorted(self.evidence.glob("*.json"))
+        records = [json.loads(path.read_text()) for path in paths]
         self.assertEqual(len(records), 2)
         self.assertEqual(records[0]["state_after"], records[1]["state_before"])
+        self.assertEqual(records[0]["trigger"], "scheduled")
+        self.assertEqual(records[1]["trigger"], "manual")
+        self.assertEqual(records[1]["previous_evidence"], {
+            "name": paths[0].name,
+            "sha256": hashlib.sha256(paths[0].read_bytes()).hexdigest(),
+        })
         for path in self.evidence.glob("*.json"):
             self.assertNotIn("CREDENTIAL_SECRET", path.read_text())
 
@@ -330,6 +343,15 @@ class LiveCanaryTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("credential state path must be mode 0600", result.stderr)
         self.assertEqual(self.recorded_calls(), [])
+
+    def test_invalid_scheduler_trigger_fails_before_execution(self):
+        result = self.run_canary(
+            "--live", extra_env={"AI_TOKEN_CANARY_TRIGGER": "forged"},
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("AI_TOKEN_CANARY_TRIGGER", result.stderr)
+        self.assertEqual(self.recorded_calls(), [])
+        self.assertFalse(self.evidence.exists())
 
 
 if __name__ == "__main__":

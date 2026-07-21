@@ -24,6 +24,7 @@ const STATE_FILE = `${HOME}/.claude-token/any-state.json`;
 const ANY_LOG = `${HOME}/.claude-token/any.log`;
 const COOLDOWN_401_S = 900;
 const COOLDOWN_429_S = 1800;
+const COOLDOWN_5XX_S = 300;
 const MIN_FRESH_MS = 60_000;
 const MAX_TRIES = 3;
 
@@ -80,6 +81,7 @@ function pickAny(state, exclude) {
     const ent = state[p] || {};
     if ((ent.cooldown_401_until || 0) > nowS()) continue;
     if ((ent.cooldown_429_until || 0) > nowS()) continue;
+    if ((ent.cooldown_5xx_until || 0) > nowS()) continue;
     if (!freshToken(p)) continue;
     if (needsRelogin(p)) continue;
     const last = ent.last_used || 0;
@@ -91,8 +93,8 @@ function pickAny(state, exclude) {
 function markCooldown(profile, kindS) {
   const s = loadState();
   const ent = (s[profile] ||= {});
-  ent[kindS === "401" ? "cooldown_401_until" : "cooldown_429_until"] =
-    nowS() + (kindS === "401" ? COOLDOWN_401_S : COOLDOWN_429_S);
+  const secs = kindS === "401" ? COOLDOWN_401_S : kindS === "429" ? COOLDOWN_429_S : COOLDOWN_5XX_S;
+  ent[`cooldown_${kindS}_until`] = nowS() + secs;
   saveState(s);
   anyLog("cooldown", { profile, kind: kindS });
 }
@@ -254,12 +256,12 @@ async function handleAny(req, res) {
       anyLog("upstream-error", { profile: pick.profile, error: String(err.message || err) });
       continue;
     }
-    if (up.status === 401 || up.status === 429) {
-      const kind = up.status === 401 ? "401" : "429";
+    if (up.status === 401 || up.status === 429 || up.status >= 500) {
+      const kind = up.status === 401 ? "401" : up.status === 429 ? "429" : "5xx";
       up.body?.cancel();
       markCooldown(pick.profile, kind);
       if (kind === "401") heal(pick.profile);
-      anyLog("failover", { profile: pick.profile, kind, attempt: attempt + 1 });
+      anyLog("failover", { profile: pick.profile, kind, status: up.status, attempt: attempt + 1 });
       log(`any(${pick.profile})`, req.method, req.url, `${up.status}-failover`);
       continue;
     }

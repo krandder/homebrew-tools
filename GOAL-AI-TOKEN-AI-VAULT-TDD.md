@@ -391,13 +391,17 @@ generated-entrypoint, audit-writer, and HTTP-snapshot closure and superseding
 soak pin are recorded in
 `evidence/atomic-generated-state-promotion-2026-07-21.md`.
 The current requirement-by-requirement completion disposition is recorded in
-`evidence/completion-audit-2026-07-21-v3.md`.
+`evidence/completion-audit-2026-07-21-v4.md`.
 The strict multi-cycle TDD correction and superseding soak pin are recorded in
 `evidence/strict-multi-cycle-tdd-promotion-2026-07-21.md`.
 The immutable-red-proof correction and final superseding soak pin are recorded
 in `evidence/immutable-red-proof-promotion-2026-07-21.md`.
 The final pin's first unattended leader cycle is recorded in
 `evidence/final-pin-unattended-leader-2026-07-21.md`.
+The complete healing-interface scope, current 42-file soak pin, and its first
+unattended leader cycle are recorded in
+`evidence/complete-scoped-interface-promotion-2026-07-21.md` and
+`evidence/final-scoped-pin-unattended-leader-2026-07-21.md`.
 
 ## Post-characterization implementation language
 

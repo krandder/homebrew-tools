@@ -187,7 +187,7 @@ broad state-machine coverage, hard CI, production-shaped verification, and
 controlled release phases on 2026-07-20. He designated `canary-claude`, isolated
 homes on farol and agent-1, and the dedicated macOS account/keychain
 `ai-token-canary`. Protected runtime commit
-`7269e0bc502c2fba27a191788c42e0a872136df8` is installed and verified on all
+`5185f09529611695d2cbed52e9bd7c532765cfa4` is installed and verified on all
 three hosts, and physical rollback/restore was exercised on each. The separate
 Anthropic account is `ai@futarchy.ai` with a Claude Max entitlement. Its OAuth
 credential is canonical only in the isolated farol vault; followers receive a
@@ -229,7 +229,13 @@ three hosts. A real explicit agent-1 pull outside the lifecycle runner was
 retained as a `writer-continuity` failure before the designated runner
 re-established the chain; the consumer wrapper itself reads a temporary vault
 response and does not write the monitored credential. The clean 30-day window
-is pinned to release `7269e0bc502c-061c79a5d0b0` from
+was then held until an explicit incident-replay audit found direct in-place
+Claude credential writes, formula URLs whose bytes did not match their pins,
+and umask-dependent release modes. PR #38 preserved deterministic red commits
+for all three defects, passed both protected PR gates and protected main, and
+repeated exact three-host rollback/restore plus live lifecycle verification.
+The clean 30-day window is pinned to release
+`5185f0952961-e72c82006740` from
 2026-07-22 through
 2026-08-20 UTC, with the final gate eligible on 2026-08-21 UTC.
 
@@ -237,11 +243,11 @@ The immutable release now includes a fail-closed live-canary runner. It requires
 an explicit designation for a non-human `canary-*` Claude profile,
 pins all lifecycle commands to a verified installed commit, replaces ambient
 `HOME` with the dedicated canary home, and retains only sanitized mode-0600
-step evidence. Linux uses schema 1. A macOS follower uses schema 2 and must name
-an `ai-token-canary*` OS user; the runner verifies the kernel UID resolves to
-that exact user and that its password-database home is the configured canary
-home before touching the process-wide Claude Keychain service. Directory-only
-isolation or merely changing `HOME` is rejected.
+step evidence. All roles now emit linked schema 3 evidence. A macOS follower
+must name an `ai-token-canary*` OS user; the runner verifies the kernel UID
+resolves to that exact user and that its password-database home is the
+configured canary home before touching the process-wide Claude Keychain
+service. Directory-only isolation or merely changing `HOME` is rejected.
 
 The release also includes `verify-live-soak`, the executable M6 accounting
 gate. It requires 30 complete UTC days by default, an explicit set of required
@@ -252,12 +258,12 @@ record in the window fails the gate even if a later retry succeeds. This proves
 the eventual soak only after real scheduled evidence exists; it does not start
 or simulate the live 30-day clock.
 
-The operator-only `collect-live-soak` command atomically collects every retained
-record from the fixed farol, agent-1, and dedicated macOS locations before the
-verifier runs. It refuses partial output, unsafe tar members, permissive modes,
-AppleDouble files, duplicate names, or invalid JSON and writes a mode-0600
-source/count/digest manifest. It is canonical source but not canary runtime, so
-improving the collection boundary does not change the pinned soak release.
+The packaged operator/auditor `collect-live-soak` command atomically collects
+every retained record from the fixed farol, agent-1, and dedicated macOS
+locations before the verifier runs. It refuses partial output, unsafe tar
+members, permissive modes, AppleDouble files, duplicate names, or invalid JSON
+and writes a mode-0600 source/count/digest manifest. It never writes lifecycle
+evidence or touches a credential store.
 
 The protected release also contains a daily cumulative audit for the failure
 mode that lifecycle `OnFailure` cannot observe: a timer or host that never runs.
@@ -295,7 +301,9 @@ taxonomy fix, final pre-window promotion, and real writer-continuity detection
 are recorded in
 `evidence/post-unattended-incident-audit-2026-07-21.md`. Failed pre-activation,
 pre-fix, and activation-day records remain retained and do not count toward the
-clean window.
+clean window. The exact Kimi replay mapping and final pre-soak atomic promotion
+are recorded in `evidence/kimi-incident-replay-audit-2026-07-21.md` and
+`evidence/atomic-credential-promotion-2026-07-21.md`.
 
 ## Post-characterization implementation language
 

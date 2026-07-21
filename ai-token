@@ -1495,8 +1495,32 @@ claude_publish_profile() { # profile
         log_event profile "$p" "$profile_status" "api/oauth/profile"
         set +e
         python3 - "$af" "$sf" "$p" "$resp" "$SENTINEL_RT" "$LEADER_HOST" "${CLAUDE_TOKEN_VAULT_AUTHORITY:-no}" <<'PY'
-import json,sys,os,time,datetime
+import datetime, glob, json, os, sys, tempfile, time
 af,sf,profile,resp,sentinel,leader,vault_authority=sys.argv[1:8]
+
+def atomic_json(path, value, crash_label):
+    directory = os.path.dirname(path) or "."
+    prefix = "." + os.path.basename(path) + ".token-"
+    for stale in glob.glob(os.path.join(directory, prefix + "*")):
+        try:
+            os.unlink(stale)
+        except FileNotFoundError:
+            pass
+    fd, temporary = tempfile.mkstemp(prefix=prefix, dir=directory)
+    try:
+        with os.fdopen(fd, "w") as handle:
+            json.dump(value, handle, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temporary, 0o600)
+        if os.environ.get("AI_TOKEN_TEST_CRASH_AT") == "before-" + crash_label + "-replace":
+            os._exit(86)
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
 r=json.loads(resp); ts=int(time.time()*1000)
 d=json.load(open(af)); o=d.get("claudeAiOauth",d)
 sync=d.get("claudeTokenSync")
@@ -1543,30 +1567,54 @@ if isinstance(r.get("account"),dict) or isinstance(r.get("organization"),dict):
     }
 
 d=dict(d); d["claudeAiOauth"]=o
-json.dump(d,open(af,"w"),indent=2); os.chmod(af,0o600)
+atomic_json(af, d, "claude-canonical")
 pub=dict(o); pub["refreshToken"]=sentinel
 out={"claudeAiOauth":pub,"profile":profile,"leader":leader,
      "published_at":datetime.datetime.now(datetime.timezone.utc).isoformat()}
-json.dump(out,open(sf,"w"),indent=2); os.chmod(sf,0o600)
+atomic_json(sf, out, "claude-shared")
 print(f"published {profile} -> {sf} (refreshed, ttl {r.get('expires_in')}s)")
 PY
         rc=$?
         set -e
         rm -f "$lock"
         log_event refresh_lock "$p" released "$lock"
-        log_event refresh "$p" ok "updated canonical+shared"
         [ "$rc" -eq 0 ] || exit "$rc"
+        log_event refresh "$p" ok "updated canonical+shared"
     else
         # Access token still valid — publish it directly (NO refresh needed!)
         python3 - "$af" "$sf" "$p" "$SENTINEL_RT" "$LEADER_HOST" <<'PY'
-import json,sys,os,datetime
+import datetime, glob, json, os, sys, tempfile
 af,sf,profile,sentinel,leader=sys.argv[1:6]
+
+def atomic_json(path, value):
+    directory = os.path.dirname(path) or "."
+    prefix = "." + os.path.basename(path) + ".token-"
+    for stale in glob.glob(os.path.join(directory, prefix + "*")):
+        try:
+            os.unlink(stale)
+        except FileNotFoundError:
+            pass
+    fd, temporary = tempfile.mkstemp(prefix=prefix, dir=directory)
+    try:
+        with os.fdopen(fd, "w") as handle:
+            json.dump(value, handle, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temporary, 0o600)
+        if os.environ.get("AI_TOKEN_TEST_CRASH_AT") == "before-claude-shared-replace":
+            os._exit(86)
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
 d=json.load(open(af)); o=d.get("claudeAiOauth",d)
 pub=dict(o); pub["refreshToken"]=sentinel
 out={"claudeAiOauth":pub,"profile":profile,"leader":leader,
      "published_at":datetime.datetime.now(datetime.timezone.utc).isoformat(),
      "note":"published existing access token (no refresh needed)"}
-json.dump(out,open(sf,"w"),indent=2); os.chmod(sf,0o600)
+atomic_json(sf, out)
 print(f"published {profile} -> {sf} (existing token, no refresh)")
 PY
         log_event publish "$p" ok "existing-access-no-refresh"

@@ -274,6 +274,14 @@ class ClaudeLifecycleTest(unittest.TestCase):
         self.assertFalse(list(self.auth.parent.glob(f".{self.auth.name}.token-*")))
         self.assertFalse(list(self.shared.glob(f".{published_path.name}.token-*")))
         self.assertEqual(sum(request[0] == "POST" for request in server.requests), 2)
+        records = [
+            json.loads(line)
+            for line in (self.logs / "events.jsonl").read_text().splitlines()
+        ]
+        self.assertNotIn(
+            ("refresh", "ok"),
+            [(record["event"], record["status"]) for record in records],
+        )
 
     def test_crash_before_fresh_publish_preserves_previous_shared_credential(self):
         self.write_credentials(expires_at=4_102_454_800_000)

@@ -149,7 +149,7 @@ class ProxyCase(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         if RUNTIME is None:
-            raise unittest.SkipTest("need bun or node to run the any-proxy")
+            raise RuntimeError("need bun or node to run the any-proxy")
         cls.upstream = StubUpstream(cls.RESPONDER)
 
     @classmethod

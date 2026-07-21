@@ -131,7 +131,39 @@ class TddHistoryTest(unittest.TestCase):
         result = self.verify()
 
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("production commit also changes runnable tests", result.stderr)
+        self.assertIn("production commit also changes test files", result.stderr)
+
+    def test_accepts_a_red_commit_with_a_test_fixture(self):
+        (self.repo / "tests" / "expected.txt").write_text("new\n")
+        (self.repo / "tests" / "test_check.py").write_text(
+            "import pathlib\n"
+            "expected = pathlib.Path('tests/expected.txt').read_text()\n"
+            "assert pathlib.Path('ai-token').read_text() == expected\n"
+        )
+        self.commit("test: require fixture behavior")
+        (self.repo / "ai-token").write_text("new\n")
+        self.commit("feat: implement fixture behavior")
+
+        result = self.verify()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_rejects_a_production_commit_that_rewrites_a_test_fixture(self):
+        (self.repo / "tests" / "expected.txt").write_text("new\n")
+        (self.repo / "tests" / "test_check.py").write_text(
+            "import pathlib\n"
+            "expected = pathlib.Path('tests/expected.txt').read_text()\n"
+            "assert pathlib.Path('ai-token').read_text() == expected\n"
+        )
+        self.commit("test: require fixture behavior")
+        (self.repo / "ai-token").write_text("unrelated\n")
+        (self.repo / "tests" / "expected.txt").write_text("unrelated\n")
+        self.commit("feat: rewrite fixture around production")
+
+        result = self.verify()
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("production commit also changes test files", result.stderr)
 
     def test_rejects_a_production_change_hidden_in_a_merge_commit(self):
         original = subprocess.check_output(

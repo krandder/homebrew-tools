@@ -1,9 +1,9 @@
 class AiVaultHttp < Formula
   desc "HTTPS front-end for ai-vault (bearer-token auth, ACL-gated push/pull)"
   homepage "https://github.com/krandder/homebrew-tools"
-  url "https://raw.githubusercontent.com/krandder/homebrew-tools/cb9c1e9b98d847fc58163c6c34a391463902192d/ai-vault-http"
-  version "1.2.5"
-  sha256 "1a197bbea93b49b6efca8ac74f786c00b92209c0da98492acb21ba36fda1abd5"
+  url "https://raw.githubusercontent.com/krandder/homebrew-tools/5fc1b831e0835ff194d0de0a1e5cacdb64b429dd/ai-vault-http"
+  version "1.2.6"
+  sha256 "a616d6a1b7fe11a69cda70f728bf11faf642159eca9fc6900bb3a9e4b20bf0fa"
   depends_on "ai-vault"
   def install
     bin.install "ai-vault-http"

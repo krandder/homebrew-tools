@@ -187,7 +187,7 @@ broad state-machine coverage, hard CI, production-shaped verification, and
 controlled release phases on 2026-07-20. He designated `canary-claude`, isolated
 homes on farol and agent-1, and the dedicated macOS account/keychain
 `ai-token-canary`. Protected runtime commit
-`7e3b8327fb52006b1ac3c10930efe2bba2d798a2` is installed and verified on all
+`0f235c2aecce82ea5dd7761f3d9b7707a0157230` is installed and verified on all
 three hosts, and physical rollback/restore was exercised on each. The separate
 Anthropic account is `ai@futarchy.ai` with a Claude Max entitlement. Its OAuth
 credential is canonical only in the isolated farol vault; followers receive a
@@ -276,8 +276,16 @@ pair, passed 209 Python tests and four shell integration suites under both
 protected PR gates and protected main, and repeated exact three-host
 rollback/restore plus the complete live matrix. Only the packaged verifier
 changed; credential and lifecycle payloads are byte-identical to PR #48.
+The next enforcement pass proved that a green production commit could rewrite
+its red test and that merge resolutions were excluded from the history scan.
+PR #53 preserved both accepts in a deterministic red commit, made runnable red
+tests immutable through their paired production commit, prohibited PR-range
+merge commits, passed 211 Python tests and four shell integration suites under
+both protected PR gates and protected main, and repeated exact three-host
+rollback/restore plus the complete live matrix. Again, only the packaged
+verifier changed.
 The clean 30-day window is pinned to release
-`7e3b8327fb52-c174dc926afc` from
+`0f235c2aecce-e2ce134f3805` from
 2026-07-22 through
 2026-08-20 UTC, with the final gate eligible on 2026-08-21 UTC.
 
@@ -361,6 +369,8 @@ The current requirement-by-requirement completion disposition is recorded in
 `evidence/completion-audit-2026-07-21-v3.md`.
 The strict multi-cycle TDD correction and superseding soak pin are recorded in
 `evidence/strict-multi-cycle-tdd-promotion-2026-07-21.md`.
+The immutable-red-proof correction and final superseding soak pin are recorded
+in `evidence/immutable-red-proof-promotion-2026-07-21.md`.
 
 ## Post-characterization implementation language
 

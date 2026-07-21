@@ -1,5 +1,5 @@
 [Unit]
-Description=Daily ai-token leader lifecycle canary
+Description=Two-hour ai-token leader lifecycle canary
 After=network-online.target ai-token-canary-vault.service
 Wants=network-online.target ai-token-canary-vault.service
 OnFailure=ai-token-canary-alert@%n.service

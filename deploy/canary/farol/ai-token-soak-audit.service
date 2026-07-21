@@ -1,0 +1,11 @@
+[Unit]
+Description=Audit every completed ai-token live-soak day
+After=network-online.target
+Wants=network-online.target
+OnFailure=ai-token-canary-alert@%n.service
+
+[Service]
+Type=oneshot
+Environment=HOME=/home/kelvin
+Environment=PATH=/home/kelvin/.ai-token-canary/release/current:/home/kelvin/.local/bin:/home/kelvin/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/home/kelvin/.ai-token-canary/release/current/tools/audit-live-soak --config /home/kelvin/.ai-token-canary/canary.json --start 2026-07-22

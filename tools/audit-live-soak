@@ -1,0 +1,85 @@
+#!/usr/bin/env python3
+"""Collect and verify every completed day of the live canary soak."""
+
+import argparse
+import datetime
+import json
+import os
+import pathlib
+import re
+import subprocess
+import sys
+import tempfile
+
+
+REQUIREMENTS = (
+    "farol:leader",
+    "agent-1:follower",
+    "Kelvins-MacBook-Air:follower",
+)
+
+
+def fail(message):
+    print(f"audit-live-soak: {message}", file=sys.stderr)
+    raise SystemExit(1)
+
+
+def day(value):
+    try:
+        return datetime.date.fromisoformat(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("expected YYYY-MM-DD") from error
+
+
+def run(command, label):
+    result = subprocess.run(command)
+    if result.returncode:
+        fail(f"{label} failed with exit {result.returncode}")
+
+
+def main():
+    tools = pathlib.Path(__file__).resolve().parent
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--config", required=True, type=pathlib.Path)
+    parser.add_argument("--start", required=True, type=day)
+    parser.add_argument("--collector", type=pathlib.Path, default=tools / "collect-live-soak")
+    parser.add_argument("--verifier", type=pathlib.Path, default=tools / "verify-live-soak")
+    args = parser.parse_args()
+
+    try:
+        config = json.loads(args.config.read_text())
+    except (OSError, json.JSONDecodeError) as error:
+        fail(f"invalid config: {error}")
+    profile = config.get("profile")
+    commit = config.get("expect_commit")
+    if not isinstance(profile, str) or not re.fullmatch(r"canary-[a-z0-9][a-z0-9-]*", profile):
+        fail("config requires a canary profile")
+    if not isinstance(commit, str) or not re.fullmatch(r"[0-9a-f]{40}", commit):
+        fail("config requires a full expected commit")
+
+    today = day(os.environ.get("AI_TOKEN_SOAK_AUDIT_TODAY", str(datetime.datetime.now(datetime.timezone.utc).date())))
+    through = today - datetime.timedelta(days=1)
+    if through < args.start:
+        print("audit-live-soak: no completed soak day")
+        return
+    days = (through - args.start).days + 1
+
+    with tempfile.TemporaryDirectory(prefix="ai-token-soak-audit-") as temporary:
+        evidence = pathlib.Path(temporary) / "evidence"
+        run([args.collector, "--live-fleet", "--output", evidence], "collection")
+        command = [
+            args.verifier,
+            "--evidence-dir", evidence,
+            "--profile", profile,
+            "--expect-commit", commit,
+            "--days", str(days),
+            "--through", str(through),
+        ]
+        for requirement in REQUIREMENTS:
+            command.extend(("--require", requirement))
+        run(command, "verification")
+    print(f"audit-live-soak: ok ({args.start} through {through}, {days} days)")
+
+
+if __name__ == "__main__":
+    main()

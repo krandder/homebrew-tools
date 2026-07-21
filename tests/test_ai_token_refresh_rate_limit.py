@@ -145,6 +145,37 @@ class RefreshRateLimitTest(unittest.TestCase):
         ) as server:
             self.assert_concurrent_contract("codex", server)
 
+    def test_cooldown_persistence_never_follows_predictable_generation_symlinks(self):
+        credential = self.home / "kimi-profiles" / self.profile / "credentials.json"
+        credential.parent.mkdir(parents=True)
+        credential.write_text(json.dumps({
+            "access_token": "expired-access",
+            "refresh_token": "real-refresh",
+            "expires_at": 1,
+        }))
+        local = pathlib.Path(f"{credential}.refresh-cooldown")
+        provider = self.home / "refresh-state" / "kimi.json"
+        provider.parent.mkdir()
+        local_victim = self.home / "local-victim"
+        provider_victim = self.home / "provider-victim"
+        local_victim.write_text("local-must-remain-unchanged")
+        provider_victim.write_text("provider-must-remain-unchanged")
+        pathlib.Path(f"{local}.tmp").symlink_to(local_victim)
+        pathlib.Path(f"{provider}.tmp").symlink_to(provider_victim)
+
+        with MockOAuthServer(
+            429,
+            {"error": "rate_limited"},
+            token_headers={"Retry-After": "120"},
+        ) as server:
+            result = self.run_publish("kimi", server, NOW)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(local_victim.read_text(), "local-must-remain-unchanged")
+        self.assertEqual(provider_victim.read_text(), "provider-must-remain-unchanged")
+        self.assertFalse(local.is_symlink())
+        self.assertFalse(provider.is_symlink())
+
 
 if __name__ == "__main__":
     unittest.main()

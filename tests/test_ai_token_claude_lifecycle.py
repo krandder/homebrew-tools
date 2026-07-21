@@ -140,6 +140,20 @@ class ClaudeLifecycleTest(unittest.TestCase):
         self.assertTrue(credential["claudeTokenSync"]["needsRelogin"])
         self.assertEqual(len(server.requests), 1)
 
+    def test_invalid_grant_marker_never_follows_a_predictable_generation_symlink(self):
+        self.write_credentials()
+        victim = self.home / "unrelated-state"
+        victim.write_text("must-remain-unchanged")
+        pathlib.Path(f"{self.auth}.tmp").symlink_to(victim)
+
+        with MockOAuthServer(400, {"error": "invalid_grant"}) as server:
+            result = self.run_publish(server)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(victim.read_text(), "must-remain-unchanged")
+        self.assertFalse(self.auth.is_symlink())
+        self.assertTrue(json.loads(self.auth.read_text())["claudeTokenSync"]["needsRelogin"])
+
     def test_transient_failure_preserves_state_and_remains_retryable(self):
         self.write_credentials()
         before = self.auth.read_bytes()

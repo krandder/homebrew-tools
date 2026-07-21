@@ -187,11 +187,24 @@ broad state-machine coverage, hard CI, production-shaped verification, and
 controlled release phases on 2026-07-20. He designated `canary-claude`, isolated
 homes on farol and agent-1, and the dedicated macOS account/keychain
 `ai-token-canary`. Protected runtime commit
-`6acfa6681e0445f58b791b701edb216c84da7e86` is installed and verified on all
-three hosts, and physical rollback/restore was exercised on each. A separate
-Anthropic account now exists for `ai-token-canary@futarchy.ai`, but Claude Code
-will not authorize it without a paid Pro or Max entitlement. No purchase is
-authorized by this goal text, and a human account remains unacceptable.
+`6b6857b8f93b6e7ff60af6d0038f36efb78ef853` is installed and verified on all
+three hosts, and physical rollback/restore was exercised on each. The separate
+Anthropic account is `ai@futarchy.ai` with a Claude Max entitlement. Its OAuth
+credential is canonical only in the isolated farol vault; followers receive a
+sentinel refresh token. Farol leader, agent-1 follower, and the dedicated macOS
+follower all passed their live lifecycle on the protected runtime. A real
+agent-1 inference through the isolated launcher also passed.
+
+M0 through M5 are complete. M6 is active: the Linux timers and the macOS
+dispatcher activation marker were enabled on 2026-07-21 UTC, and each scheduled
+entrypoint passed once. The first Mac run found a fresh-Keychain failure before
+the intended fallback account could create the Claude item. Pull transport had
+already returned a fresh sentinel-only credential; `security` then exited 44
+for the expected missing item and `set -euo pipefail` aborted. PR #19 preserved
+the failing regression commit before the one-line fix, passed hard CI, and was
+promoted as the current immutable release. The pre-fix failure remains in the
+evidence chain. Therefore the clean 30-day window is 2026-07-22 through
+2026-08-20 UTC, with the final gate eligible on 2026-08-21 UTC.
 
 The immutable release now includes a fail-closed live-canary runner. It requires
 an explicit designation for a non-human `canary-*` Claude profile,
@@ -223,9 +236,10 @@ fail-closed pull produced a mode-0600 vault alert and a canonical incident.
 The physical deployment, later promotions, and incident-routing correction are
 recorded in `evidence/physical-canary-deployment-2026-07-20.md`,
 `evidence/canonical-release-promotion-2026-07-20.md`, and
-`evidence/canonical-incident-routing-2026-07-20.md`. Activation starts only
-after the separate identity publishes its first fresh credential; failed
-preflights do not count toward the 30-day clock.
+`evidence/canonical-incident-routing-2026-07-20.md`. Credential activation and
+the M6 clock are recorded in
+`evidence/live-canary-activation-2026-07-21.md`. Failed pre-activation and
+pre-fix records remain retained and do not count toward the clean window.
 
 ## Post-characterization implementation language
 

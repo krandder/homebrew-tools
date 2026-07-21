@@ -296,8 +296,16 @@ pinned to older bytes by the Homebrew formula. PR #57 preserved all three red
 regressions, added the wrapper to TDD classification and the release payload,
 pinned formula version 3.2.1 to the exact canonical wrapper bytes, and passed
 218 Python tests plus four shell integration suites in protected CI.
+The complete allowlist audit then found the same omission for `ai-any`, the
+other provider wrappers, all three mirrors, and all three proxies; `ai-any`
+also lacked an executable Git mode. PR #59 preserved the omissions and mode
+failure in red commit `9d11ecf`, made all ten healing interfaces production
+for TDD purposes and immutable release members in green commit `1b2d7f9`, and
+verified every Homebrew resource pin against current canonical bytes. The
+protected 220-Python-test plus four-shell gate passed, followed by exact
+three-host rollback/restore and the complete live matrix.
 The clean 30-day window is pinned to release
-`ed994de4434e-5179f403c404` from
+`6201b1920093-f8bd4e418821` from
 2026-07-22 through
 2026-08-20 UTC, with the final gate eligible on 2026-08-21 UTC.
 

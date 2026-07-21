@@ -20,6 +20,8 @@ independent credential writers again, including under a stale shadowing PATH.
 `test_service_environment.py` pins generated services to the invoked canonical
 artifact. `test_release_artifact.py` proves clean-tree rejection, deterministic
 packaging, embedded file hashes, and an external bundle checksum.
+The payload includes every scoped `ai-any` healing wrapper, mirror, and proxy;
+their changes are governed by the same red-first history gate.
 `test_release_install.py` verifies fail-closed archive validation, atomic
 content-addressed selection, durable intent/completion audit records, and a
 reversible rollback without touching live installation paths. It also proves

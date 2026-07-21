@@ -101,12 +101,79 @@ PY
 audit() { # profile action status [detail]
     local p="$1" action="$2" status="$3" detail="${4:-}"
     python3 - "$AUDIT_FILE" "$(current_user)" "$p" "$action" "$status" "$detail" "${SSH_CONNECTION:-}" <<'PY'
-import json,sys,os,datetime
+import datetime, fcntl, json, os, sys
 f,actor,p,action,status,detail,conn=sys.argv[1:8]
-with open(f,"a") as fh:
-    fh.write(json.dumps({"ts":datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                         "actor":actor,"profile":p,"action":action,"status":status,
-                         "detail":detail,"from":conn})+"\n")
+record = {"ts":datetime.datetime.now(datetime.timezone.utc).isoformat(),
+          "actor":actor,"profile":p,"action":action,"status":status,
+          "detail":detail,"from":conn}
+data = (json.dumps(record) + "\n").encode()
+directory = os.path.dirname(f) or "."
+os.makedirs(directory, exist_ok=True)
+nofollow = getattr(os, "O_NOFOLLOW", 0)
+lock_fd = os.open(f + ".lock", os.O_RDWR | os.O_CREAT | nofollow, 0o600)
+try:
+    fcntl.flock(lock_fd, fcntl.LOCK_EX)
+    if os.path.islink(f):
+        os.unlink(f)
+    descriptor = os.open(f, os.O_WRONLY | os.O_APPEND | os.O_CREAT | nofollow, 0o600)
+    try:
+        view = memoryview(data)
+        while view:
+            view = view[os.write(descriptor, view):]
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    os.chmod(f, 0o600)
+finally:
+    os.close(lock_fd)
+PY
+}
+
+install_authorized_key() { # path entry
+    python3 - "$1" "$2" <<'PY'
+import fcntl, os, sys
+
+path, entry = sys.argv[1:]
+if "\n" in entry or "\r" in entry:
+    raise SystemExit("ai-vault: authorized key must be one line")
+directory = os.path.dirname(path) or "."
+os.makedirs(directory, exist_ok=True)
+nofollow = getattr(os, "O_NOFOLLOW", 0)
+lock_fd = os.open(path + ".lock", os.O_RDWR | os.O_CREAT | nofollow, 0o600)
+try:
+    fcntl.flock(lock_fd, fcntl.LOCK_EX)
+    if os.path.islink(path):
+        os.unlink(path)
+    existing = b""
+    try:
+        descriptor = os.open(path, os.O_RDONLY | nofollow)
+    except FileNotFoundError:
+        pass
+    else:
+        try:
+            while True:
+                chunk = os.read(descriptor, 65536)
+                if not chunk:
+                    break
+                existing += chunk
+        finally:
+            os.close(descriptor)
+    encoded = entry.encode()
+    if encoded not in existing.splitlines():
+        data = encoded + b"\n"
+        descriptor = os.open(
+            path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | nofollow, 0o600,
+        )
+        try:
+            view = memoryview(data)
+            while view:
+                view = view[os.write(descriptor, view):]
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+    os.chmod(path, 0o600)
+finally:
+    os.close(lock_fd)
 PY
 }
 
@@ -617,8 +684,7 @@ cmd_approve() { # user pubkey-line   (enrolls codex:<user> + claude:<user>, inst
         ssh-*) entry="command=\"ai-vault shell $user\",no-pty,no-port-forwarding,no-X11-forwarding,no-agent-forwarding $line" ;;
         *) die "approve: unrecognized pubkey line (expected 'ssh-...' or a full command=... line)" ;;
     esac
-    mkdir -p "$(dirname "$authkeys")"; touch "$authkeys"
-    grep -qF "$entry" "$authkeys" 2>/dev/null || printf '%s\n' "$entry" >> "$authkeys"
+    install_authorized_key "$authkeys" "$entry"
     audit "$user" approve ok "by $(current_user)"
     say "approved '$user' (codex+claude+kimi enrolled + forced-command key installed in $authkeys)"
 }

@@ -132,7 +132,24 @@ def main():
             if os.path.exists(temporary):
                 os.unlink(temporary)
     checksum = pathlib.Path(f"{archive}.sha256")
-    checksum.write_text(f"{digest}  {name}\n")
+    checksum_fd, checksum_temporary = tempfile.mkstemp(
+        dir=output, prefix=f".{checksum.name}.",
+    )
+    try:
+        with os.fdopen(checksum_fd, "w") as handle:
+            handle.write(f"{digest}  {name}\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(checksum_temporary, 0o644)
+        os.replace(checksum_temporary, checksum)
+        directory_fd = os.open(output, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        if os.path.exists(checksum_temporary):
+            os.unlink(checksum_temporary)
     print(archive)
 
 

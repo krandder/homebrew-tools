@@ -25,6 +25,7 @@ import http.server
 import json
 import os
 import datetime
+import fcntl
 import re
 import socketserver
 import subprocess
@@ -153,9 +154,30 @@ def server_event(event, user="", profile="", status="", detail=""):
             "status": status,
             "detail": detail,
         }
-        with HTTP_EVENTS_FILE.open("a") as fh:
-            fh.write(json.dumps(rec, separators=(",", ":")) + "\n")
-        os.chmod(HTTP_EVENTS_FILE, 0o600)
+        data = (json.dumps(rec, separators=(",", ":")) + "\n").encode()
+        nofollow = getattr(os, "O_NOFOLLOW", 0)
+        lock_fd = os.open(
+            str(HTTP_EVENTS_FILE) + ".lock", os.O_RDWR | os.O_CREAT | nofollow, 0o600,
+        )
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            if HTTP_EVENTS_FILE.is_symlink():
+                HTTP_EVENTS_FILE.unlink()
+            descriptor = os.open(
+                HTTP_EVENTS_FILE,
+                os.O_WRONLY | os.O_APPEND | os.O_CREAT | nofollow,
+                0o600,
+            )
+            try:
+                view = memoryview(data)
+                while view:
+                    view = view[os.write(descriptor, view):]
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+            os.chmod(HTTP_EVENTS_FILE, 0o600)
+        finally:
+            os.close(lock_fd)
     except Exception as e:
         sys.stderr.write("server_event failed: %s\n" % e)
 

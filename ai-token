@@ -202,14 +202,34 @@ log_event() { # event profile status detail
     local event="${1:-event}" profile="${2:-}" status="${3:-}" detail="${4:-}"
     mkdir -p "$LOG_DIR"
     python3 - "$LOG_FILE" "$VERSION" "$TOOL" "$(short_host)" "$(config_user 2>/dev/null || true)" "$event" "$profile" "$status" "$detail" <<'PY'
-import datetime, json, os, sys
+import datetime, fcntl, json, os, sys
 path, version, tool, host, user, event, profile, status, detail = sys.argv[1:10]
 rec = {"ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
        "tool": "ai-token", "version": version, "backend": tool, "host": host,
        "user": user, "event": event, "profile": profile, "status": status,
        "detail": detail, "pid": os.getpid()}
-with open(path, "a") as fh: fh.write(json.dumps(rec, separators=(",", ":")) + "\n")
-os.chmod(path, 0o600)
+data = (json.dumps(rec, separators=(",", ":")) + "\n").encode()
+directory = os.path.dirname(path) or "."
+os.makedirs(directory, exist_ok=True)
+flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
+lock_fd = os.open(path + ".lock", flags, 0o600)
+try:
+    fcntl.flock(lock_fd, fcntl.LOCK_EX)
+    if os.path.islink(path):
+        os.unlink(path)
+    descriptor = os.open(
+        path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600,
+    )
+    try:
+        view = memoryview(data)
+        while view:
+            view = view[os.write(descriptor, view):]
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    os.chmod(path, 0o600)
+finally:
+    os.close(lock_fd)
 PY
 }
 

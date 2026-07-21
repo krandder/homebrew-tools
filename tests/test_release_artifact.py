@@ -18,6 +18,7 @@ PAYLOAD = (
     "claude-token",
     "codex-token",
     "setup-claude-token",
+    "claude-any",
     "Formula/ai-token.rb",
     "Formula/ai-vault.rb",
     "Formula/ai-vault-http.rb",

@@ -103,6 +103,15 @@ class TddHistoryTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn(f"no preceding test-only red commit: {later}", result.stderr)
 
+    def test_treats_the_scoped_claude_wrapper_as_production(self):
+        (self.repo / "claude-any").write_text("changed\n")
+        self.commit("fix: untested wrapper change")
+
+        result = self.verify()
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("no preceding test-only red commit", result.stderr)
+
     def test_rejects_a_red_candidate_that_also_changes_non_test_files(self):
         (self.repo / "tests" / "test_check.py").write_text(
             "import pathlib\n"

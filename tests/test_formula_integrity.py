@@ -65,6 +65,23 @@ class FormulaIntegrityTest(unittest.TestCase):
                 else:
                     self.assertEqual(packaged, version)
 
+    def test_ai_token_formula_pins_the_current_claude_any_wrapper(self):
+        source = (ROOT / "claude-any").read_bytes()
+        formula = (ROOT / "Formula" / "ai-token.rb").read_text()
+        match = re.search(
+            r'resource "claude-any" do\s*'
+            r'url "https://raw\.githubusercontent\.com/krandder/homebrew-tools/'
+            r'([0-9a-f]{40})/claude-any"\s*sha256 "([0-9a-f]{64})"',
+            formula,
+        )
+        self.assertIsNotNone(match, "claude-any must use an immutable canonical URL")
+        commit, pinned = match.groups()
+        downloaded = subprocess.check_output(
+            ["git", "show", f"{commit}:claude-any"], cwd=ROOT,
+        )
+        self.assertEqual(hashlib.sha256(downloaded).hexdigest(), pinned)
+        self.assertEqual(downloaded, source)
+
 
 if __name__ == "__main__":
     unittest.main()

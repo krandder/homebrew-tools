@@ -1,7 +1,7 @@
 class ClaudeToken < Formula
   desc "Sync Claude Code credentials through an owner/follower vault"
   homepage "https://github.com/krandder/homebrew-tools"
-  url "https://raw.githubusercontent.com/krandder/homebrew-tools/main/claude-token"
+  url "https://raw.githubusercontent.com/krandder/homebrew-tools/cb9c1e9b98d847fc58163c6c34a391463902192d/claude-token"
   version "3.0.9"
   sha256 "75e8a46c0ec9a24654a6a22de0f67eeb5ad8dfbd082ab29a02d07b1a66e18d73"
 

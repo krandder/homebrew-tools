@@ -23,10 +23,10 @@ provider without copying refresh authority.
 
 ## Protected release and live matrix
 
-- Current merged PR: #21
-- Canonical commit: `9b87f71c21d311678a5ac93b6e71867f55c21c35`
-- Tree: `9a8a985d173ec6b191a076c8753ca26027e9ca17`
-- Artifact: `ai-token-vault-9b87f71c21d3-94f3924a38ed.zip`
+- Current merged PR: #23
+- Canonical commit: `699237941a26255fb4cec25282479d54387f7eff`
+- Tree: `924e13dbd33abbfd7a11851e76c7f1fe837adeec`
+- Artifact: `ai-token-vault-699237941a26-a25d9f0a55dd.zip`
 - Installed manifest: 28 regular payload files
 
 The artifact passed the complete local gate, protected push and pull-request
@@ -34,6 +34,12 @@ release gates, checksum verification, and exact installed-manifest verification
 on farol, agent-1, and macOS. The live leader published successfully. Both
 followers pulled and checked successfully. Evidence files are regular mode-0600
 records and contain only lifecycle return codes and credential metadata.
+
+A forced post-promotion matrix retained one successful record from each
+required host/role pair. `verify-live-soak --days 1 --through 2026-07-21`
+accepted exactly those three records with the protected commit and immutable
+release ID. This proves deployment convergence; it does not count as the first
+unattended cycle or as a clean soak day.
 
 ## Live defect and TDD disposition
 
@@ -66,6 +72,29 @@ ID with the expected commit prefix and made any cross-host mismatch fatal. PR
 #21 preserved that red-to-green history, passed the complete and protected
 release gates, and was promoted and live-checked on all three hosts before the
 first unattended run.
+
+## Leader cadence hardening
+
+The approved agent-1 consumer runs every 15 minutes, but Claude access tokens
+last about eight hours and `ai-vault serve` intentionally never refreshes on a
+follower request. A daily leader publish could therefore leave followers
+without a fresh generation for most of a day. Commit `3c18376` first made the
+deployment test fail unless the farol timer ran every two hours while both
+follower canaries remained daily. Commit `48cbbf2` made that smallest scheduler
+change. PR #23 passed the complete suite, TDD-history gate, and hard CI before
+merge and exact three-host promotion.
+
+The two-hour publish cadence does not imply a two-hour provider refresh
+cadence. A publish with more than 2.5 hours of access-token life remaining
+makes no refresh request, and every actual refresh remains protected by the
+provider-wide cooldown and persisted rate-limit state.
+
+One manual Mac verification initially invoked `tools/run-live-canary` directly
+instead of the deployed `run-live` wrapper, bypassing the dedicated Keychain
+unlock and returning 36 at the pull step. That sanitized failed record remains
+retained as pre-soak evidence. The real deployed wrapper passed immediately on
+the same release, and its successful record is the one used in the convergence
+matrix.
 
 ## Schedules and soak boundary
 

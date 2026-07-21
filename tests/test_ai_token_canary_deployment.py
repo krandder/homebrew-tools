@@ -30,14 +30,14 @@ class CanaryDeploymentAssetsTest(unittest.TestCase):
 
     def test_linux_units_pin_the_runner_and_isolated_config(self):
         cases = {
-            "farol": ("/home/kelvin/.ai-token-canary", "04:00:00 UTC", "leader"),
-            "agent-1": ("/home/kas/.ai-token-canary", "04:10:00 UTC", "follower"),
+            "farol": ("/home/kelvin/.ai-token-canary", "00/2:00:00 UTC", "leader", "Two-hour"),
+            "agent-1": ("/home/kas/.ai-token-canary", "04:10:00 UTC", "follower", "Daily"),
         }
-        for host, (home, schedule, role) in cases.items():
+        for host, (home, schedule, role, cadence) in cases.items():
             with self.subTest(host=host):
                 unit = (ROOT / "deploy" / "canary" / host / "ai-token-canary.service").read_text()
                 timer = (ROOT / "deploy" / "canary" / host / "ai-token-canary.timer").read_text()
-                self.assertIn(f"Description=Daily ai-token {role} lifecycle canary", unit)
+                self.assertIn(f"Description={cadence} ai-token {role} lifecycle canary", unit)
                 self.assertIn(
                     f"ExecStart={home}/release/current/tools/run-live-canary --config {home}/canary.json --live",
                     unit,

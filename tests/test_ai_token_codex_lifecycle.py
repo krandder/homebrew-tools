@@ -201,6 +201,48 @@ class CodexLifecycleTest(unittest.TestCase):
             self.assertEqual(auth.read_bytes(), before)
             self.assertEqual(role.read_text(), "leader")
 
+    def test_crash_before_role_replace_preserves_previous_authority_role(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            home = pathlib.Path(temporary)
+            profile = home / "profiles" / "fixture"
+            auth = profile / ".codex" / "auth.json"
+            binary = home / "bin"
+            auth.parent.mkdir(parents=True)
+            binary.mkdir()
+            now = int(time.time())
+            auth.write_text(json.dumps({
+                "auth_mode": "chatgpt",
+                "tokens": {
+                    "access_token": jwt(now + 3600, "owner"),
+                    "refresh_token": "real-refresh",
+                },
+            }))
+            role = profile / ".role"
+            role.write_text("leader")
+            ssh = binary / "ssh"
+            ssh.write_text("#!/bin/sh\ncat >/dev/null\n")
+            ssh.chmod(0o755)
+
+            result = subprocess.run(
+                [AI_TOKEN, "codex", "push", "--profile", "fixture"],
+                env={
+                    **os.environ,
+                    "HOME": str(home),
+                    "AI_TOKEN_REAL_HOME": str(home),
+                    "CODEX_PROFILES_DIR": str(home / "profiles"),
+                    "CODEX_SHARED_DIR": str(home / "shared"),
+                    "AI_TOKEN_TEST_NOW": str(now),
+                    "AI_TOKEN_TEST_CRASH_AT": "before-codex-role-replace",
+                    "PATH": f"{binary}:/usr/bin:/bin",
+                },
+                text=True,
+                capture_output=True,
+                timeout=10,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(role.read_text(), "leader")
+
 
 if __name__ == "__main__":
     unittest.main()

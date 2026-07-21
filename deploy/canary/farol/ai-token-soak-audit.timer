@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily cumulative ai-token live-soak audit
+
+[Timer]
+OnCalendar=*-*-* 04:40:00 UTC
+Persistent=true
+Unit=ai-token-soak-audit.service
+
+[Install]
+WantedBy=timers.target

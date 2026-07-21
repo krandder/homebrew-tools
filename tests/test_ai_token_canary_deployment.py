@@ -9,6 +9,8 @@ ASSETS = {
     "deploy/canary/farol/ai-token-canary.service": 0o644,
     "deploy/canary/farol/ai-token-canary.timer": 0o644,
     "deploy/canary/farol/ai-token-canary-alert@.service": 0o644,
+    "deploy/canary/farol/ai-token-soak-audit.service": 0o644,
+    "deploy/canary/farol/ai-token-soak-audit.timer": 0o644,
     "deploy/canary/agent-1/ai-token-canary.service": 0o644,
     "deploy/canary/agent-1/ai-token-canary.timer": 0o644,
     "deploy/canary/agent-1/ai-token-canary-alert@.service": 0o644,
@@ -67,6 +69,21 @@ class CanaryDeploymentAssetsTest(unittest.TestCase):
         unit = (ROOT / "deploy/canary/farol/ai-token-canary-alert@.service").read_text()
         self.assertIn("--category health-check-fail", unit)
         self.assertNotIn("--category auth-credential", unit)
+
+    def test_farol_audits_missing_scheduled_evidence_after_daily_anchors(self):
+        service = (ROOT / "deploy/canary/farol/ai-token-soak-audit.service").read_text()
+        timer = (ROOT / "deploy/canary/farol/ai-token-soak-audit.timer").read_text()
+        builder = (ROOT / "tools/build-release").read_text()
+        self.assertIn('"tools/audit-live-soak"', builder)
+        self.assertIn('"tools/collect-live-soak"', builder)
+        self.assertIn("OnFailure=ai-token-canary-alert@%n.service", service)
+        self.assertIn(
+            "ExecStart=/home/kelvin/.ai-token-canary/release/current/tools/audit-live-soak "
+            "--config /home/kelvin/.ai-token-canary/canary.json --start 2026-07-22",
+            service,
+        )
+        self.assertIn("OnCalendar=*-*-* 04:40:00 UTC", timer)
+        self.assertIn("Persistent=true", timer)
 
     def test_macos_dispatch_switches_uid_and_unlocks_only_canary_keychain(self):
         root = ROOT / "deploy" / "canary" / "macos"

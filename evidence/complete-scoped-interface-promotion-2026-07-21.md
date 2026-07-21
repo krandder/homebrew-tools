@@ -67,6 +67,7 @@ All public remote staging files and the temporary atomic config helper were
 removed. Farol's two-hour timer, daily audit timer, and isolated vault remain
 enabled and active; the existing agent-1 and macOS schedules were unchanged.
 The clean 30-day window is pinned to `6201b1920093-f8bd4e418821` for July 22
-through August 20 UTC. A real unattended Farol leader run remains required on
-this final pin before July 22; post-window anchors, final audits, and the final
-physical rollback/restore remain due August 21 UTC.
+through August 20 UTC. The required pre-window unattended Farol leader run was
+subsequently satisfied and is recorded in
+`final-scoped-pin-unattended-leader-2026-07-21.md`; post-window anchors, final
+audits, and the final physical rollback/restore remain due August 21 UTC.

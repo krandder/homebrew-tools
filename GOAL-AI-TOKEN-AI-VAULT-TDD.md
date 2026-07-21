@@ -308,6 +308,11 @@ The clean 30-day window is pinned to release
 `6201b1920093-f8bd4e418821` from
 2026-07-22 through
 2026-08-20 UTC, with the final gate eligible on 2026-08-21 UTC.
+The existing Farol timer then ran this final pin unattended at 18:00 UTC on
+July 21. Its linked schema-3 leader record passed exact release verification
+and publication with zero rate-limit telemetry; this proves scheduler
+activation but cannot count toward the soak because July 21 contains earlier
+releases and manual records.
 
 The immutable release now includes a fail-closed live-canary runner. It requires
 an explicit designation for a non-human `canary-*` Claude profile,

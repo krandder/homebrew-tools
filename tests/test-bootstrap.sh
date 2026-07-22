@@ -100,7 +100,7 @@ check "s3: second run upgrades, not installs" bash -c "[ \$(grep -c 'brew instal
 
 # --- scenario 4: no brew → clear error, nonzero ------------------------------
 S4="$TMP/s4"; mkdir -p "$S4"
-if PATH="$S4:/usr/bin:/bin" bash "$BOOTSTRAP" > "$S4/out.log" 2>&1; then
+if PATH="$S4:/usr/bin:/bin" BREW_PROBE_PATHS="" bash "$BOOTSTRAP" > "$S4/out.log" 2>&1; then
     echo "FAIL s4: should fail without brew"; FAIL=$((FAIL+1))
 else
     PASS=$((PASS+1)); echo "ok   s4: fails cleanly without brew"

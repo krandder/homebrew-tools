@@ -37,7 +37,7 @@ say "ai-token bootstrap"
 #    often lack `brew shellenv`, so PATH alone is not enough. Homebrew itself
 #    needs an interactive sudo install — the only step we cannot automate.
 if ! command -v brew >/dev/null 2>&1; then
-    for B in ${BREW_BIN:-} ${BREW_PROBE_PATHS:-/opt/homebrew/bin/brew /usr/local/bin/brew /home/linuxbrew/.linuxbrew/bin/brew}; do
+    for B in ${BREW_BIN:-} ${BREW_PROBE_PATHS-/opt/homebrew/bin/brew /usr/local/bin/brew /home/linuxbrew/.linuxbrew/bin/brew}; do
         [ -n "$B" ] && [ -x "$B" ] && PATH="$(dirname "$B"):$PATH" && break
     done
     hash -r 2>/dev/null || true

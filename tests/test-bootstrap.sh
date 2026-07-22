@@ -100,12 +100,17 @@ check "s3: second run upgrades, not installs" bash -c "[ \$(grep -c 'brew instal
 
 # --- scenario 4: no brew → clear error, nonzero ------------------------------
 S4="$TMP/s4"; mkdir -p "$S4"
-if PATH="$S4:/usr/bin:/bin" bash "$BOOTSTRAP" > "$S4/out.log" 2>&1; then
+if PATH="$S4:/usr/bin:/bin" BREW_PROBE_PATHS="" bash "$BOOTSTRAP" > "$S4/out.log" 2>&1; then
     echo "FAIL s4: should fail without brew"; FAIL=$((FAIL+1))
 else
     PASS=$((PASS+1)); echo "ok   s4: fails cleanly without brew"
 fi
 check "s4: prints homebrew install hint" grep -q "Homebrew not found" "$S4/out.log"
+
+# --- scenario 5: brew off PATH (ssh/non-login shell) via BREW_BIN ------------
+S5="$TMP/s5"; mkdir -p "$S5"; make_brew "$S5" installed
+PATH="/usr/bin:/bin" BREW_BIN="$S5/brew" bash "$BOOTSTRAP" > "$S5/out.log" 2>&1
+check "s5: works with brew off PATH via BREW_BIN" grep -q "ready: claude-token 3.0.1" "$S5/out.log"
 
 echo
 echo "bootstrap tests: $PASS passed, $FAIL failed"

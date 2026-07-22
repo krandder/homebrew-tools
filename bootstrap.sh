@@ -33,8 +33,15 @@ die()  { printf '  ✗ %s\n' "$*" >&2; exit 1; }
 
 say "ai-token bootstrap"
 
-# 1) brew must exist. Homebrew itself needs an interactive sudo install, so
-#    we print the exact line and stop — the only step we cannot automate.
+# 1) brew must exist. Probe standard prefixes too: non-interactive/ssh shells
+#    often lack `brew shellenv`, so PATH alone is not enough. Homebrew itself
+#    needs an interactive sudo install — the only step we cannot automate.
+if ! command -v brew >/dev/null 2>&1; then
+    for B in ${BREW_BIN:-} ${BREW_PROBE_PATHS-/opt/homebrew/bin/brew /usr/local/bin/brew /home/linuxbrew/.linuxbrew/bin/brew}; do
+        [ -n "$B" ] && [ -x "$B" ] && PATH="$(dirname "$B"):$PATH" && break
+    done
+    hash -r 2>/dev/null || true
+fi
 if ! command -v brew >/dev/null 2>&1; then
     die "Homebrew not found. Install it first (one line), then re-run this bootstrap:
      /bin/bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\""

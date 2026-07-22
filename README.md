@@ -2,6 +2,22 @@
 
 Personal Homebrew tap for useful CLI tools.
 
+## Install anything (one line, any machine state)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/krandder/homebrew-tools/main/bootstrap.sh | bash
+```
+
+Idempotent: handles fresh machines, existing brew installs, and legacy
+raw-script installs (old `~/.local/bin/*-token` files are moved aside to
+`*.pre-brew-backup` if they shadow the brew shims). Optional follower
+onboarding in the same line:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/krandder/homebrew-tools/main/bootstrap.sh | \
+  bash -s -- --token <T> --user <name> [--tool claude]
+```
+
 ## Available Formulae
 
 ### `ai-token` (replaces `claude-token` and `codex-token`)

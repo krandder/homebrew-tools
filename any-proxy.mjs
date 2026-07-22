@@ -27,6 +27,10 @@ const COOLDOWN_429_S = 1800;
 const COOLDOWN_5XX_S = 300;
 const MIN_FRESH_MS = 60_000;
 const MAX_TRIES = 3;
+// wedge fix (2026-07-22): an upstream that accepts but never answers parked
+// requests forever; retried clients stacked sockets until the listener wedged.
+const UPSTREAM_TIMEOUT_MS = Number(process.env.CLAUDE_PROXY_UPSTREAM_TIMEOUT_MS || 120_000);
+const REQUEST_BUDGET_MS = Number(process.env.CLAUDE_PROXY_REQUEST_BUDGET_MS || 900_000);
 
 const HOP_BY_HOP = new Set([
   "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
@@ -151,12 +155,23 @@ function upstreamHeaders(reqHeaders, token) {
 }
 
 async function forward(req, body, token) {
-  return fetch(UPSTREAM + req.url, {
-    method: req.method,
-    headers: upstreamHeaders(req.headers, token),
-    body,
-    redirect: "manual",
-  });
+  // The timeout covers waiting for the upstream RESPONSE HEADERS only; once
+  // headers arrive the timer is cleared and the body streams untimed (legit
+  // Anthropic streams run 10+ min). An abort surfaces as a fetch throw ->
+  // upstream-error failover to the next profile, same as any fetch error.
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), UPSTREAM_TIMEOUT_MS);
+  try {
+    return await fetch(UPSTREAM + req.url, {
+      method: req.method,
+      headers: upstreamHeaders(req.headers, token),
+      body,
+      redirect: "manual",
+      signal: ctrl.signal,
+    });
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function relayHeaders(up) {
@@ -295,7 +310,26 @@ async function handleAny(req, res) {
   log("any", req.method, req.url, status);
 }
 
+let inflight = 0;
+const startedMs = Date.now();
+
 const server = http.createServer((req, res) => {
+  if (req.url === "/healthz") {
+    // cheap liveness for watchdogs/wrappers: answered without touching
+    // profile selection or any state file.
+    const body = JSON.stringify({ ok: true, inflight, uptime_s: Math.floor((Date.now() - startedMs) / 1000) });
+    res.writeHead(200, { "content-type": "application/json", "content-length": Buffer.byteLength(body) });
+    res.end(body);
+    return;
+  }
+  inflight++;
+  // hard per-request ceiling: even a never-ending stream is reaped, so a
+  // single request can never park a socket past the budget.
+  const budget = setTimeout(() => {
+    anyLog("request-budget", { url: req.url, ms: REQUEST_BUDGET_MS });
+    res.destroy();
+  }, REQUEST_BUDGET_MS);
+  res.on("close", () => clearTimeout(budget));
   handleAny(req, res).catch((err) => {
     try {
       const msg = `any-proxy: handler error: ${err.message}`;
@@ -303,6 +337,8 @@ const server = http.createServer((req, res) => {
       res.end(msg);
     } catch {}
     log("any", req.method, req.url, "502-handler");
-  });
+  }).finally(() => { inflight--; });
 });
+server.headersTimeout = 65_000;   // stalled client headers die
+server.requestTimeout = 300_000;  // stalled client bodies die
 server.listen(ANY_PORT, "127.0.0.1", () => console.log(`claude-any-proxy: ANY on 127.0.0.1:${ANY_PORT}`));

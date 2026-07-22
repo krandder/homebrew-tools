@@ -65,7 +65,9 @@ MOCK
 
 run_bootstrap() { # run_bootstrap <state-dir> [args...]   (never dies under set -e)
     local dir="$1"; shift
-    if PATH="$dir/prefix/bin:$dir:$PATH" bash "$BOOTSTRAP" "$@" > "$dir/out.log" 2>&1; then
+    # ISOLATION: mock dirs + coreutils only — the host's real PATH must never
+    # leak in (the de-shadow loop renames tools it can resolve; see s2 note).
+    if PATH="$dir/prefix/bin:$dir:/usr/bin:/bin" bash "$BOOTSTRAP" "$@" > "$dir/out.log" 2>&1; then
         return 0
     else
         echo "run_bootstrap FAILED ($dir):" >&2; cat "$dir/out.log" >&2; return 1
@@ -85,7 +87,10 @@ S2="$TMP/s2"; mkdir -p "$S2/.local/bin"; make_brew "$S2" installed
 # legacy raw-script install shadowing the brew shim
 printf '#!/bin/sh\necho claude-token 2.4.4\n' > "$S2/.local/bin/claude-token"
 chmod +x "$S2/.local/bin/claude-token"
-PATH="$S2/.local/bin:$S2:$PATH" bash "$BOOTSTRAP" > "$S2/out.log" 2>&1
+# ISOLATION: PATH must contain ONLY mock dirs + coreutils — never the host's
+# real PATH (2026-07-22: the de-shadow loop moved farol's real ~/.local/bin
+# ai-token/claude-token aside when the test inherited the host PATH).
+PATH="$S2/.local/bin:$S2:$S2/prefix/bin:/usr/bin:/bin" bash "$BOOTSTRAP" > "$S2/out.log" 2>&1
 check "s2: bootstrap exits 0 with legacy shadow" true
 check "s2: upgrade (not install) path" grep -q "brew upgrade ai-token" "$S2/calls.log"
 check "s2: legacy file moved to backup" test -f "$S2/.local/bin/claude-token.pre-brew-backup"

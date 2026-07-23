@@ -63,10 +63,12 @@ def free_port():
         return s.getsockname()[1]
 
 
-def post(port, path, payload):
+def post(port, path, payload, headers=None):
+    request_headers = {"content-type": "application/json"}
+    request_headers.update(headers or {})
     req = urllib.request.Request(
         f"http://127.0.0.1:{port}{path}", data=json.dumps(payload).encode(),
-        headers={"content-type": "application/json"}, method="POST")
+        headers=request_headers, method="POST")
     try:
         with urllib.request.urlopen(req, timeout=10) as r:
             return r.status, r.read()
@@ -107,6 +109,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         self.server.requests.append({
             "token": token, "path": self.path,
             "account_id": self.headers.get("chatgpt-account-id"),
+            "agent": self.headers.get("x-futarchy-agent"),
         })
         status, headers, body = self.server.responder(token, payload, self.server)
         self.send_response(status)
@@ -201,8 +204,9 @@ class ProxyCase(unittest.TestCase):
         self.proc.wait()
         shutil.rmtree(self.tmp, ignore_errors=True)
 
-    def post(self, path="/v1/messages", payload=None):
-        return post(self.port, path, payload if payload is not None else {"x": 1})
+    def post(self, path="/v1/messages", payload=None, headers=None):
+        return post(self.port, path, payload if payload is not None else {"x": 1},
+                    headers=headers)
 
 
 CLAUDE_USAGE_JSON = json.dumps({
@@ -354,6 +358,17 @@ class ClaudeAnyPoolTest(ProxyCase):
         self.assertEqual(sse["output_tokens"], 9,
                          "SSE output_tokens come from message_delta, not message_start")
         self.assertEqual(sse["cache_read"], 4)
+
+    def test_usage_tap_records_agent_without_forwarding_identity(self):
+        self.write_shared("meter", claude_profile(4, "AT-M"))
+        status, _body = self.post(
+            payload={"usage": 1},
+            headers={"authorization": "Bearer token-proxy-managed:cao-mnx-mm"})
+        self.assertEqual(status, 200)
+        record = wait_jsonl(self.statedir / "any-usage.jsonl", 1)[0]
+        self.assertEqual(record["agent"], "cao-mnx-mm")
+        self.assertIsNone(self.upstream.server.requests[-1]["agent"],
+                          "local accounting identity must not reach Anthropic")
 
     def test_429_failover_is_transparent_and_cools_profile(self):
         self.write_shared("quota", claude_profile(4, "AT-Q"))
@@ -540,6 +555,17 @@ class CodexAnyPoolTest(ProxyCase):
         self.assertEqual(records[0]["input_tokens"], 7,
                          "cached_tokens are subtracted from billable input")
         self.assertEqual(records[0]["cache_read"], 5)
+
+    def test_usage_tap_records_agent_without_forwarding_identity(self):
+        at = fake_jwt(int(time.time()) + 3600)
+        self.write_local("p1", at)
+        status, _body = self.post(
+            path="/responses",
+            headers={"x-futarchy-agent": "cao-ops-ci"})
+        self.assertEqual(status, 200)
+        record = wait_jsonl(self.profiles / "any-usage.jsonl", 1)[0]
+        self.assertEqual(record["agent"], "cao-ops-ci")
+        self.assertIsNone(self.upstream.server.requests[-1]["agent"])
 
     def test_shared_only_profile_serves(self):
         at = fake_jwt(int(time.time()) + 3600)

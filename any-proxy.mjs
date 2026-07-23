@@ -147,7 +147,8 @@ function upstreamHeaders(reqHeaders, token) {
   const headers = {};
   for (const [k, v] of Object.entries(reqHeaders)) {
     const lk = k.toLowerCase();
-    if (HOP_BY_HOP.has(lk) || lk === "authorization" || lk === "x-api-key" || lk === "host" || lk === "content-length") continue;
+    if (HOP_BY_HOP.has(lk) || lk === "authorization" || lk === "x-api-key" ||
+        lk === "x-futarchy-agent" || lk === "host" || lk === "content-length") continue;
     headers[lk] = v;
   }
   headers["authorization"] = `Bearer ${token}`;
@@ -186,7 +187,7 @@ function relayHeaders(up) {
   return outHeaders;
 }
 
-async function streamBack(res, up, profile, reqUrl) {
+async function streamBack(res, up, profile, agent, reqUrl) {
   res.writeHead(up.status, relayHeaders(up));
   // usage tap: buffer only billable message calls (small bodies) so per-request
   // token counts land in any-usage.jsonl with the TRUE serving profile.
@@ -198,7 +199,7 @@ async function streamBack(res, up, profile, reqUrl) {
     }
   }
   res.end();
-  if (tap) recordUsage(profile, Buffer.concat(tap).toString("utf8"), up.headers.get("content-type") || "");
+  if (tap) recordUsage(profile, agent, Buffer.concat(tap).toString("utf8"), up.headers.get("content-type") || "");
 }
 
 const USAGE_LOG = `${HOME}/.claude-token/any-usage.jsonl`;
@@ -238,16 +239,22 @@ function usageFromJSON(text) {
            cache_write_5m: w5, cache_write_1h: w1 };
 }
 
-function recordUsage(profile, text, contentType) {
+function recordUsage(profile, agent, text, contentType) {
   try {
     const u = contentType.includes("text/event-stream") ? usageFromSSE(text) : usageFromJSON(text);
     if (!u) return;
     appendFileSync(USAGE_LOG, JSON.stringify({
-      source: "claude-proxy", profile, ts: Date.now() / 1000, request_id: u.id,
+      source: "claude-proxy", profile, agent, ts: Date.now() / 1000, request_id: u.id,
       model: u.model, input_tokens: u.input_tokens, output_tokens: u.output_tokens,
       cache_read: u.cache_read, cache_write_5m: u.cache_write_5m, cache_write_1h: u.cache_write_1h,
     }) + "\n");
   } catch {}
+}
+
+function requestAgent(req) {
+  const auth = String(req.headers.authorization || req.headers["x-api-key"] || "");
+  const match = auth.match(/token-proxy-managed:([A-Za-z0-9._/-]{1,96})/);
+  return match ? match[1] : null;
 }
 
 function log(profile, method, path, status) {
@@ -257,6 +264,7 @@ function log(profile, method, path, status) {
 
 async function handleAny(req, res) {
   const body = await collectBody(req);
+  const agent = requestAgent(req);
   const tried = new Set();
   let lastErr = null;
   for (let attempt = 0; attempt < MAX_TRIES; attempt++) {
@@ -281,7 +289,7 @@ async function handleAny(req, res) {
       continue;
     }
     markUsed(pick.profile);
-    await streamBack(res, up, pick.profile, req.url);
+    await streamBack(res, up, pick.profile, agent, req.url);
     log(`any(${pick.profile})`, req.method, req.url, up.status);
     return;
   }

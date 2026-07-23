@@ -76,6 +76,60 @@ fi
 A probe without `--max-time` re-introduces the original bug one layer down:
 the wrapper itself parks on the wedged proxy.
 
+The probe ships as `bin/claude-any-probe.sh`:
+
+```bash
+claude-any-probe.sh <port> [timeout_s=2]
+```
+
+Exit 0 only when `/healthz` answers 200 with `ok:true` inside the timeout;
+exit 1 with a one-line stderr reason otherwise (refused, timeout, non-200,
+`ok:false`, invalid JSON). It fails closed, so it is safe to gate
+`ANTHROPIC_BASE_URL` selection on it.
+
+## The blindness class
+
+The incident's deepest defect was not the wedge itself but that the system
+was *observability blind* at three independent levels. Each level now has a
+named enforcement mechanism and a named test.
+
+1. **Supervisors see death, not hangs.** launchd/systemd supervise pids; a
+   wedged process holding an open LISTEN socket is a perfectly healthy pid,
+   so the supervisor never intervenes. Layers 1–2 above (`/healthz` +
+   `bin/proxy-watchdog.sh`) provide the semantic signal and the reaction;
+   and the pairing is now *by construction*: `claude-token proxy-install`
+   installs `claude-any-proxy.service` only together with
+   `claude-any-proxy-watchdog.service` (`Type=oneshot`) and
+   `claude-any-proxy-watchdog.timer` (`OnBootSec=30`, `OnUnitActiveSec=30`,
+   running `bin/proxy-watchdog.sh --once claude-any-proxy
+   http://127.0.0.1:7800/healthz`). If `bin/proxy-watchdog.sh` is missing,
+   the install warns loudly and exits 3 before writing anything — a partial,
+   unsupervised install is refused outright. Tested by
+   `tests/test_proxy_install_pairing.py` (pairing, watchdog ExecStart URL,
+   refusal + cleanup, idempotent re-install).
+
+2. **A transport probe is not a semantic probe.** A completed TCP handshake
+   proves the kernel holds a socket; it says nothing about the process
+   serving requests. The old wrapper check —
+   `(exec 3<>/dev/tcp/127.0.0.1/PORT)` — stayed green against the wedged
+   proxy and kept routing traffic into the pile-up.
+   `bin/claude-any-probe.sh` (above) is the semantic replacement.
+   `tests/test-claude-any-probe.sh` makes the contrast non-vacuous: against
+   a blackhole listener (accepts TCP, never answers) the old check exits 0
+   — blind — while the probe exits 1 within its timeout — caught; the same
+   file covers closed ports, `ok:false`, and garbage bodies.
+
+3. **An unsupervised deployment was possible at all.** Nothing failed when
+   a proxy existed with no health supervision attached; the gap surfaced as
+   an incident instead of a red test. `tests/test_supervision_coverage.py`
+   is the meta-guardrail: it audits ai-token's proxy-install path at grep
+   level and fails whenever an emitted systemd unit has neither a
+   `<name>-watchdog` pairing in the same code path nor an explicit
+   `# supervision-exempt: <name>` comment. The known remaining gap — the
+   per-profile `claude-token-proxy` (ai-token's generated `proxy.mjs`,
+   7801+) has no `/healthz` yet — is encoded as exactly such an exemption
+   comment in ai-token, so the audit names the gap instead of ignoring it.
+
 ## Ops: installing the watchdog
 
 ### launchd (macOS)

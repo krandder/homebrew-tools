@@ -17,7 +17,7 @@ def has_symlink_component(path):
 
 class WrapperFilesTest(unittest.TestCase):
     def test_formula_version_pins_current_release(self):
-        self.assertIn('version "3.2.3"', FORMULA)
+        self.assertIn('version "3.2.4"', FORMULA)
 
     def test_formula_bin_sources_are_real_files(self):
         names = re.findall(r'bin\.install "([^"]+)"', FORMULA)

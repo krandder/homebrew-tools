@@ -2636,12 +2636,29 @@ JS
 claude_cmd_proxy_install() {
     [ "$(uname)" = Linux ] || die "proxy-install: requires Linux (systemd --user)"
     need_cmd systemctl
-    local bin unit_dir unit
+    local bin repo unit_dir watchdog rt
     bin="$AI_TOKEN_SELF"
+    repo="$(CDPATH= cd -- "$(dirname -- "$bin")" && pwd)"
     unit_dir="$CLAUDE_TOKEN_REAL_HOME/.config/systemd/user"
-    unit="$unit_dir/claude-token-proxy.service"
+    watchdog="$repo/bin/proxy-watchdog.sh"
+    # Anti-blindness invariant (2026-07-22): a proxy must never exist without
+    # semantic supervision. When the watchdog script is missing, REFUSE the
+    # install outright — a partial install is exactly the unsupervised-proxy
+    # defect that made the wedge invisible.
+    if [ ! -x "$watchdog" ]; then
+        say "proxy-install: REFUSING install: $watchdog not found (watchdog pairing is mandatory)"
+        say "proxy-install: no units written, systemd untouched; restore bin/proxy-watchdog.sh and re-run"
+        exit 3
+    fi
+    [ -f "$repo/any-proxy.mjs" ] || die "proxy-install: $repo/any-proxy.mjs not found"
+    rt="$(proxy_runtime || true)"
+    if [ -z "$rt" ]; then
+        rt="$CLAUDE_TOKEN_REAL_HOME/.bun/bin/bun"
+        say "proxy-install: warning: no JS runtime found now; claude-any-proxy.service will use canonical $rt"
+    fi
     mkdir -p "$unit_dir"
-    atomic_state_text literal "$unit" entrypoint 0644 <<EOF
+    # supervision-exempt: claude-token-proxy (no healthz yet, tracked)
+    atomic_state_text literal "$unit_dir/claude-token-proxy.service" entrypoint 0644 <<EOF
 [Unit]
 Description=claude-token proxy (per-profile fresh OAuth token injection)
 After=network-online.target
@@ -2655,10 +2672,52 @@ RestartSec=2
 [Install]
 WantedBy=default.target
 EOF
+    atomic_state_text literal "$unit_dir/claude-any-proxy.service" entrypoint 0644 <<EOF
+[Unit]
+Description=claude any-proxy (ANY-port per-request failover, 127.0.0.1:7800)
+After=network-online.target
+
+[Service]
+Environment=PATH=$(dirname "$bin"):/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=$rt $repo/any-proxy.mjs $PROXY_REGISTRY $CLAUDE_SHARED_DIR
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=default.target
+EOF
+    # The watchdog pairs with claude-any-proxy by construction: the proxy's
+    # /healthz is the semantic liveness signal (a hung-but-listening process
+    # is invisible to systemd's pid supervision), so the timer fires a probe
+    # pass every 30s and the watchdog restarts the proxy when health dies.
+    atomic_state_text literal "$unit_dir/claude-any-proxy-watchdog.service" entrypoint 0644 <<EOF
+[Unit]
+Description=claude any-proxy watchdog (single /healthz pass, timer-driven)
+After=claude-any-proxy.service
+
+[Service]
+Type=oneshot
+ExecStart=$watchdog --once claude-any-proxy http://127.0.0.1:7800/healthz
+EOF
+    atomic_state_text literal "$unit_dir/claude-any-proxy-watchdog.timer" entrypoint 0644 <<EOF
+[Unit]
+Description=claude any-proxy watchdog timer (semantic health every 30s)
+
+[Timer]
+OnBootSec=30
+OnUnitActiveSec=30
+
+[Install]
+WantedBy=timers.target
+EOF
     systemctl --user daemon-reload
     systemctl --user enable --now claude-token-proxy.service >/dev/null 2>&1 || true
     systemctl --user restart claude-token-proxy.service
+    systemctl --user enable --now claude-any-proxy.service >/dev/null 2>&1 || true
+    systemctl --user restart claude-any-proxy.service
+    systemctl --user enable --now claude-any-proxy-watchdog.timer
     say "token proxy installed (systemd --user, claude-token-proxy.service)"
+    say "any-proxy installed, watchdog paired (claude-any-proxy.service + claude-any-proxy-watchdog.timer)"
     say "registry: $(cat "$PROXY_REGISTRY" 2>/dev/null || echo '{}')"
 }
 

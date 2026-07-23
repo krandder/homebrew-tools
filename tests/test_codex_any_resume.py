@@ -55,7 +55,8 @@ class CodexAnyResumeTest(unittest.TestCase):
         self.wrapper = self.home / "codex-any"
         self.wrapper.write_text(WRAPPER.read_text())
         self.wrapper.chmod(self.wrapper.stat().st_mode | stat.S_IXUSR)
-        self.env = {"HOME": str(self.home), "PATH": f"{bin_dir}:{os.environ['PATH']}"}
+        self.env = {"HOME": str(self.home), "PATH": f"{bin_dir}:{os.environ['PATH']}",
+                    "FLEET_ACTOR": "cao-ops-ci"}
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -89,7 +90,12 @@ class CodexAnyResumeTest(unittest.TestCase):
         self.assertEqual(first.returncode, 0, first_err)
         self.assertEqual(second.returncode, 0, second_err)
         self.assertEqual(json.loads((self.home / ".codex-any/auth.json").read_text())["tokens"]["refresh_token"], "sentinel-follower")
-        self.assertIn("model_provider", (self.home / ".codex-any/config.toml").read_text())
+        config = (self.home / ".codex-any/config.toml").read_text()
+        self.assertIn('model = "gpt-5.6-terra"', config)
+        self.assertIn("model_provider", config)
+        self.assertIn(
+            'env_http_headers = { "X-Futarchy-Agent" = "FUTARCHY_AGENT_NAME" }',
+            config)
 
 
 if __name__ == "__main__":

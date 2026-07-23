@@ -67,6 +67,7 @@ class ClaudeAnyTest(unittest.TestCase):
             f"PATH={self.stubbin}:/usr/bin:/bin",
             f"CAP_DIR={self.cap}",
             f"AI_ANY_PROXY_PORT={port}",
+            "FLEET_ACTOR=cao-mnx-mm",
             "CLAUDECODE=1",
             "CLAUDE_CODE_SSE_PORT=9",
             "CLAUDE_CODE_USE_BEDROCK=1",
@@ -104,7 +105,8 @@ class ClaudeAnyTest(unittest.TestCase):
         env, argv = self.captured("claude.real")
         self.assertEqual(argv, ["--version"])
         self.assertEqual(env.get("ANTHROPIC_BASE_URL"), f"http://127.0.0.1:{port}")
-        self.assertEqual(env.get("ANTHROPIC_AUTH_TOKEN"), "token-proxy-managed")
+        self.assertEqual(env.get("ANTHROPIC_AUTH_TOKEN"),
+                         "token-proxy-managed:cao-mnx-mm")
         self.assertEqual(env.get("CLAUDE_CONFIG_DIR"), f"{self.home}/.claude")
         self.assert_env_hygiene(env)
 

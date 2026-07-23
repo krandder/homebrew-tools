@@ -17,7 +17,13 @@ ANY_URL="http://127.0.0.1:$ANY_PORT"
 if (exec 3<>"/dev/tcp/127.0.0.1/$ANY_PORT") 2>/dev/null; then
   exec 3>&- 3<&-
   export ANTHROPIC_BASE_URL="$ANY_URL"
-  export ANTHROPIC_AUTH_TOKEN=token-proxy-managed
+  agent="${FLEET_ACTOR:-}"
+  if [[ -z "$agent" && -n "${TMUX:-}" ]] && command -v tmux >/dev/null 2>&1; then
+    agent="$(tmux display-message -p '#S' 2>/dev/null || :)"
+  fi
+  agent="${agent//[^A-Za-z0-9._\/-]/_}"
+  agent="${agent:0:96}"
+  export ANTHROPIC_AUTH_TOKEN="token-proxy-managed${agent:+:$agent}"
   CLAUDE_BIN="$REAL_HOME/bin/claude.real"
   [ -x "$CLAUDE_BIN" ] || CLAUDE_BIN="$(command -v claude)"
   exec env "$CLAUDE_BIN" "$@"

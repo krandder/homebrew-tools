@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The ai-token formula must ship exactly the any-proxies this repo ships.
 
-For each *-any-proxy.mjs resource in Formula/ai-token.rb: the pinned URL
+For each changed -any wrapper/proxy resource in Formula/ai-token.rb: the pinned URL
 commit must be reachable in the local git object store, the pinned sha256
 must match the file at that commit, and — the drift guard — it must also
 match the file at HEAD. A proxy change that lands without a formula re-pin
@@ -16,7 +16,8 @@ import subprocess
 import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-PROXIES = ("any-proxy.mjs", "codex-any-proxy.mjs", "kimi-any-proxy.mjs")
+RESOURCES = ("claude-any", "codex-any",
+             "any-proxy.mjs", "codex-any-proxy.mjs", "kimi-any-proxy.mjs")
 
 
 def git(*args):
@@ -28,10 +29,10 @@ def sha256(data):
 
 
 class FormulaAnyProxyResourcesTest(unittest.TestCase):
-    def test_proxy_resources_pin_the_repo_proxies(self):
+    def test_any_resources_pin_the_repo_files(self):
         formula = (ROOT / "Formula" / "ai-token.rb").read_text()
-        for name in PROXIES:
-            with self.subTest(proxy=name):
+        for name in RESOURCES:
+            with self.subTest(resource=name):
                 match = re.search(
                     r'resource "' + re.escape(name) + r'" do\s*'
                     r'url "https://raw\.githubusercontent\.com/krandder/homebrew-tools/([0-9a-f]{40})/'

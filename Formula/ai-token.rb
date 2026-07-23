@@ -2,19 +2,19 @@ class AiToken < Formula
   desc "One credential-sync tool for AI CLIs (claude, codex, kimi) via the vault"
   homepage "https://github.com/krandder/homebrew-tools"
   url "https://raw.githubusercontent.com/krandder/homebrew-tools/00a0d114a984e0545e047e8ad425db9ad924f249/ai-token"
-  version "3.2.4"
+  version "3.2.5"
   sha256 "cd64afacc82bff575ffee3cc4566d9b38c0148182b0e6034ce54e44f6d86552d"
 
   # The whole formula installs from the same immutable merge commit so all
   # files are guaranteed to be available together.
   resource "claude-any" do
-    url "https://raw.githubusercontent.com/krandder/homebrew-tools/21afc476333226d97192515824851e79458a35f1/claude-any"
-    sha256 "539537f5ba283d095b0faf5ebe7e965893297e572c4a2bff481186e082a75a70"
+    url "https://raw.githubusercontent.com/krandder/homebrew-tools/8c0f8087e37d1828f57b6a085fbdd712f53ded64/claude-any"
+    sha256 "060569385c0acd3e9f92a9c738a4f0c1ad956dae6106d6ebe3301eee582aab8f"
   end
 
   resource "codex-any" do
-    url "https://raw.githubusercontent.com/krandder/homebrew-tools/97d2a60ac5e04ce3e1dcde049fb8e8cd239b2002/codex-any"
-    sha256 "4270eab817258c4d227ae75830b7cadce342094c8312d019bcda3baae9bc3068"
+    url "https://raw.githubusercontent.com/krandder/homebrew-tools/8c0f8087e37d1828f57b6a085fbdd712f53ded64/codex-any"
+    sha256 "e4dbc6b348c5de5dcd78088a54719cd55ce949a7fb62e1c23b10e199e410f52e"
   end
 
   resource "kimi-any" do
@@ -53,13 +53,13 @@ class AiToken < Formula
   end
 
   resource "any-proxy.mjs" do
-    url "https://raw.githubusercontent.com/krandder/homebrew-tools/c022e590eaafcdc43b929f074947117c3489311e/any-proxy.mjs"
-    sha256 "659d2c42a2e2dc63147211376871403c15e4b07b4ed3663c6c0f6be0a8ee9873"
+    url "https://raw.githubusercontent.com/krandder/homebrew-tools/8c0f8087e37d1828f57b6a085fbdd712f53ded64/any-proxy.mjs"
+    sha256 "541e9e9b731040f579061e595e30af640f9ab3d5cdbf2085ce62b25e9a74bde8"
   end
 
   resource "codex-any-proxy.mjs" do
-    url "https://raw.githubusercontent.com/krandder/homebrew-tools/6a97f8803451f68efeed705233011ead41f53f53/codex-any-proxy.mjs"
-    sha256 "cbca06a8e1752d796632bda0d9df2cad8c746f28392faf45d92c13b2a89375cc"
+    url "https://raw.githubusercontent.com/krandder/homebrew-tools/8c0f8087e37d1828f57b6a085fbdd712f53ded64/codex-any-proxy.mjs"
+    sha256 "ff2ade96822b8d38d0186ab364abd9265c1b0c90b74953e13ad38386e459365c"
   end
 
   resource "kimi-any-proxy.mjs" do

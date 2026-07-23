@@ -13,6 +13,12 @@ fi
 exec 3>&- 3<&-
 
 mkdir -p "$ANY_HOME"
+agent="${FLEET_ACTOR:-}"
+if [[ -z "$agent" && -n "${TMUX:-}" ]] && command -v tmux >/dev/null 2>&1; then
+  agent="$(tmux display-message -p '#S' 2>/dev/null || :)"
+fi
+agent="${agent//[^A-Za-z0-9._\/-]/_}"
+export FUTARCHY_AGENT_NAME="${agent:0:96}"
 if [[ "${1:-}" == "resume" && -n "${2:-}" ]]; then
   rollout="$(find "$ANY_HOME/sessions" -type f -name "*${2}.jsonl" -print -quit 2>/dev/null || :)"
   if [[ -z "$rollout" ]]; then
@@ -51,12 +57,14 @@ best_auth['tokens']['refresh_token'] = 'sentinel-follower'
 json.dump(best_auth, open(os.path.expanduser('~/.codex-any/auth.json'), 'w'), indent=2)
 PY
 cat > "$ANY_HOME/config.toml" <<'TOML'
+model = "gpt-5.6-terra"
 model_provider = "any"
 
 [model_providers.any]
 name = "any-proxy"
 base_url = "http://127.0.0.1:7810"
 wire_api = "responses"
+env_http_headers = { "X-Futarchy-Agent" = "FUTARCHY_AGENT_NAME" }
 TOML
 flock -u 9
 exec 9>&-
